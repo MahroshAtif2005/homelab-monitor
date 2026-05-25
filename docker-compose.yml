@@ -1,0 +1,27 @@
+services:
+  gpu-monitor:
+    build: .
+    image: gpu-monitor:latest
+    container_name: gpu-monitor
+    restart: unless-stopped
+    # Share the host PID namespace so we can map GPU PIDs -> containers via /proc.
+    pid: host
+    ports:
+      # host:container — exposed on 0.0.0.0 so it is reachable over LAN / VPN.
+      - "9800:8099"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility   # injects nvidia-smi into the container
+      SAMPLE_INTERVAL: "10"                 # seconds between samples
+      RETENTION_DAYS: "180"                 # how long history is kept
+    volumes:
+      # Read-only: used only to translate container IDs into friendly names.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/data                        # SQLite history persists here
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

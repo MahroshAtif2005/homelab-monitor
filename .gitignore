@@ -1,0 +1,7 @@
+data/
+*.db
+*.db-wal
+*.db-shm
+static/chart.min.js
+__pycache__/
+*.pyc
