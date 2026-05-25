@@ -1,129 +1,149 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GPU Monitor</title>
+<title>HomeLab GPU & AI Monitor</title>
 <script src="/static/chart.min.js" onerror="this.remove();var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';document.head.appendChild(s)"></script>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mut:#8b949e;--accent:#d29922;--free:#21262d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);
-font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-.wrap{max-width:1120px;margin:0 auto;padding:24px 18px 60px}
-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
-h1{font-size:22px;margin:0}.live{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:13px}
-.pulse{width:9px;height:9px;border-radius:50%;background:#3fb950;box-shadow:0 0 0 0 #3fb95066;animation:p 2s infinite}
+:root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mut:#8b949e;--accent:#d29922;--free:#21262d;
+--crit:#f85149;--warn:#d29922;--ok:#3fb950;--info:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1140px;margin:0 auto;padding:24px 18px 70px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-size:22px;margin:0}.ver{color:var(--mut);font-size:12px;border:1px solid var(--bd);border-radius:20px;padding:1px 9px}
+.live{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-left:auto}
+.pulse{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:p 2s infinite}
 @keyframes p{0%{box-shadow:0 0 0 0 #3fb95066}70%{box-shadow:0 0 0 8px #3fb95000}100%{box-shadow:0 0 0 0 #3fb95000}}
-.sub{color:var(--mut);margin:0 0 18px;font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:16px 0}
-.kpi{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px 16px}
-.kpi .v{font-size:25px;font-weight:700}.kpi .l{color:var(--mut);font-size:12px;margin-top:2px}
-.kpi .s{font-size:12px;margin-top:3px;color:var(--mut)}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px 20px;margin:18px 0}
-.card h2{font-size:15px;margin:0 0 14px;font-weight:600}
-.chartbox{position:relative;height:320px;width:100%}
-.chartbox.short{height:190px}
+.sub{color:var(--mut);margin:4px 0 18px;font-size:13.5px}
+h2{font-size:14px;margin:0 0 13px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:17px 19px;margin:16px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:11px}
+.kpi{background:#0d1117;border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.kpi .v{font-size:22px;font-weight:700}.kpi .l{color:var(--mut);font-size:11.5px;margin-top:2px}.kpi .s{font-size:11.5px;color:var(--mut);margin-top:3px}
+.ins{display:flex;gap:11px;padding:11px 13px;border-radius:9px;margin-bottom:9px;border:1px solid var(--bd);background:#0d1117}
+.ins:last-child{margin-bottom:0}.ins .ic{font-size:17px;line-height:1.3}.ins .t{font-weight:600}.ins .d{color:var(--mut);font-size:13px}
+.ins.critical{border-left:3px solid var(--crit)}.ins.warning{border-left:3px solid var(--warn)}
+.ins.ok{border-left:3px solid var(--ok)}.ins.info{border-left:3px solid var(--info)}
+.bar{display:flex;height:30px;border-radius:7px;overflow:hidden;border:1px solid var(--bd);background:var(--free)}
+.bar div{height:100%}
+.dbar{height:9px;border-radius:4px;background:var(--free);overflow:hidden;margin-top:5px}.dbar div{height:100%}
+table{width:100%;border-collapse:collapse;font-size:13.5px}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--bd)}
+th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:middle}
+.mini{display:inline-block;height:8px;border-radius:3px;vertical-align:middle}
+.chartbox{position:relative;height:300px;width:100%}.chartbox.short{height:180px}
 .ranges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.rb{background:var(--card);border:1px solid var(--bd);color:var(--mut);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:13px}
-.rb.on{background:#1f6feb22;border-color:#1f6feb;color:#fff}
-.spacer{flex:1}.tg{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}
-.nowbar{display:flex;height:30px;border-radius:7px;overflow:hidden;border:1px solid var(--bd);background:var(--free)}
-.nowbar div{height:100%}
-table{width:100%;border-collapse:collapse;font-size:13.5px}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd)}
-th{color:var(--mut);font-weight:600}
-td .mini{display:inline-block;height:8px;border-radius:3px;vertical-align:middle}
-.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:middle}
-.cap{color:var(--mut);font-size:12px;margin-top:10px}
+.rb{background:#0d1117;border:1px solid var(--bd);color:var(--mut);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:13px}
+.rb.on{background:#1f6feb22;border-color:#1f6feb;color:#fff}.spacer{flex:1}
+.tg{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
+.cap{color:var(--mut);font-size:12px;margin-top:9px}.pill{font-size:11px;color:var(--mut);border:1px solid var(--bd);border-radius:5px;padding:1px 6px}
 a{color:#58a6ff}
 </style></head><body><div class="wrap">
-<header><h1>GPU Monitor</h1><span class="live"><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
-<p class="sub">Universal NVIDIA GPU monitor — every process/container using the GPU is discovered automatically.</p>
+<header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
+<span class="live"><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
+<p class="sub">GPU &amp; local-AI first — see which <b>model</b> and <b>service</b> is eating your VRAM, plus whole-host health at a glance. Every GPU process is discovered automatically.</p>
 
-<div class="grid" id="kpis"></div>
+<div class="card"><h2>💡 Insights &amp; recommendations</h2><div id="insights"></div></div>
 
-<div class="card">
-<h2>Using the GPU right now</h2>
-<div class="nowbar" id="nowbar"></div>
-<div style="margin-top:14px"><table><thead><tr><th>Service</th><th>VRAM</th><th style="width:45%"></th></tr></thead><tbody id="nowtbl"></tbody></table></div>
+<div class="card"><h2>🖥️ Host health</h2>
+<div class="grid" id="hostkpis"></div>
+<div id="disks" style="margin-top:14px"></div>
 </div>
 
-<div class="card">
-<div class="ranges">
-<button class="rb" data-r="1h">1h</button><button class="rb" data-r="6h">6h</button>
-<button class="rb" data-r="24h">24h</button><button class="rb" data-r="7d">7d</button>
-<button class="rb" data-r="30d">30d</button><button class="rb" data-r="all">All</button>
-<span class="spacer"></span>
-<label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
+<div class="cols">
+<div class="card"><h2>🎮 GPU right now</h2>
+<div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
+<div style="margin:14px 0 6px;color:var(--mut);font-size:12px">VRAM allocation</div>
+<div class="bar" id="vrambar"></div>
+<table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
 </div>
+<div class="card"><h2>🧠 Models loaded now</h2><table><tbody id="modelstbl"></tbody></table>
+<p class="cap">Recognised servers: Ollama (live VRAM/model), vLLM, HF TGI, llama.cpp, Stable Diffusion, ComfyUI.</p></div>
 </div>
 
-<div class="card">
-<h2>VRAM by service over time</h2>
+<div class="card"><div class="ranges">
+<button class="rb" data-r="1h">1h</button><button class="rb" data-r="6h">6h</button><button class="rb" data-r="24h">24h</button>
+<button class="rb" data-r="7d">7d</button><button class="rb" data-r="30d">30d</button><button class="rb" data-r="all">All</button>
+<span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
+</div></div>
+
+<div class="card"><h2>📊 VRAM by service over time</h2>
 <div class="chartbox"><canvas id="vram"></canvas></div>
-<p class="cap">Stacked = VRAM each service holds. Gap to the dashed ceiling = free headroom. Bucketed to stay readable over any time range.</p>
+<p class="cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
+
+<div class="card"><h2>⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
+<div class="card"><h2>🖥️ Host CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
+
+<div class="cols">
+<div class="card"><h2>📋 Services (selected range)</h2><table><thead><tr><th>Service</th><th>Peak</th><th>Avg</th><th>% time</th></tr></thead><tbody id="sumtbl"></tbody></table></div>
+<div class="card"><h2>🧠 Models (selected range)</h2><table><thead><tr><th>Model</th><th>Server</th><th>Peak VRAM</th></tr></thead><tbody id="msumtbl"></tbody></table></div>
 </div>
 
-<div class="card">
-<h2>Utilization, power & temperature</h2>
-<div class="chartbox short"><canvas id="util"></canvas></div>
-</div>
-
-<div class="card">
-<h2>Summary for selected range</h2>
-<table><thead><tr><th>Service</th><th>Peak VRAM</th><th>Avg VRAM</th><th>% of time on GPU</th></tr></thead><tbody id="sumtbl"></tbody></table>
-</div>
-
-<p class="cap">Self-hosted &amp; open source. Sampling and retention are configurable via environment variables. Services are attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker API — no service is hardcoded.</p>
+<p class="cap">Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.
+Services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + Docker API — nothing hardcoded.</p>
 </div>
 <script>
-let R = localStorage.getItem('gm_range') || '6h';
-let vchart, uchart;
-
-function colorFor(name){
-  if(name==='system/other') return '#6b7280';
-  let h=0; for(const c of name) h=(h*31+c.charCodeAt(0))>>>0;
-  return `hsl(${h%360} 62% 56%)`;
-}
+let R = localStorage.getItem('hl_range') || '6h';
+let charts = {};
+const C = k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+function colorFor(n){ if(n==='system/other')return '#6b7280'; let h=0; for(const c of n) h=(h*31+c.charCodeAt(0))>>>0; return `hsl(${h%360} 62% 56%)`; }
 const fmtMB = v => v>=1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
-
-function fmtLabels(labels){
-  if(!labels.length) return [];
-  const multiday = (labels[labels.length-1]-labels[0]) > 2*86400;
-  return labels.map(t=>{const d=new Date(t*1000);
-    const hm=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    return multiday ? (d.getMonth()+1)+'/'+d.getDate()+' '+hm : hm;});
-}
+const fmtUp = s => {const d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0; return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;};
+const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
+const ICON={critical:'⛔',warning:'⚠️',ok:'✅',info:'ℹ️'};
+function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86400;
+  return L.map(t=>{const d=new Date(t*1000),hm=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  return md?(d.getMonth()+1)+'/'+d.getDate()+' '+hm:hm;});}
 
 async function load(){
-  let d; try{ d = await (await fetch('/api/data?range='+R)).json(); }
-  catch(e){ document.getElementById('lastup').textContent='offline'; return; }
-  const n=d.now, tot=d.mem_total;
-  document.getElementById('lastup').textContent = 'updated '+new Date().toLocaleTimeString();
+  let d; try{ d=await(await fetch('/api/data?range='+R)).json(); }catch(e){ document.getElementById('lastup').textContent='offline'; return; }
+  const n=d.now, H=n.host||{}, tot=d.mem_total;
+  document.getElementById('ver').textContent='v'+d.version;
+  document.getElementById('lastup').textContent='updated '+new Date().toLocaleTimeString();
 
-  // KPI tiles
-  const memPct=Math.round(n.mem_used/tot*100), top=(n.procs[0]||{});
-  document.getElementById('kpis').innerHTML=[
-    {v:fmtMB(n.mem_used)+' <span style="font-size:14px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:'VRAM in use',s:memPct+'% full'},
-    {v:Math.round(n.util)+'%',l:'GPU utilization'},
-    {v:Math.round(n.power)+' W',l:'Power draw'},
-    {v:Math.round(n.temp)+' °C',l:'Temperature'},
-    {v:top.service?top.service:'idle',l:'Top consumer now',s:top.mem?fmtMB(top.mem):''},
-    {v:fmtMB(d.peak_mem),l:'Peak VRAM ('+R+')'},
+  // insights
+  document.getElementById('insights').innerHTML = (d.insights||[]).map(i=>
+    `<div class="ins ${i.level}"><div class="ic">${ICON[i.level]||'•'}</div><div><div class="t">${i.title}</div><div class="d">${i.detail}</div></div></div>`).join('')
+    || '<div class="ins ok"><div class="ic">✅</div><div><div class="t">All good</div><div class="d">No issues detected.</div></div></div>';
+
+  // host KPIs
+  const ramPct = H.ram_total? Math.round(H.ram_used/H.ram_total*100):0;
+  document.getElementById('hostkpis').innerHTML=[
+    {v:Math.round(H.cpu||0)+'%',l:'CPU utilization',s:(H.cores||'?')+' cores'},
+    {v:ramPct+'%',l:'RAM used',s:fmtMB(H.ram_used||0)+' / '+fmtMB(H.ram_total||0)},
+    {v:(H.load1||0).toFixed(2),l:'Load (1m)',s:'of '+(H.cores||'?')+' cores'},
+    {v:fmtUp(H.uptime||0),l:'Uptime'},
+    {v:(H.ctemp||0)+' °C',l:'CPU/system temp'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  document.getElementById('disks').innerHTML=(H.disks||[]).map(dk=>
+    `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
+     <span>💾 ${dk.mount}</span><span style="color:var(--mut)">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
+     <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
 
-  // "right now" bar + table
-  const bar=document.getElementById('nowbar'); bar.innerHTML='';
-  n.procs.forEach(p=>{const seg=document.createElement('div');
-    seg.style.width=(p.mem/tot*100)+'%'; seg.style.background=colorFor(p.service);
-    seg.title=p.service+': '+fmtMB(p.mem); bar.appendChild(seg);});
+  // GPU KPIs + bar + now table
+  const memPct=Math.round(n.mem_used/tot*100), top=n.procs[0]||{};
+  document.getElementById('gpukpis').innerHTML=[
+    {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:'VRAM in use',s:memPct+'% full'},
+    {v:Math.round(n.util)+'%',l:'GPU util',s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const bar=document.getElementById('vrambar'); bar.innerHTML='';
+  n.procs.forEach(p=>{const s=document.createElement('div');s.style.width=(p.mem/tot*100)+'%';s.style.background=colorFor(p.service);s.title=p.service+': '+fmtMB(p.mem);bar.appendChild(s);});
   document.getElementById('nowtbl').innerHTML = n.procs.length? n.procs.map(p=>
-    `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${p.service}</td>`+
-    `<td>${fmtMB(p.mem)}</td><td><span class="mini" style="width:${Math.max(2,p.mem/tot*100)}%;background:${colorFor(p.service)}"></span></td></tr>`
-    ).join('') : '<tr><td colspan="3" style="color:var(--mut)">Nothing is using the GPU right now.</td></tr>';
+    `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${p.service}</td><td>${fmtMB(p.mem)}</td>
+     <td style="width:42%"><span class="mini" style="width:${Math.max(2,p.mem/tot*100)}%;background:${colorFor(p.service)}"></span></td></tr>`).join('')
+    : '<tr><td style="color:var(--mut)">GPU is idle.</td></tr>';
 
-  // summary table
+  // models now
+  document.getElementById('modelstbl').innerHTML = (n.models&&n.models.length)? n.models.map(m=>
+    `<tr><td><span class="dot" style="background:${colorFor(m.service)}"></span>${m.model}</td>
+     <td style="color:var(--mut)">${m.service}</td><td>${m.vram?fmtMB(m.vram):'<span class="pill">loaded</span>'}</td></tr>`).join('')
+    : '<tr><td style="color:var(--mut)">No model server is holding the GPU right now.</td></tr>';
+
+  // summaries
   document.getElementById('sumtbl').innerHTML = d.summary.length? d.summary.map(s=>
-    `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${s.service}</td>`+
-    `<td>${fmtMB(s.peak)}</td><td>${fmtMB(s.avg)}</td><td>${s.present}%</td></tr>`).join('')
-    : '<tr><td colspan="4" style="color:var(--mut)">No GPU activity recorded in this range yet.</td></tr>';
+    `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${s.service}</td><td>${fmtMB(s.peak)}</td><td>${fmtMB(s.avg)}</td><td>${s.present}%</td></tr>`).join('')
+    : '<tr><td style="color:var(--mut)">No GPU activity yet.</td></tr>';
+  document.getElementById('msumtbl').innerHTML = d.model_summary.length? d.model_summary.map(m=>
+    `<tr><td>${m.model}</td><td style="color:var(--mut)">${m.service}</td><td>${fmtMB(m.peak)}</td></tr>`).join('')
+    : '<tr><td colspan="3" style="color:var(--mut)">No per-model VRAM captured yet.</td></tr>';
 
   // charts
   const labels=fmtLabels(d.labels);
@@ -132,32 +152,42 @@ async function load(){
   ds.push({label:'system/other',data:d.other,backgroundColor:'#6b728088',borderColor:'#6b7280',borderWidth:1,fill:true,pointRadius:0,tension:.25,stack:'v'});
   ds.push({label:'capacity',data:labels.map(()=>tot),borderColor:'#e3b341',borderDash:[6,5],borderWidth:1.5,pointRadius:0,fill:false,stack:'cap'});
 
-  if(vchart) vchart.destroy();
-  vchart=new Chart(vram,{type:'line',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,
-    interaction:{mode:'index',intersect:false},
-    scales:{x:{grid:{color:'#21262d'},ticks:{color:'#8b949e',maxTicksLimit:10,autoSkip:true}},
-      y:{stacked:true,min:0,max:tot*1.02,grid:{color:'#21262d'},ticks:{color:'#8b949e',callback:v=>Math.round(v/1024)+'G'}}},
-    plugins:{legend:{labels:{color:'#e6edf3',boxWidth:12,filter:i=>i.text!=='capacity'}},
-      tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmtMB(c.parsed.y)}}}}});
+  // pressure + event overlay plugin
+  const evIdx=(d.events||[]).map(e=>{let best=0,bd=1e18; d.labels.forEach((t,i)=>{const dd=Math.abs(t-e.ts); if(dd<bd){bd=dd;best=i;}}); return {i:best,e};});
+  const overlay={id:'ov',beforeDraw(c){const {ctx,chartArea:a,scales:{x}}=c; if(!a)return;
+    const free=d.total.mem.map(m=>tot-m), thr=d.pressure_free_mb;
+    ctx.save(); ctx.fillStyle='#f8514922';
+    for(let i=0;i<free.length;i++){ if(free[i]<thr){const x0=x.getPixelForValue(i)-(x.getPixelForValue(1)-x.getPixelForValue(0))/2; ctx.fillRect(x0,a.top,(x.getPixelForValue(1)-x.getPixelForValue(0))||2,a.bottom-a.top);} }
+    evIdx.forEach(({i})=>{const px=x.getPixelForValue(i); ctx.strokeStyle='#f85149';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(px,a.top);ctx.lineTo(px,a.bottom);ctx.stroke();
+      ctx.fillStyle='#f85149';ctx.beginPath();ctx.moveTo(px-5,a.top);ctx.lineTo(px+5,a.top);ctx.lineTo(px,a.top+8);ctx.fill();});
+    ctx.restore();}};
 
-  if(uchart) uchart.destroy();
-  uchart=new Chart(util,{type:'line',data:{labels,datasets:[
+  mk('vram',{type:'line',data:{labels,datasets:ds},options:baseOpts(tot,'GB',v=>Math.round(v/1024)+'G',true),plugins:[overlay]});
+  mk('gpu2',{type:'line',data:{labels,datasets:[
     {label:'GPU util %',data:d.total.util,borderColor:'#4dabf7',backgroundColor:'#4dabf733',fill:true,pointRadius:0,tension:.3,yAxisID:'y'},
     {label:'Power W',data:d.total.power,borderColor:'#ff922b',borderWidth:1.5,pointRadius:0,tension:.3,yAxisID:'y1'},
-    {label:'Temp °C',data:d.total.temp,borderColor:'#f783ac',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}
-  ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-    scales:{x:{grid:{color:'#21262d'},ticks:{color:'#8b949e',maxTicksLimit:10,autoSkip:true}},
-      y:{position:'left',min:0,max:100,grid:{color:'#21262d'},ticks:{color:'#8b949e'}},
-      y1:{position:'right',min:0,grid:{drawOnChartArea:false},ticks:{color:'#8b949e'}}},
-    plugins:{legend:{labels:{color:'#e6edf3',boxWidth:12}}}}});
+    {label:'Temp °C',data:d.total.temp,borderColor:'#f783ac',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}]},
+    options:dualOpts(labels)});
+  const ramPctArr=d.total.ram_used.map((u,i)=>d.total.ram_total[i]?Math.round(u/d.total.ram_total[i]*100):0);
+  mk('host',{type:'line',data:{labels,datasets:[
+    {label:'CPU %',data:d.total.cpu,borderColor:'#3fb950',backgroundColor:'#3fb95033',fill:true,pointRadius:0,tension:.3,yAxisID:'y'},
+    {label:'RAM %',data:ramPctArr,borderColor:'#a371f7',borderWidth:1.5,pointRadius:0,tension:.3,yAxisID:'y'},
+    {label:'Load',data:d.total.load1,borderColor:'#e3b341',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}]},
+    options:dualOpts(labels,100)});
 }
+function baseOpts(max,unit,cb,stacked){return{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+  scales:{x:{grid:{color:'#21262d'},ticks:{color:'#8b949e',maxTicksLimit:10,autoSkip:true}},
+   y:{stacked:!!stacked,min:0,max:max*1.02,grid:{color:'#21262d'},ticks:{color:'#8b949e',callback:cb}}},
+  plugins:{legend:{labels:{color:'#e6edf3',boxWidth:12,filter:i=>i.text!=='capacity'}},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmtMB(c.parsed.y)}}}};}
+function dualOpts(labels,ymax){return{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+  scales:{x:{grid:{color:'#21262d'},ticks:{color:'#8b949e',maxTicksLimit:10,autoSkip:true}},
+   y:{position:'left',min:0,max:ymax||100,grid:{color:'#21262d'},ticks:{color:'#8b949e'}},
+   y1:{position:'right',min:0,grid:{drawOnChartArea:false},ticks:{color:'#8b949e'}}},
+  plugins:{legend:{labels:{color:'#e6edf3',boxWidth:12}}}};}
+function mk(id,cfg){ if(charts[id])charts[id].destroy(); charts[id]=new Chart(document.getElementById(id),cfg); }
 
-document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{
-  R=b.dataset.r; localStorage.setItem('gm_range',R);
-  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));
-  load();
-});
+document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
+  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));load();});
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
-load();
-setInterval(()=>{ if(document.getElementById('auto').checked) load(); }, 15000);
+load(); setInterval(()=>{if(document.getElementById('auto').checked)load();},15000);
 </script></body></html>
