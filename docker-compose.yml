@@ -16,11 +16,17 @@ services:
       RETENTION_DAYS: "180"                 # how long history is kept
       PRESSURE_FREE_MB: "2048"              # free VRAM below this counts as "pressure"
       HOST_ROOT: "/rootfs"                  # where host / is mounted (for disk stats)
+      # Tell jeepney where the host's systemd D-Bus socket is (mounted below).
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
       # WATCH_CONTAINERS: "ollama,immich_machine_learning"  # extra containers to scan for OOM
+      # WATCH_SERVICES: "tailscaled,sshd"   # always show these systemd units, even if vendor-shipped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # read container names / model APIs
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # container health, names & model APIs
       - /:/rootfs:ro                                    # read-only host fs for disk usage
       - ./data:/data                                    # SQLite history persists here
+      # systemd service health (optional): expose the host's D-Bus system socket
+      # read-only. Remove this line and the Services panel just shows "unavailable".
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
     deploy:
       resources:
         reservations:

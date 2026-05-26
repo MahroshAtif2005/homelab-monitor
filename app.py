@@ -8,12 +8,20 @@
   correlates who-lost-to-whom, then turns it into plain recommendations.
 - Reads host CPU / RAM / load / temperature / disk so you can see the whole
   box is healthy from one page, remotely.
+- Reports the health of every Docker container and of systemd services
+  (including the units you deploy yourself), so the page covers more than the GPU.
 - SQLite history, downsampled on read so any range stays fast & readable.
+
+Adding a new monitor (it's meant to be easy):
+  1. Write a `collect_<thing>()` that returns a small dict, e.g.
+     {"available": bool, "summary": {...}, "items": [...]}.
+  2. Populate it from `health_scan()` so the background thread keeps it fresh.
+  3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
 import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client
 from flask import Flask, request, jsonify
 
-VERSION      = "0.2.0"
+VERSION      = "0.3.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -49,6 +57,11 @@ DB.commit()
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "host": {}}
+# Current state of the "status" monitors (Docker + systemd). The background
+# collector refreshes these; /api/health just serves the cached snapshot.
+HEALTH = {"docker": None, "systemd": None, "at": 0}
+WATCH_SERVICES = [s.strip() for s in os.environ.get("WATCH_SERVICES", "").split(",") if s.strip()]
+SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authored (vs vendor)
 _ct_cache = {"list": [], "at": 0}
 _scan_since = {}
 _cpu_prev = {"idle": 0, "total": 0}
@@ -194,6 +207,150 @@ def read_host():
     h["disks"] = read_disks()
     return h
 
+# ── Health monitors: Docker containers + systemd services ──────────────────────
+# These describe *current state* (is it up? healthy? failed?) rather than a time
+# series, so they live behind /api/health and are refreshed by health_scan().
+_DOCKER_HEALTH = re.compile(r"\((healthy|unhealthy|health: starting)\)")
+
+def _docker_status(state, status):
+    """Map a Docker container's state/status string to a (level, label) pair."""
+    st, s = (state or "").lower(), (status or "").lower()
+    m = _DOCKER_HEALTH.search(s)
+    health = m.group(1) if m else None
+    if st == "running":
+        if health == "unhealthy":        return "crit", "unhealthy"
+        if health == "health: starting": return "warn", "starting"
+        return "ok", "healthy" if health == "healthy" else "running"
+    if st == "restarting":               return "warn", "restarting"
+    if st == "paused":                   return "warn", "paused"
+    if st == "exited":
+        code = re.search(r"exited \((\d+)\)", s)
+        if code and code.group(1) != "0": return "crit", f"exited ({code.group(1)})"
+        return "info", "stopped"
+    if st == "dead":                     return "crit", "dead"
+    if st == "created":                  return "info", "created"
+    return "info", st or "unknown"
+
+def collect_docker():
+    try:
+        raw = json.loads(_docker("/containers/json?all=1"))
+    except Exception as e:
+        return {"available": False, "reason": f"Docker API unreachable: {e}",
+                "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    items = []
+    for ct in raw:
+        level, label = _docker_status(ct.get("State"), ct.get("Status"))
+        items.append({"name": (ct.get("Names") or ["/?"])[0].lstrip("/"),
+                      "image": ct.get("Image", ""), "state": (ct.get("State") or "").lower(),
+                      "status_text": ct.get("Status", ""), "status": level, "label": label})
+    rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
+    items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
+    return {"available": True, "containers": items,
+            "summary": {"total": len(items),
+                        "running": sum(1 for c in items if c["state"] == "running"),
+                        "problems": sum(1 for c in items if c["status"] in ("crit", "warn"))}}
+
+def _svc_status(active):
+    return {"failed": "crit", "active": "ok",
+            "activating": "warn", "deactivating": "warn"}.get(active, "info")
+
+def collect_systemd():
+    """Read systemd *system* units over the host D-Bus socket (pure-Python jeepney).
+
+    Highlights admin/user-authored units (those under /etc/systemd/system) plus
+    anything that has failed. Degrades gracefully when the socket isn't mounted,
+    so the rest of the dashboard keeps working out of the box."""
+    try:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
+    except Exception:
+        return {"available": False, "reason": "jeepney not installed in the image.",
+                "services": [], "summary": {}}
+    try:
+        conn = open_dbus_connection(bus="SYSTEM")
+    except Exception:
+        return {"available": False,
+                "reason": "Host D-Bus socket not reachable — mount /run/dbus/system_bus_socket "
+                          "(see docker-compose.yml) to enable systemd monitoring.",
+                "services": [], "summary": {}}
+    try:
+        mgr = DBusAddress("/org/freedesktop/systemd1", bus_name="org.freedesktop.systemd1",
+                          interface="org.freedesktop.systemd1.Manager")
+        units = conn.send_and_get_reply(new_method_call(mgr, "ListUnits")).body[0]
+        try:
+            files = conn.send_and_get_reply(new_method_call(mgr, "ListUnitFiles")).body[0]
+        except Exception:
+            files = []
+    except Exception as e:
+        return {"available": False, "reason": f"systemd query failed: {e}", "services": [], "summary": {}}
+    finally:
+        conn.close()
+
+    admin = {os.path.basename(p) for p, _state in files
+             if p.startswith(SYSTEMD_ADMIN_DIR) and p.endswith(".service")}
+    services, running, failed = [], 0, 0
+    for name, desc, _load, active, sub, *_ in units:
+        if not name.endswith(".service"):
+            continue
+        running += active == "active"
+        failed  += active == "failed"
+        services.append({"name": name, "desc": desc, "active": active, "sub": sub,
+                         "admin": name in admin,
+                         "watched": name in WATCH_SERVICES or name[:-8] in WATCH_SERVICES,
+                         "status": _svc_status(active)})
+    # Default view = the units you actually care about: ones you deployed, ones
+    # you asked to watch, and anything currently failing.
+    shown = [s for s in services if s["admin"] or s["watched"] or s["status"] == "crit"]
+    rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
+    shown.sort(key=lambda s: (rank.get(s["status"], 9), s["name"].lower()))
+    return {"available": True, "services": shown,
+            "summary": {"loaded": len(services), "running": running,
+                        "failed": failed, "admin": len(admin)}}
+
+def build_overview(now, docker, systemd):
+    """One status card per subsystem for the Overview tab. New monitors append here."""
+    cards = []
+    g = now.get("gpu") or {}
+    tot = g.get("mem_total") or 1
+    used, used_pct = g.get("mem_used", 0), round((g.get("mem_used", 0) / tot) * 100)
+    cards.append({"key": "gpu", "label": "GPU",
+                  "status": "crit" if (tot - used) < PRESSURE_MB else "warn" if used_pct >= 85 else "ok",
+                  "metric": f"{used_pct}% VRAM",
+                  "detail": f"{round(g.get('util', 0))}% util · {round(g.get('temp', 0))}°C"})
+    h = now.get("host") or {}
+    ram_pct = round(h["ram_used"] / h["ram_total"] * 100) if h.get("ram_total") else 0
+    worst_disk = (h.get("disks") or [{}])[0].get("pct", 0)
+    cards.append({"key": "host", "label": "Host",
+                  "status": "crit" if worst_disk >= 90 or ram_pct >= 90 else
+                            "warn" if worst_disk >= 80 or ram_pct >= 80 else "ok",
+                  "metric": f"{round(h.get('cpu', 0))}% CPU",
+                  "detail": f"{ram_pct}% RAM · {worst_disk}% disk"})
+    if docker.get("available"):
+        s = docker["summary"]
+        crit = any(c["status"] == "crit" for c in docker["containers"])
+        cards.append({"key": "containers", "label": "Containers",
+                      "status": "crit" if crit else "warn" if s["problems"] else "ok",
+                      "metric": f"{s['running']}/{s['total']} up",
+                      "detail": f"{s['problems']} need attention" if s["problems"] else "all healthy"})
+    else:
+        cards.append({"key": "containers", "label": "Containers", "status": "info",
+                      "metric": "—", "detail": "unavailable"})
+    if systemd.get("available"):
+        s = systemd["summary"]
+        cards.append({"key": "services", "label": "Services",
+                      "status": "crit" if s.get("failed") else "ok",
+                      "metric": f"{s.get('running', 0)} running",
+                      "detail": f"{s.get('failed', 0)} failed" if s.get("failed") else "none failed"})
+    else:
+        cards.append({"key": "services", "label": "Services", "status": "info",
+                      "metric": "—", "detail": "unavailable"})
+    return cards
+
+def health_scan():
+    HEALTH["docker"]  = collect_docker()
+    HEALTH["systemd"] = collect_systemd()
+    HEALTH["at"]      = int(time.time())
+
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
     return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=15).stdout.strip()
@@ -272,12 +429,15 @@ def oom_scan():
         _scan_since[svc] = int(time.time())
 
 def collector():
-    last = 0
+    last_oom = last_health = 0
     while True:
         try:
             sample_once()
-            if time.time() - last > 60:
-                oom_scan(); last = time.time()
+            now = time.time()
+            if now - last_oom > 60:
+                oom_scan(); last_oom = now
+            if now - last_health > 15:
+                health_scan(); last_health = now
         except Exception as e:
             print("collector error:", e, flush=True)
         time.sleep(INTERVAL)
@@ -373,6 +533,22 @@ def api_data():
                     "services": services, "other": other, "summary": summary, "model_summary": model_summary,
                     "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
+
+@app.route("/api/health")
+def api_health():
+    """Current state of the status monitors (Docker + systemd) plus a light GPU/host
+    snapshot. Cheap and DB-free, so the dashboard can poll it often."""
+    now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
+                   "mem_total": LATEST["mem_total"] or 24576, "power": LATEST["power"],
+                   "temp": LATEST["temp"]},
+           "host": LATEST["host"]}
+    docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
+                                    "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
+                                    "services": [], "summary": {}}
+    return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
+                    "docker": docker, "systemd": systemd,
+                    "overview": build_overview(now, docker, systemd)})
 
 @app.route("/")
 def index():

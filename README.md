@@ -1,62 +1,48 @@
-# 🛰️ HomeLab Monitor — GPU, Local-AI & Host health in one container
+# 🛰️ HomeLab Monitor
 
-![version](https://img.shields.io/badge/version-0.2.0-blue)
+![version](https://img.shields.io/badge/version-0.3.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
 
-**The missing dashboard for a GPU home lab.** One small container shows you —
-at a glance, from your phone over the VPN — *which model and which container is
-eating your VRAM right now*, whether anything is starving, and whether the whole
-box is healthy.
+A small, friendly dashboard for a self-hosted home lab. One container gives you a
+single page that answers the everyday questions: **is the GPU busy and which model
+is using it, are my containers healthy, are my services running, and is the box
+itself OK?** — readable from your phone over the VPN.
 
-No Prometheus. No Grafana. No agents. **One container, one web page.**
+It's built to be **plug-and-play**: `docker compose up -d --build`, open the page,
+done. No agents, no Prometheus/Grafana stack, no cloud, and no config required to
+get started. If you're newer to home labs it should just work; if you're more
+advanced, everything is a handful of clearly-commented Python functions you can
+extend.
 
-> Built for the era of self-hosted AI: Ollama, vLLM, Stable Diffusion, ComfyUI,
-> Immich ML, Whisper… all fighting over the same GPU. This tells you who's
-> winning, who's losing, and what to do about it.
+![dashboard](docs/screenshot.png)
 
----
+## What it shows
 
-## ✨ What makes it different
+The page is organised into tabs so it stays readable as it grows:
 
-Most GPU tools are either **terminal apps** (nvtop, nvitop, gpustat — no history,
-no container names) or a **full Prometheus + Grafana stack** (powerful, heavy).
-This sits in the gap and adds things neither does:
+- **Overview** — a status card per subsystem (GPU, Host, Containers, Services) plus
+  plain-language insights, so one glance tells you whether anything needs attention.
+- **GPU** — live VRAM / utilisation / power / temp, *which container or process*
+  holds the VRAM (mapped automatically, nothing hardcoded), and a VRAM-by-service
+  timeline.
+- **AI Models** — for recognised model servers, *which model* is loaded and its VRAM,
+  read live from the server's own API.
+- **Containers** — health of **every** Docker container: running / stopped /
+  restarting, and whether its health-check is passing.
+- **Services** — **systemd** service health, with the units *you* deployed
+  highlighted and any failed unit surfaced first.
+- **Host** — CPU, RAM, load, uptime, temperature and disk usage, with history.
 
-- 🔍 **Automatic, no-config service discovery.** Every GPU process is mapped back
-  to its **Docker container by name** (`/proc/<pid>/cgroup` + Docker API). Start a
-  new GPU container tomorrow — it just appears. Nothing is hardcoded.
-- 🧠 **Model-level drill-down.** For recognised model servers it shows *which model*
-  is loaded and its VRAM — live from the server's own API. Ollama is validated
-  (real per-model VRAM via `/api/ps`); vLLM, HF TGI, llama.cpp, Automatic1111 and
-  ComfyUI are detected best-effort.
-- 🚦 **Contention intelligence.** It detects VRAM-pressure periods, scans GPU
-  containers' logs for out-of-memory events, and **tells you who lost to whom**
-  ("immich-ML lost to ollama, holding 20 GB, at 22:29").
-- 💡 **Plain-language recommendations** — "VRAM peaked at 92%, only 1.9 GB free;
-  ollama held 20 GB — try a shorter `OLLAMA_KEEP_ALIVE` or a smaller model."
-- 🖥️ **Whole-host health.** CPU, RAM, load, uptime, temperature and disk usage —
-  so one page tells you the server is fine, not just the GPU.
-- 📈 **History that scales.** SQLite + **downsample-on-read**: a 6-month view is
-  as fast and readable as the last hour. Retention is configurable.
+History is stored in SQLite and **downsampled on read**, so a six-month view loads
+as quickly and reads as cleanly as the last hour.
 
-## 🆚 How it compares
+## Quick start
 
-|                                        | **HomeLab Monitor** | nvtop / nvitop | DCGM + Grafana | gpu-hot |
-|----------------------------------------|:---:|:---:|:---:|:---:|
-| Web dashboard                          | ✅ | ❌ (TUI) | ✅ (needs Grafana) | ✅ |
-| Per-container attribution **by name**  | ✅ | ❌ | ⚠️ k8s only | ❌ |
-| Which **model** is loaded              | ✅ | ❌ | ❌ | ❌ |
-| OOM / contention detection + advice    | ✅ | ❌ | ❌ | ❌ |
-| Persistent, downsampled history        | ✅ | ❌ | ✅ | ⚠️ |
-| Host CPU / RAM / disk too              | ✅ | ❌ | ⚠️ node-exporter | ❌ |
-| Setup                                  | **1 container** | binary | full stack | 1 container |
-
-## 🚀 Quick start
-
-Requirements: an NVIDIA GPU, Docker, and the
+Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+(No GPU? The container, service and host panels still work fine.)
 
 ```bash
 git clone https://github.com/SikamikanikoBG/nvidia-gpu-monitor.git
@@ -64,22 +50,24 @@ cd nvidia-gpu-monitor
 docker compose up -d --build
 ```
 
-Open **http://<your-host-ip>:9800** from any machine on your LAN or VPN. Done.
+Open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
 
-## 🧠 Supported model servers
+## Supported model servers
 
-| Server | Detection | Model name | Per-model VRAM |
-|---|---|---|---|
-| **Ollama** | image/name | ✅ | ✅ (`/api/ps`) — *validated* |
-| **vLLM** | image/name | ✅ (`/v1/models`) | — |
-| **HF TGI** | image/name | ✅ (`/info`) | — |
-| **llama.cpp** | image/name | ✅ (`/v1/models`) | — |
-| **Automatic1111 SD** | image/name | ✅ (`/sdapi/v1/options`) | — |
-| **ComfyUI** | image/name | detected | — |
+| Server | Model name | Per-model VRAM |
+|---|---|---|
+| **Ollama** | ✅ | ✅ via `/api/ps` (validated) |
+| **vLLM** | ✅ via `/v1/models` | — |
+| **HF TGI** | ✅ via `/info` | — |
+| **llama.cpp** | ✅ via `/v1/models` | — |
+| **Automatic1111 (SD)** | ✅ via `/sdapi/v1/options` | — |
+| **ComfyUI** | detected | — |
 
-Adding another server is a one-liner — append a probe to `PROBES` in `app.py`.
+Don't see yours? Adding a probe is a one-liner — append to `PROBES` in `app.py`.
 
-## ⚙️ Configuration (`docker-compose.yml` → `environment`)
+## Configuration
+
+Set these under `environment:` in `docker-compose.yml` (all optional):
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -88,40 +76,74 @@ Adding another server is a one-liner — append a probe to `PROBES` in `app.py`.
 | `PRESSURE_FREE_MB` | `2048` | Free VRAM below this counts as "pressure" |
 | `PORT` | `9800` | Dashboard port |
 | `WATCH_CONTAINERS` | — | Extra containers to scan for OOM (comma-separated) |
+| `WATCH_SERVICES` | — | systemd units to always show, even vendor ones (comma-separated) |
 
-History lives in `./data/gpu.db` and survives restarts/upgrades.
+History lives in `./data/gpu.db` (a bind mount), so it survives restarts and upgrades.
 
-## 🏗️ How it works
+### Enabling the Services (systemd) panel
+
+To read systemd health, the container needs the host's D-Bus system socket. The
+provided `docker-compose.yml` already mounts it read-only:
+
+```yaml
+volumes:
+  - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+```
+
+If your host keeps it elsewhere, adjust the mount and `DBUS_SYSTEM_BUS_ADDRESS`.
+Remove the mount and the Services panel simply shows "unavailable" — everything
+else keeps working.
+
+## How it works
 
 ```
 nvidia-smi ─► per-process VRAM + PID ─► /proc/<pid>/cgroup ─► Docker API ─► container name
 model servers ─► their own API (/api/ps, /v1/models, …) ─► which model + VRAM
-container logs ─► OOM scan ─► correlate with VRAM pressure ─► "who lost to whom"
+Docker API ─► every container's state + health-check status
+systemd (D-Bus) ─► service state, with your own units highlighted
 host /proc, /sys, statvfs ─► CPU / RAM / load / temp / disk
         │
      SQLite ─► downsample-on-read ─► single-page dashboard (Chart.js, vendored)
 ```
 
-A background thread samples every `SAMPLE_INTERVAL`s; the web layer buckets any
-range down to ~360 points so it stays snappy over months.
+A background thread samples on an interval; the web layer buckets any range down to
+~360 points so it stays responsive over months.
 
-## 🔒 Security notes
+## Adding your own monitor
 
-It runs with `pid: host`, `network_mode: host`, a **read-only** Docker socket
-mount (to read container names + query model APIs) and a **read-only** mount of
-`/` (for disk usage). That's the standard footprint for a host monitor — keep it
-behind your LAN/VPN/firewall; **don't expose it to the public internet.**
+The code is intentionally small and modular so contributions are easy:
 
-## 🗺️ Roadmap
+1. In `app.py`, write a `collect_<thing>()` that returns
+   `{"available": bool, "summary": {...}, "items": [...]}`.
+2. Call it from `health_scan()` so the background thread keeps it fresh, and expose
+   it via `/api/health`.
+3. In `static/dashboard.html`, add one entry to the `TABS` array plus a matching
+   `<section>` and a small renderer.
+
+That's the whole pattern — no build step, no framework.
+
+## Security notes
+
+This is a host monitor, so it runs with `pid: host`, `network_mode: host`, a
+**read-only** Docker socket (to read container names/health and query model APIs),
+a **read-only** mount of `/` (for disk usage), and a **read-only** D-Bus socket (for
+systemd state). That's a broad footprint by design — please keep it behind your
+LAN/VPN/firewall and **don't expose it to the public internet.**
+
+## Roadmap
+
+A few things that would be nice to add next (PRs very welcome):
 
 - Per-model VRAM history timeline
-- Multi-GPU layout
+- Multi-GPU layouts
 - Optional alerting (Discord / Telegram / ntfy)
+- `systemctl --user` (per-user) service support
 - AMD / Intel GPU back-ends
 
-## 🤝 Contributing
+## Contributing
 
-Issues and PRs welcome — especially new model-server probes and GPU back-ends.
+Issues and PRs are very welcome — especially new model-server probes, new monitors,
+and GPU back-ends. This is a hobby tool meant to help fellow home-labbers, so be kind.
 
 ## License
 
