@@ -1,5 +1,7 @@
 # 🛰️ HomeLab Monitor
 
+[![GitHub stars](https://img.shields.io/github/stars/SikamikanikoBG/homelab-monitor?style=social)](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)
+
 ![version](https://img.shields.io/badge/version-0.3.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
@@ -157,6 +159,11 @@ A few things that would be nice to add next (PRs very welcome):
 - Optional alerting (Discord / Telegram / ntfy)
 - `systemctl --user` (per-user) service support
 - AMD / Intel GPU back-ends
+
+## ⭐ Support the project
+
+If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps
+other home-labbers find it. Thank you!
 
 ## Contributing
 
