@@ -38,6 +38,24 @@ The page is organised into tabs so it stays readable as it grows:
 History is stored in SQLite and **downsampled on read**, so a six-month view loads
 as quickly and reads as cleanly as the last hour.
 
+## Screenshots
+
+**GPU — VRAM by service over time** (who held the card, and when):
+
+![GPU tab](docs/gpu.png)
+
+**Containers** — health of every container at a glance:
+
+![Containers tab](docs/containers.png)
+
+**Services** — systemd health, with your own units highlighted and failures first:
+
+![Services tab](docs/services.png)
+
+**Host** — CPU, RAM, load, temperature and disk usage:
+
+![Host tab](docs/host.png)
+
 ## Quick start
 
 Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
