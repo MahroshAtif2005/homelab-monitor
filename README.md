@@ -16,7 +16,7 @@ get started. If you're newer to home labs it should just work; if you're more
 advanced, everything is a handful of clearly-commented Python functions you can
 extend.
 
-![dashboard](docs/screenshot.png)
+![HomeLab Monitor — a quick tour of the tabs](docs/demo.gif)
 
 ## What it shows
 
