@@ -9,6 +9,8 @@
 .wrap{max-width:1140px;margin:0 auto;padding:22px 18px 70px}
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 h1{font-size:22px;margin:0}.ver{color:var(--mut);font-size:12px;border:1px solid var(--bd);border-radius:20px;padding:1px 9px}
+.ghstar{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--tx);text-decoration:none;border:1px solid var(--bd);border-radius:20px;padding:2px 10px;background:#0d1117}
+.ghstar:hover{border-color:var(--mut)}.ghstar .st{color:var(--accent)}.ghstar .cnt{color:var(--mut)}
 .live{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-left:auto}
 .pulse{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:p 2s infinite}
 @keyframes p{0%{box-shadow:0 0 0 0 #3fb95066}70%{box-shadow:0 0 0 8px #3fb95000}100%{box-shadow:0 0 0 0 #3fb95000}}
@@ -53,6 +55,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .muted{color:var(--mut)}a{color:#58a6ff}
 </style></head><body><div class="wrap">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
+<a class="ghstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener" title="Star HomeLab Monitor on GitHub"><span class="st">★</span> Star <span class="cnt" id="ghcount"></span></a>
 <span class="live"><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
 <p class="sub">One small container for your home lab — GPU &amp; local-AI, Docker containers, systemd services and host health, all on one page. Everything is discovered automatically; nothing is hardcoded.</p>
 
@@ -334,4 +337,9 @@ window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h &
 showTab(TAB);
 loadData(); loadHealth();
 setInterval(()=>{if(document.getElementById('auto').checked){loadData();loadHealth();}},15000);
+// One-shot GitHub star count — lazy, non-blocking, and the link still works offline.
+fetch('https://api.github.com/repos/SikamikanikoBG/homelab-monitor')
+  .then(r=>r.ok?r.json():null)
+  .then(d=>{if(d&&typeof d.stargazers_count==='number')document.getElementById('ghcount').textContent=d.stargazers_count;})
+  .catch(()=>{});
 </script></body></html>

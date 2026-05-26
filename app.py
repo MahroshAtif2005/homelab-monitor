@@ -21,7 +21,7 @@ Adding a new monitor (it's meant to be easy):
 import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client
 from flask import Flask, request, jsonify
 
-VERSION      = "0.3.0"
+VERSION      = "0.3.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
