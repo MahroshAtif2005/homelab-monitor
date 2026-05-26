@@ -2,7 +2,7 @@ services:
   homelab-monitor:
     build: .
     image: homelab-monitor:latest
-    container_name: gpu-monitor
+    container_name: homelab-monitor
     restart: unless-stopped
     # host networking lets it reach any model server's API (Ollama/vLLM/TGI/…)
     # and bind the dashboard directly on the host; pid:host maps GPU PIDs->containers.
