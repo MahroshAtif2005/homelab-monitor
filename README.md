@@ -63,8 +63,8 @@ Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
 (No GPU? The container, service and host panels still work fine.)
 
 ```bash
-git clone https://github.com/SikamikanikoBG/nvidia-gpu-monitor.git
-cd nvidia-gpu-monitor
+git clone https://github.com/SikamikanikoBG/homelab-monitor.git
+cd homelab-monitor
 docker compose up -d --build
 ```
 
