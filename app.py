@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request
 from flask import Flask, request, jsonify, Response
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -27,7 +27,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.4.1"
+VERSION      = "0.5.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used R
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
@@ -373,6 +374,198 @@ def health_scan():
     HEALTH["systemd"] = collect_systemd()
     HEALTH["at"]      = int(time.time())
 
+# ── Settings (UI-managed; persisted in SQLite, no env required) ───────────────
+# Everything the notifier needs is configured from the dashboard's Settings tab
+# and stored in the `settings` table, so the container is plug-and-play and the
+# operator never has to edit docker-compose.yml just to enable alerts.
+SETTING_DEFAULTS = {
+    "alerts_enabled":     "0",       # "0" / "1"
+    "discord_webhook_url": "",
+    "ntfy_topic":          "",
+    "ntfy_server":         "https://ntfy.sh",
+    "alert_min_level":     "warning",  # "warning" or "critical"
+    "disk_alert_pct":      "90",       # disk usage % that trips an alert
+}
+SETTING_SECRETS = {"discord_webhook_url"}   # never round-tripped to the UI in full
+
+def get_settings():
+    """Return the full settings dict (defaults + persisted overrides)."""
+    out = dict(SETTING_DEFAULTS)
+    try:
+        with LOCK:
+            rows = DB.execute("SELECT key, value FROM settings").fetchall()
+        for k, v in rows:
+            if k in SETTING_DEFAULTS:
+                out[k] = v
+    except Exception as e:
+        print("settings read error:", e, flush=True)
+    return out
+
+def save_settings(updates):
+    """Persist any subset of known setting keys. Unknown keys are ignored."""
+    safe = [(k, "" if v is None else str(v)) for k, v in updates.items() if k in SETTING_DEFAULTS]
+    if not safe:
+        return
+    with LOCK:
+        DB.executemany("INSERT INTO settings(key,value) VALUES(?,?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", safe)
+        DB.commit()
+
+# ── Notifier: Discord webhook + ntfy.sh ──────────────────────────────────────
+# Edge-triggered: each alert key is remembered in _NOTIFIED so a flapping state
+# doesn't spam the channel. A key clears when the underlying condition recovers
+# (container becomes healthy again, disk drops below threshold, etc.), so the
+# next failure re-fires exactly once.
+_NOTIFIED = {}            # key -> 1, "armed" alerts pending recovery
+_NOTIFIER_LOCK = threading.Lock()
+LEVELS  = {"info": 0, "warning": 1, "critical": 2}
+_COLORS = {"info": 0x58A6FF, "warning": 0xD29922, "critical": 0xF85149}
+_NTFY_P = {"info": 3, "warning": 4, "critical": 5}
+_NTFY_T = {"info": "information_source", "warning": "warning", "critical": "rotating_light"}
+
+def _post_json(url, payload, timeout=5):
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+def _post_text(url, text, headers=None, timeout=5):
+    req = urllib.request.Request(url, data=text.encode("utf-8"),
+                                 headers=headers or {"Content-Type": "text/plain"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+def send_discord(webhook, level, title, detail):
+    payload = {"embeds": [{"title": title, "description": detail,
+                           "color": _COLORS.get(level, _COLORS["info"]),
+                           "footer": {"text": f"HomeLab Monitor · {level}"},
+                           "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}]}
+    return _post_json(webhook, payload)
+
+def send_ntfy(server, topic, level, title, detail):
+    server = (server or "https://ntfy.sh").rstrip("/")
+    url    = f"{server}/{urllib.parse.quote(topic, safe='')}"
+    hdr    = {"Content-Type": "text/plain; charset=utf-8",
+              "Title":    title.encode("ascii", "replace").decode("ascii"),
+              "Priority": str(_NTFY_P.get(level, 3)),
+              "Tags":     _NTFY_T.get(level, "information_source")}
+    return _post_text(url, detail, hdr)
+
+def dispatch_alert(s, level, title, detail):
+    """Send to whichever channels are configured. Returns list of (channel, ok, err)."""
+    out = []
+    if s.get("discord_webhook_url"):
+        try: send_discord(s["discord_webhook_url"], level, title, detail); out.append(("discord", True, None))
+        except Exception as e: out.append(("discord", False, str(e)))
+    if s.get("ntfy_topic"):
+        try: send_ntfy(s.get("ntfy_server") or "https://ntfy.sh",
+                       s["ntfy_topic"], level, title, detail); out.append(("ntfy", True, None))
+        except Exception as e: out.append(("ntfy", False, str(e)))
+    return out
+
+def _emit(s, key, level, title, detail):
+    """Fire an alert once per edge. Skips below the configured min level."""
+    if LEVELS.get(level, 0) < LEVELS.get(s.get("alert_min_level", "warning"), 1):
+        return
+    with _NOTIFIER_LOCK:
+        if _NOTIFIED.get(key):
+            return
+        _NOTIFIED[key] = 1
+    for ch, ok, err in dispatch_alert(s, level, title, detail):
+        if not ok:
+            print(f"notifier {ch} error:", err, flush=True)
+
+def _clear(key):
+    with _NOTIFIER_LOCK:
+        _NOTIFIED.pop(key, None)
+
+def notify_scan():
+    s = get_settings()
+    if s.get("alerts_enabled") != "1":
+        return
+    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")):
+        return
+
+    # ── Docker containers: edge-trigger on crit/warn, clear on ok ─────────────
+    docker = HEALTH.get("docker") or {}
+    if docker.get("available"):
+        for ct in docker.get("containers", []):
+            name = ct.get("name", "?")
+            key  = f"container:{name}"
+            st   = ct.get("status")
+            if st == "crit":
+                _emit(s, key, "critical", f"🔴 Container {name} {ct.get('label','')}".strip(),
+                      f"{name}: {ct.get('status_text','')}")
+            elif st == "warn":
+                _emit(s, key, "warning", f"🟠 Container {name} {ct.get('label','')}".strip(),
+                      f"{name}: {ct.get('status_text','')}")
+            elif st == "ok":
+                _clear(key)
+
+    # ── systemd units: edge-trigger on failed ─────────────────────────────────
+    systemd = HEALTH.get("systemd") or {}
+    if systemd.get("available"):
+        for svc in systemd.get("services", []):
+            name = svc.get("name", "?")
+            key  = f"systemd:{name}"
+            if svc.get("status") == "crit":
+                _emit(s, key, "critical", f"🔴 systemd unit failed: {name}",
+                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})")
+            elif svc.get("status") == "ok":
+                _clear(key)
+
+    # ── GPU VRAM pressure ────────────────────────────────────────────────────
+    mem_total = LATEST.get("mem_total") or 0
+    mem_used  = LATEST.get("mem_used")  or 0
+    if mem_total:
+        free = mem_total - mem_used
+        key  = "gpu:vram_pressure"
+        if free < PRESSURE_MB:
+            _emit(s, key, "warning", "🟠 GPU VRAM pressure",
+                  f"Only {round(free)} MB free of {round(mem_total)} MB "
+                  f"({round(100*mem_used/mem_total)}% used).")
+        else:
+            _clear(key)
+
+    # ── Disks crossing the configured threshold ───────────────────────────────
+    try: disk_thr = int(s.get("disk_alert_pct") or 90)
+    except ValueError: disk_thr = 90
+    host = LATEST.get("host") or {}
+    seen_disks = set()
+    for dk in (host.get("disks") or []):
+        mp   = dk.get("mount", "?")
+        seen_disks.add(mp)
+        key  = f"disk:{mp}"
+        pct  = dk.get("pct", 0)
+        if pct >= disk_thr:
+            level = "critical" if pct >= 95 else "warning"
+            _emit(s, key, level, f"{'🔴' if level=='critical' else '🟠'} Disk {mp} at {pct}%",
+                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).")
+        else:
+            _clear(key)
+
+    # ── GPU OOM events from the DB (each event_ts notified at most once) ─────
+    try:
+        cutoff = int(time.time()) - 3600
+        with LOCK:
+            rows = DB.execute("SELECT ts, service, detail FROM events "
+                              "WHERE kind='oom' AND ts>=? ORDER BY ts", (cutoff,)).fetchall()
+        for ets, svc, detail in rows:
+            key = f"oom:{svc}:{ets}"
+            with _NOTIFIER_LOCK:
+                already = key in _NOTIFIED
+                if not already:
+                    _NOTIFIED[key] = 1
+            if already:
+                continue
+            if LEVELS["critical"] < LEVELS.get(s.get("alert_min_level", "warning"), 1):
+                continue
+            for ch, ok, err in dispatch_alert(
+                    s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
+                if not ok: print(f"notifier {ch} error:", err, flush=True)
+    except Exception as e:
+        print("notify_scan oom error:", e, flush=True)
+
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
     return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=15).stdout.strip()
@@ -451,7 +644,7 @@ def oom_scan():
         _scan_since[svc] = int(time.time())
 
 def collector():
-    last_oom = last_health = 0
+    last_oom = last_health = last_notify = 0
     while True:
         try:
             sample_once()
@@ -460,6 +653,12 @@ def collector():
                 oom_scan(); last_oom = now
             if now - last_health > 15:
                 health_scan(); last_health = now
+            # Notifier runs *after* the latest health/oom data is in place, so
+            # state-change detection sees a consistent snapshot.
+            if now - last_notify > 20:
+                try: notify_scan()
+                except Exception as e: print("notify_scan error:", e, flush=True)
+                last_notify = now
         except Exception as e:
             print("collector error:", e, flush=True)
         time.sleep(INTERVAL)
@@ -629,6 +828,38 @@ def metrics():
 
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
+
+def _public_settings():
+    """Same as get_settings(), but redacts secrets and reports their presence."""
+    s = get_settings()
+    out = {k: v for k, v in s.items() if k not in SETTING_SECRETS}
+    for k in SETTING_SECRETS:
+        out[k + "_set"] = bool(s.get(k))
+    return out
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        # Empty string clears a setting; missing key leaves it unchanged.
+        # Secrets pass through the "_set: false" sentinel from the UI as a way
+        # to clear without revealing the current value.
+        updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
+        save_settings(updates)
+    return jsonify({"version": VERSION, "settings": _public_settings()})
+
+@app.route("/api/notify/test", methods=["POST"])
+def api_notify_test():
+    """Send a one-shot test alert using the currently saved settings."""
+    s = get_settings()
+    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")):
+        return jsonify({"ok": False, "results": [],
+                        "reason": "No Discord webhook or ntfy topic configured."}), 400
+    results = dispatch_alert(s, "info",
+                             "✅ HomeLab Monitor — test alert",
+                             "If you see this, alerts are wired up correctly.")
+    return jsonify({"ok": all(ok for _, ok, _ in results),
+                    "results": [{"channel": c, "ok": ok, "error": err} for c, ok, err in results]})
 
 @app.route("/")
 def index():

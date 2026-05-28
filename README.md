@@ -2,7 +2,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/SikamikanikoBG/homelab-monitor?style=social)](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)
 
-![version](https://img.shields.io/badge/version-0.4.1-blue)
+![version](https://img.shields.io/badge/version-0.5.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
@@ -99,6 +99,24 @@ Set these under `environment:` in `docker-compose.yml` (all optional):
 | `WATCH_SERVICES` | — | systemd units to always show, even vendor ones (comma-separated) |
 
 History lives in `./data/gpu.db` (a bind mount), so it survives restarts and upgrades.
+
+### Alerts (Discord & ntfy.sh)
+
+The **Alerts** tab in the dashboard configures push notifications — no env
+vars, no config files, no restart. Either channel can be used; both are
+optional.
+
+- **Discord** — paste a channel webhook URL. Alerts arrive as a coloured embed
+  (red = critical, orange = warning).
+- **ntfy.sh** — set a topic (and optionally a self-hosted ntfy server). Alerts
+  arrive with severity-based priority and tags.
+
+Alerts fire on **state changes** (edge-triggered) so they don't spam: container
+unhealthy / exited non-zero / dead, systemd unit failed, GPU **VRAM pressure**,
+GPU **OOM** events, and disks crossing the configured threshold (default 90 %).
+A *Send test alert* button verifies the wiring end-to-end.
+
+If nothing is configured, the feature is off — no external calls, no errors.
 
 ### Enabling the Services (systemd) panel
 
@@ -204,7 +222,7 @@ A few things that would be nice to add next (PRs very welcome):
 
 - Per-model VRAM history timeline
 - Multi-GPU layouts
-- Optional alerting (Discord / Telegram / ntfy)
+- Telegram alerting (Discord + ntfy already supported — see **Alerts** tab)
 - `systemctl --user` (per-user) service support
 - AMD / Intel GPU back-ends
 

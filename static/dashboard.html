@@ -116,6 +116,69 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
   </div>
 </section>
 
+<!-- ───────── Alerts (Settings) ───────── -->
+<section data-tab="alerts" hidden>
+  <div class="card">
+    <h2>🔔 Alerts</h2>
+    <p class="cap" style="margin:-4px 0 12px">
+      Push notifications when something noteworthy happens. Configured here — no env vars, no config files.
+      Either channel (Discord or ntfy) can be used; both are optional. Alerts are
+      edge-triggered (one ping per state change) so they don't spam.</p>
+
+    <div id="alertstatus" class="ins info" style="display:none"></div>
+
+    <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
+      <label style="display:flex;align-items:center;gap:9px">
+        <input type="checkbox" id="al_enabled">
+        <span><b>Alerts enabled</b> — turn the notifier on once a channel below is filled in.</span>
+      </label>
+
+      <div>
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Discord webhook URL</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="al_discord" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false"
+                 style="flex:1;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div class="cap" id="al_discord_state" style="margin-top:4px"></div>
+      </div>
+
+      <div>
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">ntfy.sh topic</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input type="text" id="al_ntfy_topic" placeholder="my-homelab-alerts" autocomplete="off" spellcheck="false"
+                 style="flex:2;min-width:180px;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+          <input type="text" id="al_ntfy_server" placeholder="https://ntfy.sh" autocomplete="off" spellcheck="false"
+                 style="flex:1;min-width:160px;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div class="cap">Topic is required; server defaults to <code>https://ntfy.sh</code>. Self-hosted ntfy works too.</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Minimum severity</div>
+          <select id="al_minlevel" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+            <option value="warning">warning</option>
+            <option value="critical">critical only</option>
+          </select>
+        </div>
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Disk alert threshold (%)</div>
+          <input type="number" id="al_disk" min="50" max="99" step="1"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="rb on" id="al_save">Save</button>
+        <button class="rb"    id="al_test">Send test alert</button>
+      </div>
+
+      <p class="cap" style="margin-top:6px">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
+        GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
+    </div>
+  </div>
+</section>
+
 <!-- ───────── Host ───────── -->
 <section data-tab="host" hidden>
   <div class="card"><h2>🖥️ Host health</h2>
@@ -138,6 +201,7 @@ const TABS = [
   {id:'containers', label:'Containers', charts:false},
   {id:'services',   label:'Services',   charts:false},
   {id:'host',       label:'Host',       charts:true},
+  {id:'alerts',     label:'Alerts',     charts:false},
 ];
 let R = localStorage.getItem('hl_range') || '6h';
 let TAB = (location.hash.slice(1)) || localStorage.getItem('hl_tab') || 'overview';
@@ -168,6 +232,7 @@ function showTab(id){
   document.querySelectorAll('section[data-tab]').forEach(s=>s.hidden = s.dataset.tab!==id);
   document.getElementById('controls').hidden = !(TABS.find(t=>t.id===id)||{}).charts;
   buildCharts();   // charts can only size on a visible canvas, so build on show
+  if(id==='alerts') loadAlerts();
 }
 
 // ── Data loaders ────────────────────────────────────────────────────────────
@@ -328,12 +393,71 @@ function dualOpts(labels,ymax){return{responsive:true,maintainAspectRatio:false,
   plugins:{legend:{labels:{color:'#e6edf3',boxWidth:12}}}};}
 function mk(id,cfg){ if(charts[id])charts[id].destroy(); charts[id]=new Chart(document.getElementById(id),cfg); }
 
+// ── Alerts (settings) tab ─────────────────────────────────────────────────────
+let ALERTS_LOADED=false;
+async function loadAlerts(){
+  let j; try{ j=await(await fetch('/api/settings')).json(); }catch(e){ return; }
+  const s=j.settings||{};
+  document.getElementById('al_enabled').checked = s.alerts_enabled==='1';
+  document.getElementById('al_ntfy_topic').value  = s.ntfy_topic||'';
+  document.getElementById('al_ntfy_server').value = s.ntfy_server||'';
+  document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
+  document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
+  // The webhook is a secret — server only returns whether one is set.
+  const inp=document.getElementById('al_discord');
+  if(!ALERTS_LOADED){ inp.value=''; inp.placeholder = s.discord_webhook_url_set
+    ? '•••••• webhook saved — type to replace, clear to remove' : 'https://discord.com/api/webhooks/…'; }
+  document.getElementById('al_discord_state').textContent = s.discord_webhook_url_set
+    ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No webhook saved yet.';
+  ALERTS_LOADED=true;
+}
+function showAlertStatus(level, text){
+  const el=document.getElementById('alertstatus');
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+async function saveAlerts(){
+  const body={
+    alerts_enabled:   document.getElementById('al_enabled').checked ? '1' : '0',
+    ntfy_topic:       document.getElementById('al_ntfy_topic').value.trim(),
+    ntfy_server:      document.getElementById('al_ntfy_server').value.trim(),
+    alert_min_level:  document.getElementById('al_minlevel').value,
+    disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
+  };
+  // Only send the webhook field if the user actually typed in it — empty means
+  // "no change" when one is already saved (matching the placeholder hint),
+  // *unless* they explicitly clear via the literal sentinel value "CLEAR".
+  const dv = document.getElementById('al_discord').value;
+  if(dv === 'CLEAR'){ body.discord_webhook_url=''; }
+  else if(dv && dv.trim()){ body.discord_webhook_url = dv.trim(); }
+  let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)})).json(); }catch(e){ showAlertStatus('critical','Could not save settings: '+e); return; }
+  document.getElementById('al_discord').value='';
+  await loadAlerts();
+  showAlertStatus('ok','Settings saved.');
+}
+async function testAlerts(){
+  showAlertStatus('info','Sending test alert…');
+  let j; try{ j=await(await fetch('/api/notify/test',{method:'POST'})).json(); }
+  catch(e){ showAlertStatus('critical','Test failed: '+e); return; }
+  if(j.ok){
+    showAlertStatus('ok','Test alert sent: '+(j.results||[]).map(r=>r.channel).join(', ')+'.');
+  }else{
+    const fails=(j.results||[]).filter(r=>!r.ok).map(r=>r.channel+': '+r.error).join(' · ');
+    showAlertStatus('critical', fails || j.reason || 'Test failed — check Discord webhook / ntfy topic.');
+  }
+}
+
 // ── Wire-up ───────────────────────────────────────────────────────────────────
 buildNav();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();});
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
+document.getElementById('al_save').onclick = saveAlerts;
+document.getElementById('al_test').onclick = testAlerts;
 showTab(TAB);
 loadData(); loadHealth();
 setInterval(()=>{if(document.getElementById('auto').checked){loadData();loadHealth();}},15000);
