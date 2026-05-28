@@ -1,0 +1,60 @@
+name: Update repo stats
+
+# GitHub's clone count isn't public — only repo collaborators can read the
+# traffic API. So this workflow hits that endpoint with the workflow's own
+# token, drops a shields.io-endpoint JSON onto an orphan branch (`stats`), and
+# the README badge reads it from raw.githubusercontent.com. No gist, no PAT.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'   # daily ~05:17 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/stats.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch & publish stats
+        env:
+          # Default token has push access, which is what the traffic endpoint
+          # requires. If GitHub ever tightens that, set a `STATS_PAT` repo
+          # secret (classic PAT, `repo` scope) and this falls back to it.
+          GH_TOKEN: ${{ secrets.STATS_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          DATA=$(gh api "repos/${{ github.repository }}/traffic/clones")
+          COUNT=$(echo   "$DATA" | jq -r .count)
+          UNIQUES=$(echo "$DATA" | jq -r .uniques)
+          echo "clones=$COUNT uniques=$UNIQUES (14d window)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Use an orphan `stats` branch so this never pollutes main's history.
+          git fetch origin stats:stats 2>/dev/null || true
+          if git show-ref --quiet refs/heads/stats; then
+            git checkout stats
+          else
+            git checkout --orphan stats
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          cat > clones.json <<EOF
+          {"schemaVersion":1,"label":"clones (14d)","message":"$COUNT","color":"informational"}
+          EOF
+          cat > clones-unique.json <<EOF
+          {"schemaVersion":1,"label":"unique cloners (14d)","message":"$UNIQUES","color":"informational"}
+          EOF
+
+          git add clones.json clones-unique.json
+          git commit -m "stats: $COUNT clones / $UNIQUES unique (14d)" || { echo "no change"; exit 0; }
+          git push origin stats
