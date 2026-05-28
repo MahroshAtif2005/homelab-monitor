@@ -24,17 +24,23 @@ jobs:
 
       - name: Fetch & publish stats
         env:
-          # Default token has push access, which is what the traffic endpoint
-          # requires. If GitHub ever tightens that, set a `STATS_PAT` repo
-          # secret (classic PAT, `repo` scope) and this falls back to it.
+          # The traffic/clones endpoint requires Administration:read, which the
+          # default GITHUB_TOKEN doesn't have. Create a fine-grained PAT scoped
+          # to this repo with Administration:read (or a classic PAT with `repo`
+          # scope) and set it as the `STATS_PAT` repo secret.
           GH_TOKEN: ${{ secrets.STATS_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          DATA=$(gh api "repos/${{ github.repository }}/traffic/clones")
-          COUNT=$(echo   "$DATA" | jq -r .count)
-          UNIQUES=$(echo "$DATA" | jq -r .uniques)
-          echo "clones=$COUNT uniques=$UNIQUES (14d window)"
+          if DATA=$(gh api "repos/${{ github.repository }}/traffic/clones" 2>&1); then
+            COUNT=$(echo   "$DATA" | jq -r .count)
+            UNIQUES=$(echo "$DATA" | jq -r .uniques)
+            echo "clones=$COUNT uniques=$UNIQUES (14d window)"
+          else
+            echo "::warning::Traffic API returned: $DATA — set STATS_PAT (PAT with Administration:read) and re-run."
+            COUNT="—"
+            UNIQUES="—"
+          fi
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -58,3 +64,7 @@ jobs:
           git add clones.json clones-unique.json
           git commit -m "stats: $COUNT clones / $UNIQUES unique (14d)" || { echo "no change"; exit 0; }
           git push origin stats
+
+          # Surface a hard failure *after* the badge JSON is published, so the
+          # README badge always renders even on permission errors.
+          if [ "$COUNT" = "—" ]; then exit 1; fi
