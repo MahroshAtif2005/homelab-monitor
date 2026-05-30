@@ -737,12 +737,14 @@ _SSH_BASE_ARGS = [
 ]
 
 def _ssh(user, host, port, cmd, timeout=8):
-    """Run a single command on the remote via ssh. Returns (rc, stdout, stderr, ms)."""
+    """Run `cmd` on the remote via ssh. Pass the whole command as a single
+    argument so ssh hands it to the remote login shell intact — earlier
+    versions wrapped with `sh -c` which got mangled when ssh joined argv with
+    spaces (`sh -c echo ok` runs echo with $0=ok and produces no output)."""
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}",
-            "--", "sh", "-c", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
         ], capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
@@ -757,14 +759,11 @@ def _ssh(user, host, port, cmd, timeout=8):
 
 def _ssh_with_stdin(user, host, port, cmd, stdin_bytes, timeout=60):
     """Like _ssh but feeds bytes to the remote command's stdin. Used to pipe a
-    sudo password into `sudo -S` without ever putting it in argv on either end.
-    `stdin_bytes` is passed via the local subprocess's stdin pipe; ssh forwards
-    it through its encrypted channel to the remote shell."""
+    sudo password into `sudo -S` without ever putting it in argv on either end."""
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}",
-            "--", "sh", "-c", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
         ], input=stdin_bytes, capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
