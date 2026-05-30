@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, Response
 try:
@@ -726,21 +726,22 @@ def _record_check(name, result):
                    (int(time.time()), json.dumps(result), name))
         DB.commit()
 
+_SSH_BASE_ARGS = [
+    "-i", SSH_KEY,
+    "-o", "BatchMode=yes",
+    "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS}",
+    "-o", "PasswordAuthentication=no",
+    "-o", "PubkeyAuthentication=yes",
+]
+
 def _ssh(user, host, port, cmd, timeout=8):
     """Run a single command on the remote via ssh. Returns (rc, stdout, stderr, ms)."""
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh",
-            "-i", SSH_KEY,
-            "-o", "BatchMode=yes",
-            "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS}",
-            "-o", "PasswordAuthentication=no",
-            "-o", "PubkeyAuthentication=yes",
-            "-p", str(port),
-            f"{user}@{host}",
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}",
             "--", "sh", "-c", cmd,
         ], capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
@@ -753,6 +754,115 @@ def _ssh(user, host, port, cmd, timeout=8):
         return 124, "", f"ssh timed out after {timeout}s", ms
     except FileNotFoundError:
         return 127, "", "ssh client not found in container (install openssh-client)", 0
+
+def _ssh_with_stdin(user, host, port, cmd, stdin_bytes, timeout=60):
+    """Like _ssh but feeds bytes to the remote command's stdin. Used to pipe a
+    sudo password into `sudo -S` without ever putting it in argv on either end.
+    `stdin_bytes` is passed via the local subprocess's stdin pipe; ssh forwards
+    it through its encrypted channel to the remote shell."""
+    t0 = time.time()
+    try:
+        p = subprocess.run([
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}",
+            "--", "sh", "-c", cmd,
+        ], input=stdin_bytes, capture_output=True, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        return (p.returncode,
+                p.stdout.decode("utf-8", "replace"),
+                p.stderr.decode("utf-8", "replace"),
+                ms)
+    except subprocess.TimeoutExpired:
+        ms = int((time.time() - t0) * 1000)
+        return 124, "", f"ssh timed out after {timeout}s", ms
+    except FileNotFoundError:
+        return 127, "", "ssh client not found in container (install openssh-client)", 0
+
+# ── OS detection + OS-aware remedies (so the "paste this on the remote" hints
+#    match what actually works on the remote's distro). Runs as part of
+#    probe_host(), cached on the host row alongside the capability checks. ─────
+
+_OS_DETECT_SCRIPT = (
+    'echo "UNAME=$(uname -s 2>/dev/null)"; '
+    'echo "ARCH=$(uname -m 2>/dev/null)"; '
+    'if [ -r /etc/os-release ]; then . /etc/os-release; '
+    '  echo "ID=$ID"; echo "ID_LIKE=${ID_LIKE:-}"; '
+    '  echo "VERSION_ID=${VERSION_ID:-}"; echo "PRETTY_NAME=${PRETTY_NAME:-}"; '
+    'fi; '
+    'command -v systemctl >/dev/null 2>&1 && echo "INIT=systemd"; '
+    'command -v rc-service >/dev/null 2>&1 && echo "INIT=openrc"'
+)
+
+def _detect_os(user, host, port):
+    """Run a tiny discovery script via SSH. Returns a normalized dict."""
+    rc, out, _, _ = _ssh(user, host, port, _OS_DETECT_SCRIPT, timeout=10)
+    info = {}
+    if rc != 0:
+        return info
+    for line in (out or "").splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            info[k.strip()] = v.strip().strip('"').strip("'")
+    # Family normalization for branching remedies
+    osid    = (info.get("ID") or "").lower()
+    id_like = (info.get("ID_LIKE") or "").lower()
+    uname   = (info.get("UNAME") or "").lower()
+    if uname == "darwin":
+        family = "macos"
+    elif osid == "alpine":
+        family = "alpine"
+    elif osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like:
+        family = "suse"
+    elif osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:
+        family = "debian"
+    elif osid in ("fedora", "rhel", "centos", "rocky", "almalinux") or "rhel" in id_like or "fedora" in id_like:
+        family = "rhel"
+    elif osid in ("arch", "manjaro", "endeavouros") or "arch" in id_like:
+        family = "arch"
+    elif uname in ("linux", ""):
+        family = "linux"     # generic Linux, init unknown
+    else:
+        family = uname or "unknown"
+    info["family"] = family
+    # Pretty short label for the UI badge
+    pretty = info.get("PRETTY_NAME") or info.get("ID") or info.get("UNAME") or "unknown"
+    init   = info.get("INIT")
+    info["label"] = f"{pretty}" + (f" · {init}" if init else "")
+    return info
+
+def _remedy_docker_group(user, os_info):
+    """Per-OS instructions for joining the docker group / fixing socket perms."""
+    fam = (os_info.get("family") or "linux")
+    if fam == "macos":
+        return {"where": "on the remote (macOS — limited)",
+                "cmd": "# macOS doesn't expose the Docker socket the same way as Linux.\n"
+                       "# Docker Desktop runs inside a VM; SSH-driven container monitoring\n"
+                       "# isn't supported yet. The other panels (host CPU/RAM via /proc) also\n"
+                       "# won't work on macOS — full macOS support is a future enhancement."}
+    if fam == "alpine":
+        return {"where": "on the remote (Alpine)",
+                "cmd": f"sudo addgroup {user} docker\n"
+                       f"# Log out and back in (or just reconnect over SSH) to pick up the new group."}
+    if fam in ("debian", "rhel", "suse", "arch", "linux"):
+        return {"where": "on the remote",
+                "cmd": f"sudo usermod -aG docker {user}\n"
+                       f"# Then log out and back in — the next SSH session inherits the new group."}
+    return {"where": "on the remote",
+            "cmd": f"# Could not detect the OS family; this is the generic Linux fix:\n"
+                   f"sudo usermod -aG docker {user}"}
+
+def _remedy_pubkey(user):
+    return {"where": "on the remote",
+            "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                   f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
+                   f"chmod 600 ~/.ssh/authorized_keys"}
+
+def _remedy_sshd_down(os_info):
+    fam = (os_info or {}).get("family") or "linux"
+    if fam == "alpine":
+        return {"where": "on the remote",
+                "cmd": "# Check that sshd is running:\nsudo rc-service sshd status"}
+    return {"where": "on the remote",
+            "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
 
 def _summarize(checks):
     by = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
@@ -782,6 +892,7 @@ def probe_host(name):
     user, host, port = parsed
     _ensure_ssh_keypair()
     checks = []
+    os_info = {}
 
     # 1) SSH connect
     rc, out, err, ms = _ssh(user, host, port, "echo ok", timeout=SSH_CONNECT_TIMEOUT + 2)
@@ -793,13 +904,9 @@ def probe_host(name):
         hint = None
         e = (err or "")
         if "Permission denied" in e:
-            hint = {"where": "on the remote",
-                    "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
-                           f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
-                           f"chmod 600 ~/.ssh/authorized_keys"}
+            hint = _remedy_pubkey(user)
         elif "Connection refused" in e or "Connection timed out" in e or rc == 124:
-            hint = {"where": "on the remote",
-                    "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
+            hint = _remedy_sshd_down(None)
         elif "Host key verification failed" in e:
             hint = {"where": "on the hub (this container)",
                     "cmd": f"# Clear the saved host key and re-test:\nrm {SSH_KNOWN_HOSTS}"}
@@ -809,9 +916,35 @@ def probe_host(name):
         item = {"id": "connect", "label": "SSH reachable", "status": "fail", "detail": msg}
         if hint: item["remedy"] = hint
         checks.append(item)
-        result = {"checks": checks, "summary": _summarize(checks)}
+        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
         _record_check(name, result)
         return result
+
+    # SSH connected — detect the remote OS so the rest of the checklist can
+    # produce remedies that match the actual distro (and so the UI can show an
+    # OS badge per host).
+    os_info = _detect_os(user, host, port)
+    if (os_info.get("family") or "") == "macos":
+        # Be honest about limitations: macOS doesn't expose /proc, doesn't have
+        # systemd, doesn't expose the Docker socket the same way, and has no
+        # nvidia-smi. We still record the OS but mark the rest as info.
+        checks.append({"id": "os", "label": "Detected OS", "status": "info",
+                       "detail": os_info.get("label") or "macOS"})
+        checks.append({"id": "proc",   "label": "/proc readable",   "status": "info",
+                       "detail": "Linux-only — macOS doesn't expose /proc"})
+        checks.append({"id": "docker", "label": "Docker socket",    "status": "info",
+                       "detail": "macOS Docker socket flow not supported in v0"})
+        checks.append({"id": "dbus",   "label": "systemd D-Bus",    "status": "info",
+                       "detail": "macOS uses launchd, not systemd"})
+        checks.append({"id": "nvidia", "label": "nvidia-smi",       "status": "info",
+                       "detail": "no NVIDIA driver path on macOS"})
+        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
+        _record_check(name, result)
+        return result
+
+    if os_info.get("label"):
+        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
+                       "detail": os_info["label"]})
 
     # 2) /proc readable
     rc, out, err, _ = _ssh(user, host, port, "head -n1 /proc/uptime 2>&1")
@@ -824,9 +957,7 @@ def probe_host(name):
         checks.append({"id": "proc", "label": "/proc readable", "status": "ok", "detail": detail})
     else:
         checks.append({"id": "proc", "label": "/proc readable", "status": "warn",
-                       "detail": (err or "unexpected reply")[:160],
-                       "remedy": {"where": "note",
-                                  "cmd": "# /proc is Linux-only. macOS/BSD remotes aren't supported in v0."}})
+                       "detail": (err or "unexpected reply")[:160]})
 
     # 3) Docker socket
     rc, out, err, _ = _ssh(user, host, port,
@@ -840,9 +971,7 @@ def probe_host(name):
     elif "permission denied" in out_l or "permission denied" in err_l:
         checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
                        "detail": f"permission denied — '{user}' not in the docker group",
-                       "remedy": {"where": "on the remote",
-                                  "cmd": f"sudo usermod -aG docker {user}\n"
-                                         f"# then log out and back in (new group needs a fresh login)"}})
+                       "remedy": _remedy_docker_group(user, os_info)})
     elif "command not found" in out_l or "command not found" in err_l or out_l == "":
         checks.append({"id": "docker", "label": "Docker socket", "status": "info",
                        "detail": "Docker not installed — container panel will be hidden for this host"})
@@ -870,9 +999,40 @@ def probe_host(name):
         checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
                        "detail": "not found — GPU panel will be hidden for this host"})
 
-    result = {"checks": checks, "summary": _summarize(checks)}
+    result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
     _record_check(name, result)
     return result
+
+def run_on_host(name, cmd, sudo_password=None):
+    """Execute `cmd` on a registered host. If `sudo_password` is provided, the
+    whole command is wrapped in `sudo -S -p '' bash -c <cmd>` and the password
+    is piped via stdin to sudo on the remote — it never appears in argv on
+    either the local or remote side, and we never log it. Returns:
+    {ok, exit_code, stdout, stderr, ms}."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
+    user, host, port = parsed
+    if sudo_password:
+        # Wrap once with sudo -S so even compound commands (`a && b`) run as
+        # root in a single authentication. Nested `sudo` inside is harmless —
+        # root running sudo doesn't reprompt.
+        wrapped = f"sudo -S -p '' bash -c {shlex.quote(cmd)}"
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, wrapped,
+                                           (sudo_password + "\n").encode("utf-8"),
+                                           timeout=90)
+    else:
+        rc, out, err, ms = _ssh(user, host, port, cmd, timeout=90)
+    # Strip the leading "Password:" prompt or similar that some sudos emit when
+    # `-p ''` isn't fully honored. Be conservative.
+    if err:
+        err = "\n".join(ln for ln in err.splitlines()
+                        if "incorrect password" not in ln.lower() or True)
+    return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
 
 # Generate the hub keypair eagerly so /api/hub/pubkey is instant on first hit.
 _ensure_ssh_keypair()
@@ -1392,6 +1552,27 @@ def api_hosts_test(name):
     if result is None:
         return jsonify({"ok": False, "error": "no such host"}), 404
     return jsonify({"ok": True, "result": result})
+
+@app.route("/api/hosts/<name>/run", methods=["POST"])
+def api_hosts_run(name):
+    """Execute a command on a registered host. Body: {cmd, sudo_password?}.
+    The sudo password is processed in-memory: piped via stdin to `sudo -S`
+    on the remote, NEVER stored in the DB, NEVER written to logs, NEVER
+    in any process's argv. Don't pass arbitrary cmd from untrusted users —
+    the API is reachable to anyone on the LAN who can hit the dashboard."""
+    body = request.get_json(silent=True) or {}
+    cmd = (body.get("cmd") or "").strip()
+    sudo_password = body.get("sudo_password") or None
+    if not cmd:
+        return jsonify({"ok": False, "error": "cmd required"}), 400
+    result = run_on_host(name, cmd, sudo_password=sudo_password)
+    # Drop the password reference ASAP — Python keeps the string object until
+    # GC, but at least we don't hold our own reference past this point.
+    sudo_password = None
+    body = None
+    if result is None:
+        return jsonify({"ok": False, "error": "no such host"}), 404
+    return jsonify(result)
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():

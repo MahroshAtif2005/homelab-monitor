@@ -128,6 +128,18 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .lansug .ssh{font-size:10.5px;border-radius:5px;padding:1px 6px;color:var(--ok);border:1px solid #3fb95055}
 .lansug .ssh.closed{color:var(--mut);border-color:var(--bd)}
 .lansug .meta{color:var(--mut);font-size:11.5px;margin-bottom:4px}
+/* Run-on-remote inline panel */
+.runpanel{margin-top:8px;background:#0d1117;border:1px solid var(--bd);border-radius:7px;padding:9px 11px;font-size:12.5px}
+.runpanel .hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.runpanel .hd .lbl{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.02em;font-weight:600}
+.runpanel .note{display:flex;gap:6px;align-items:flex-start;color:var(--mut);font-size:11.5px;background:#161b22;border:1px solid var(--bd);border-radius:6px;padding:6px 9px;margin-top:6px}
+.runpanel input[type=password]{flex:1;min-width:160px;background:#161b22;color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px}
+.runpanel .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.runpanel pre.out{margin:8px 0 0;background:#161b22;border:1px solid var(--bd);border-radius:6px;padding:7px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--tx);max-height:200px;overflow:auto}
+.runpanel pre.out.err{border-color:#f8514955;color:var(--crit)}
+.runpanel pre.out.ok{border-color:#3fb95055}
+.runpanel .rc{font-size:11px;color:var(--mut)}
+.osbadge{font-size:10.5px;color:var(--mut);background:#161b22;border:1px solid var(--bd);border-radius:5px;padding:1px 7px;margin-left:6px}
 </style></head><body><div class="wrap">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -673,12 +685,14 @@ function renderHosts(hosts){
     const badge = h.last_check
       ? `<span class="badge ${overall==='ok'?'ok':overall==='warn'?'warn':overall==='fail'?'crit':'info'}">${overall.toUpperCase()}</span>`
       : `<span class="badge info">UNTESTED</span>`;
+    const osLabel = (h.last_check && h.last_check.os && h.last_check.os.label) || '';
+    const osBadge = osLabel ? `<span class="osbadge" title="Detected during last Test">${esc(osLabel)}</span>` : '';
     return `<div class="hostrow ${overall}" data-h="${esc(h.name)}">
       <div class="hd">
         <span class="nm">${esc(h.name)}</span>
         <span class="tg" data-tg="${esc(h.ssh_target)}">${esc(h.ssh_target)}</span>
         <button class="btn-mini hbtn-edit" data-h="${esc(h.name)}" title="Edit SSH target">✎</button>
-        ${badge}
+        ${badge}${osBadge}
         <span class="ts">checked ${relTime(h.last_check_at)}</span>
         <span class="ac">
           <button class="btn-mini hbtn-test"   data-h="${esc(h.name)}">Test</button>
@@ -686,13 +700,14 @@ function renderHosts(hosts){
         </span>
       </div>
       <div class="hcheck${h.last_check?' show':''}" id="hck-${esc(h.name)}">
-        ${h.last_check ? renderChecks(h.last_check.checks||[]) : ''}
+        ${h.last_check ? renderChecks(h.last_check.checks||[], h.name) : ''}
       </div>
     </div>`;
   }).join('');
   wrap.querySelectorAll('.hbtn-test').forEach(b => b.onclick = () => testHost(b.dataset.h));
   wrap.querySelectorAll('.hbtn-del').forEach(b => b.onclick  = () => deleteHost(b.dataset.h));
   wrap.querySelectorAll('.hbtn-edit').forEach(b => b.onclick = () => beginEditHost(b.dataset.h));
+  wireRemedyButtons();
 }
 
 function beginEditHost(name){
@@ -787,14 +802,34 @@ function useLanSuggestion(host, ip){
   tgt.setSelectionRange(0, 4);  // selects "user"
   showHostStatus('info','Prefilled — replace "user" with the SSH user, then Add host.');
 }
-function renderChecks(checks){
+function renderChecks(checks, hostName){
+  // We can only run-on-remote once SSH is reachable. If the connect check
+  // failed, the remedy is "paste the pubkey" — the user has to do that out
+  // of band before any in-app run could possibly work.
+  const sshOk = checks.some(c => c.id==='connect' && c.status==='ok');
   return checks.map(c => {
     const ic = HSTATUS_ICON[c.status] || '•';
-    const rem = c.remedy ? `<div class="rem">
+    let rem = '';
+    if(c.remedy){
+      const cmd  = c.remedy.cmd || '';
+      const isInfo = (c.remedy.where||'').toLowerCase().includes('note')
+                  || (c.remedy.where||'').toLowerCase().includes('macos');
+      // Show Run only when there's a real chance it will work (SSH up,
+      // command isn't purely informational like macOS notes or DNS hints).
+      const canRun = sshOk && !isInfo && cmd.trim() && !cmd.trim().startsWith('#'+'')
+                     && !cmd.includes('rm '+KNOWN_HOSTS_PATH); // hub-side hints
+      const runBtn = canRun
+        ? `<button class="btn-mini hbtn-run" type="button" data-h="${esc(hostName||'')}">▶ Run on remote</button>`
+        : '';
+      rem = `<div class="rem">
         <div class="lbl">→ ${esc(c.remedy.where||'')}</div>
-        <pre>${esc(c.remedy.cmd||'')}</pre>
-        <div class="cp"><button class="btn-mini hbtn-copyrem" type="button">📋 Copy</button></div>
-      </div>` : '';
+        <pre>${esc(cmd)}</pre>
+        <div class="cp">
+          <button class="btn-mini hbtn-copyrem" type="button">📋 Copy</button>
+          ${runBtn}
+        </div>
+      </div>`;
+    }
     return `<div class="row">
       <div class="ic">${ic}</div>
       <div style="flex:1;min-width:0">
@@ -805,6 +840,7 @@ function renderChecks(checks){
     </div>`;
   }).join('');
 }
+const KNOWN_HOSTS_PATH = '/data/.ssh/known_hosts';
 async function addHost(){
   const name   = document.getElementById('h_name').value.trim();
   const target = document.getElementById('h_target').value.trim();
@@ -830,12 +866,85 @@ async function testHost(name){
   catch(e){ showHostStatus('critical','Test failed: '+e); await loadHosts(); return; }
   if(!j.ok){ showHostStatus('critical', j.error || 'Test failed.'); }
   await loadHosts();
-  // Re-attach copy handlers for any remedy blocks rendered into the row.
+  wireRemedyButtons();
+}
+
+function wireRemedyButtons(){
+  // (Re-)attach handlers each time the host list is rendered.
   document.querySelectorAll('.hbtn-copyrem').forEach(b => b.onclick = async () => {
     const pre = b.closest('.rem').querySelector('pre');
     try{ await navigator.clipboard.writeText(pre.textContent); b.textContent='✓ Copied'; setTimeout(()=>b.textContent='📋 Copy', 1500); }
     catch(e){ const r=document.createRange(); r.selectNodeContents(pre); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); }
   });
+  document.querySelectorAll('.hbtn-run').forEach(b => b.onclick = () => openRunPanel(b));
+}
+
+function openRunPanel(btn){
+  const rem = btn.closest('.rem');
+  if(rem.querySelector('.runpanel')){ rem.querySelector('.runpanel').scrollIntoView({block:'nearest'}); return; }
+  const host = btn.dataset.h;
+  const cmd  = rem.querySelector('pre').textContent;
+  const needsSudo = /(^|\s|;|&&|\|\|)sudo(\s|$)/.test(cmd);
+  const panel = document.createElement('div');
+  panel.className = 'runpanel';
+  panel.innerHTML = `
+    <div class="hd">
+      <span class="lbl">Run on ${esc(host)}</span>
+      <button class="btn-mini hbtn-cancel" type="button" style="margin-left:auto">Cancel</button>
+    </div>
+    ${needsSudo ? `
+      <div class="row">
+        <input type="password" class="run-pw" autocomplete="off" spellcheck="false" placeholder="sudo password (used once, not stored)">
+        <button class="rb on hbtn-go" type="button">▶ Run</button>
+      </div>
+      <div class="note">🔒 <span>Your sudo password is used once to authenticate this single command, then discarded.
+        It is <b>not</b> stored on the hub, not written to logs, and never appears in any process's argv —
+        it's piped straight into <code>sudo -S</code> on the remote over the SSH-encrypted channel.</span></div>
+    ` : `
+      <div class="row">
+        <span class="rc">No sudo required — will run as the SSH user.</span>
+        <button class="rb on hbtn-go" type="button" style="margin-left:auto">▶ Run</button>
+      </div>
+    `}
+  `;
+  rem.appendChild(panel);
+  panel.querySelector('.hbtn-cancel').onclick = () => panel.remove();
+  const pwInput = panel.querySelector('.run-pw');
+  if(pwInput){ pwInput.focus(); pwInput.addEventListener('keydown', e => { if(e.key==='Enter') runIt(); }); }
+  panel.querySelector('.hbtn-go').onclick = runIt;
+
+  async function runIt(){
+    const go = panel.querySelector('.hbtn-go'); go.disabled = true; go.textContent = '⏳ Running…';
+    const body = {cmd};
+    if(needsSudo){ body.sudo_password = pwInput.value; pwInput.value=''; }
+    let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(host)}/run`,
+      {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json(); }
+    catch(e){ renderRunResult(panel, host, {ok:false, exit_code:-1, stdout:'', stderr:String(e), ms:0}); return; }
+    renderRunResult(panel, host, j);
+  }
+}
+
+function renderRunResult(panel, host, j){
+  // Replace the input row with the result; password input is gone by now.
+  const rows = panel.querySelectorAll('.row, .note');
+  rows.forEach(r => r.remove());
+  const ok = !!j.ok;
+  const stdout = j.stdout || '';
+  const stderr = j.stderr || '';
+  const result = document.createElement('div');
+  result.innerHTML = `
+    <div class="row" style="margin-top:4px">
+      <span class="rc">${ok ? '✅ Exit 0' : '❌ Exit '+j.exit_code} · ${j.ms||0} ms</span>
+      <button class="btn-mini hbtn-retest" type="button" style="margin-left:auto" data-h="${esc(host)}">↻ Re-test connection</button>
+      <button class="btn-mini hbtn-close" type="button">Close</button>
+    </div>
+    ${stdout ? `<pre class="out ok">${esc(stdout)}</pre>` : ''}
+    ${stderr ? `<pre class="out err">${esc(stderr)}</pre>` : ''}
+  `;
+  panel.appendChild(result);
+  panel.querySelector('.hbtn-retest').onclick = () => { panel.remove(); testHost(host); };
+  panel.querySelector('.hbtn-close').onclick  = () => panel.remove();
+  if(ok){ showHostStatus('ok','Command ran successfully — re-test to confirm the fix.'); }
 }
 async function deleteHost(name){
   if(!confirm(`Remove host '${name}'? (history isn't deleted; only the registration.)`)) return;
