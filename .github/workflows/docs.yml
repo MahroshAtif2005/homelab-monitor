@@ -1,8 +1,15 @@
 name: Build &amp; deploy docs site
 
 # Builds the MkDocs Material site under website/ and publishes it to GitHub
-# Pages on every push to main. Mirrors the existing docs/*.png + demo.gif into
-# website/screenshots/ at build time so we don't keep two copies in git.
+# Pages. Triggers:
+#   • Push to main that touches site sources (website/, mkdocs.yml, docs media,
+#     this workflow) — incremental updates between releases.
+#   • Any v* tag push — keeps the site in lock-step with the Docker Hub image
+#     publish (see release.yml), so each release lands on Hub + on the site
+#     together. Tag pushes ignore the paths filter; a tag is always "ship it".
+#   • Manual workflow_dispatch.
+# Mirrors the existing docs/*.png/*.gif/*.svg into website/screenshots/ at
+# build time so there's a single source of truth.
 
 on:
   push:
@@ -14,6 +21,8 @@ on:
       - 'docs/*.gif'
       - 'docs/*.svg'
       - '.github/workflows/docs.yml'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
