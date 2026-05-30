@@ -124,6 +124,86 @@ def read_disks():
     return out
 
 
+def read_systemd():
+    """Inventory systemd services via the CLI — no D-Bus client needed on the
+    remote. Output matches the hub's HH.systemd shape so the existing Services
+    tab renderer can show this verbatim.
+
+    Returns only admin-deployed (`/etc/systemd/system/*.service`) units and any
+    failed unit, mirroring how the local renderer filters its table — the full
+    list of vendor services would just be noise."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "--no-pager", "--no-legend", "--plain",
+             "list-units", "--type=service", "--all"],
+            capture_output=True, timeout=6,
+        )
+        if r.returncode != 0:
+            return {}
+    except Exception:
+        return {}
+
+    admin_units = set()
+    try:
+        for f in os.listdir("/etc/systemd/system"):
+            if f.endswith(".service"):
+                admin_units.add(f)
+    except Exception:
+        pass
+
+    loaded = running = failed = admin_total = 0
+    services = []
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Some systemd versions add a bullet at the start for failed/etc.
+        if s[:2] in ("● ", "* "):
+            s = s[2:].lstrip()
+        parts = s.split(None, 4)
+        if len(parts) < 4:
+            continue
+        unit, load, active, sub = parts[:4]
+        desc = parts[4] if len(parts) > 4 else ""
+        if not unit.endswith(".service"):
+            continue
+        if load == "loaded":   loaded  += 1
+        if active == "active" and sub == "running": running += 1
+        if active == "failed": failed  += 1
+        is_admin = unit in admin_units
+        if is_admin: admin_total += 1
+
+        if active == "failed":
+            status = "crit"
+        elif active == "active" and sub == "running":
+            status = "ok"
+        elif active == "inactive":
+            status = "info"
+        else:
+            status = "warn"
+
+        if is_admin or status == "crit":
+            services.append({
+                "name": unit, "status": status,
+                "active": active, "sub": sub, "desc": desc,
+                "admin": is_admin, "watched": False,
+            })
+
+    # Failed first, then admin units (running first), alphabetical within.
+    def k(x):
+        if x["status"] == "crit": return (0, x["name"])
+        if x["status"] == "ok":   return (1, x["name"])
+        return (2, x["name"])
+    services.sort(key=k)
+
+    return {"systemd": {
+        "available": True,
+        "summary": {"loaded": loaded, "running": running,
+                    "failed": failed, "admin": admin_total},
+        "services": services,
+    }}
+
+
 def read_gpu():
     """First NVIDIA GPU's snapshot via nvidia-smi. Returns {} if no driver or
     no GPU. We treat the first GPU as the 'representative' for the table; the
@@ -164,11 +244,12 @@ def main():
             **read_uptime(),
             **read_temp(),
             **read_gpu(),
+            **read_systemd(),
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
         "at": int(time.time()),
-        "probe_version": "0.2",
+        "probe_version": "0.3",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

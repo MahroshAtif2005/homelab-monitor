@@ -457,6 +457,7 @@ function showTab(id){
   }
   if(id==='overview') renderFleet();
   if(id==='host')     renderHostTab();
+  if(id==='services') renderServicesTab();
 }
 
 // ── Data loaders ────────────────────────────────────────────────────────────
@@ -572,25 +573,45 @@ function renderHealth(){
      <td class="muted">${esc(c.status_text)}</td></tr>`).join('')
     || (dk.available?'<tr><td class="muted">No containers found.</td></tr>':'');
 
-  // Services
-  const sd=HH.systemd||{}, ss=sd.summary||{};
-  const svc=document.getElementById('svcbody');
+  // Services — local-only branch; when remote, renderServicesTab() drives it.
+  if(CURRENT_HOST === 'local') renderServicesBlock(HH.systemd);
+}
+
+// Renders a systemd block into #svcbody. Same shape for local and remote so
+// the per-host Services tab works without duplicating UI logic.
+function renderServicesBlock(sd){
+  sd = sd || {};
+  const ss = sd.summary || {};
+  const svc = document.getElementById('svcbody');
+  if(!svc) return;
   if(!sd.available){
-    svc.innerHTML=`<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">systemd monitoring is off</div><div class="d">${esc(sd.reason||'')}</div></div></div>`;
-  }else{
-    const kpis=[{v:ss.loaded||0,l:'Loaded services'},{v:ss.running||0,l:'Running'},
-                {v:ss.failed||0,l:'Failed'},{v:ss.admin||0,l:'Your units'}]
-      .map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
-    const rows=(sd.services||[]).map(s=>
-      `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${esc(s.name)}
-         ${s.admin?'<span class="pill">yours</span>':''}${s.watched?'<span class="pill">watched</span>':''}</td>
-       <td><span class="badge ${s.status}">${esc(s.active)}${s.sub&&s.sub!==s.active?' / '+esc(s.sub):''}</span></td>
-       <td class="muted">${esc(s.desc)}</td></tr>`).join('')
-      || '<tr><td colspan="3" class="muted">No user-deployed or failed services found.</td></tr>';
-    svc.innerHTML=`<div class="grid">${kpis}</div>
-      <table style="margin-top:14px"><thead><tr><th>Unit</th><th>State</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="cap">Showing the units you deployed (under <code>/etc/systemd/system</code>), anything you set in <code>WATCH_SERVICES</code>, and any failed unit.</p>`;
+    svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">systemd monitoring is off</div><div class="d">${esc(sd.reason||'No D-Bus / systemd detected.')}</div></div></div>`;
+    return;
   }
+  const kpis=[{v:ss.loaded||0,l:'Loaded services'},{v:ss.running||0,l:'Running'},
+              {v:ss.failed||0,l:'Failed'},{v:ss.admin||0,l:'Your units'}]
+    .map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
+  const rows=(sd.services||[]).map(s=>
+    `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${esc(s.name)}
+       ${s.admin?'<span class="pill">yours</span>':''}${s.watched?'<span class="pill">watched</span>':''}</td>
+     <td><span class="badge ${s.status}">${esc(s.active)}${s.sub&&s.sub!==s.active?' / '+esc(s.sub):''}</span></td>
+     <td class="muted">${esc(s.desc)}</td></tr>`).join('')
+    || '<tr><td colspan="3" class="muted">No user-deployed or failed services found.</td></tr>';
+  svc.innerHTML=`<div class="grid">${kpis}</div>
+    <table style="margin-top:14px"><thead><tr><th>Unit</th><th>State</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="cap">Showing the units you deployed (under <code>/etc/systemd/system</code>) plus any failed unit. Vendor services are hidden by default to keep the table readable.</p>`;
+}
+
+async function renderServicesTab(){
+  if(CURRENT_HOST === 'local'){ if(HH) renderServicesBlock(HH.systemd); return; }
+  await loadHostData(CURRENT_HOST);
+  const sd = HOST_DATA && HOST_DATA.host && HOST_DATA.host.systemd;
+  if(!sd){
+    const svc = document.getElementById('svcbody');
+    if(svc) svc.innerHTML = `<div class="ins info"><div class="ic">⏳</div><div><div class="t">Waiting for ${esc(CURRENT_HOST)}…</div><div class="d">Probes run every ${FLEET ? (FLEET.interval||10) : 10}s; new hosts take one cycle to populate. If this stays here, check the host's last Test on the Hosts tab.</div></div></div>`;
+    return;
+  }
+  renderServicesBlock(sd);
 }
 
 // ── Update-available modal ────────────────────────────────────────────────────
@@ -1052,8 +1073,8 @@ async function deleteHost(name){
 }
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
-const HOST_SCOPED_TABS = new Set(['host']);   // tabs that already render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','containers','services','alerts']);
+const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','containers']);  // tabs not yet probed per-host
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -1223,12 +1244,62 @@ async function renderHostTab(){
   }
 }
 
+function hostCapability(hostName, capId){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === hostName);
+  if(!h || !h.last_check) return null;
+  return ((h.last_check.checks||[]).find(c => c.id === capId)) || null;
+}
+
+function describeMissingCapability(tabId){
+  // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
+  if(tabId === 'gpu' || tabId === 'models'){
+    const nv = hostCapability(CURRENT_HOST, 'nvidia');
+    if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
+      return {ic:'🚫',
+        title:`${CURRENT_HOST} has no NVIDIA GPU`,
+        detail:'During the last Test, <code>nvidia-smi</code> was not detected on this host. ' +
+               (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
+                                 : 'GPU monitoring relies on the NVIDIA driver + nvidia-smi.')};
+    }
+    if(nv && nv.status === 'ok'){
+      return {ic:'🛠️',
+        title:`Per-host ${tabId.toUpperCase()} view is on the way`,
+        detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')}, but per-host VRAM and process attribution lands in the next slice. For now, switch to <b>Local</b> to see the hub's ${tabId.toUpperCase()} view.`};
+    }
+    return {ic:'⏳',
+      title:`${tabId.toUpperCase()} info not yet probed for ${CURRENT_HOST}`,
+      detail:'Open the <b>Hosts</b> tab and click <b>Test</b> on this host first — the capability checklist tells us what to do.'};
+  }
+  if(tabId === 'containers'){
+    const dk = hostCapability(CURRENT_HOST, 'docker');
+    if(dk && dk.status === 'info'){
+      return {ic:'🚫',
+        title:`Docker is not installed on ${CURRENT_HOST}`,
+        detail:'The Containers tab needs the Docker daemon. Install Docker on this host (or check that the daemon is running) and re-Test.'};
+    }
+    if(dk && dk.status === 'warn'){
+      return {ic:'⚠️',
+        title:`Docker is installed on ${CURRENT_HOST} but the socket isn't reachable`,
+        detail:`${esc(dk.detail || '')} Open the Hosts tab and use the <b>Run on remote</b> button on this host to fix it, then come back.`};
+    }
+    if(dk && dk.status === 'ok'){
+      return {ic:'🛠️',
+        title:`Per-host Containers view is on the way`,
+        detail:`${CURRENT_HOST} has Docker (server ${esc(dk.detail||'')}), but the per-host container table lands in the next slice. Meanwhile, switch to <b>Local</b> to see the hub's containers.`};
+    }
+    return {ic:'⏳',
+      title:`Docker info not yet probed for ${CURRENT_HOST}`,
+      detail:'Open the <b>Hosts</b> tab and click <b>Test</b> on this host first.'};
+  }
+  return {ic:'ℹ️',
+    title:`${tabId[0].toUpperCase()+tabId.slice(1)} is local-only for now`,
+    detail:'Per-host support lands in the next slice.'};
+}
+
 function renderLocalOnlyNotice(tabId){
   if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
   if(!sec) return;
-  // Hide the existing local cards so the user doesn't see ardi data labelled
-  // with cloudy's name at the top.
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='none');
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
@@ -1236,11 +1307,9 @@ function renderLocalOnlyNotice(tabId){
     notice.className = 'scope-notice';
     sec.insertBefore(notice, sec.firstChild);
   }
-  notice.innerHTML = `<div class="ic">ℹ️</div>
-    <div><b>${esc(tabId[0].toUpperCase()+tabId.slice(1))} is local-only for now.</b>
-    You're viewing <b>${esc(CURRENT_HOST)}</b>. The hub already polls it for host vitals (CPU/RAM/GPU/disks
-    on Overview and the Host tab), but per-host ${esc(tabId)} collection lands in the next slice.
-    Switch to <b>Local</b> at the top to see this tab for the hub.</div>`;
+  const m = describeMissingCapability(tabId);
+  notice.innerHTML = `<div class="ic">${m.ic}</div>
+    <div><b>${esc(m.title)}</b><br><span class="muted">${m.detail}</span></div>`;
 }
 function clearLocalOnlyNotice(tabId){
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
