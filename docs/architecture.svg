@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 360" width="880" height="360" role="img" aria-label="Hub-and-spokes architecture: a single homelab-monitor container polls registered remote hosts over SSH on a 10-second cadence.">
+  <title>Hub-and-spokes — agentless polling over SSH</title>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d29922"/>
+    </marker>
+    <linearGradient id="hubGlow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d29922" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#d29922" stop-opacity="0"/>
+    </linearGradient>
+    <style>
+      .bg     { fill: #0d1117; stroke: #30363d; stroke-width: 1; }
+      .header { font: 600 12.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #8b949e; letter-spacing: 0.08em; text-transform: uppercase; }
+      .node      { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+      .hub-node  { fill: #161b22; stroke: #d29922; stroke-width: 1.6; }
+      .name      { font: 600 14.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #e6edf3; }
+      .meta      { font: 400 11.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #8b949e; }
+      .accent    { fill: #d29922; }
+      .dim       { fill: #5b6168; }
+      .arrow     { stroke: #d29922; stroke-width: 1.4; fill: none; stroke-dasharray: 6 5; }
+      .lbl-pill  { fill: #161b22; stroke: #d29922; stroke-width: 1; }
+      .lbl-text  { font: 500 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #d29922; }
+      .footnote  { font: 400 11.5px ui-sans-serif, system-ui, sans-serif; fill: #8b949e; }
+    </style>
+  </defs>
+
+  <!-- frame -->
+  <rect class="bg" x="0.5" y="0.5" width="879" height="359" rx="12"/>
+
+  <!-- header label -->
+  <text class="header" x="32" y="36">Hub-and-spokes — agentless polling over SSH</text>
+
+  <!-- soft glow behind the hub to draw the eye -->
+  <ellipse cx="200" cy="180" rx="170" ry="120" fill="url(#hubGlow)"/>
+
+  <!-- HUB -->
+  <g transform="translate(96, 138)">
+    <rect class="hub-node" x="0" y="0" width="208" height="92" rx="14"/>
+    <!-- little satellite glyph -->
+    <g transform="translate(20, 26)">
+      <circle cx="20" cy="20" r="18" fill="none" stroke="#d29922" stroke-width="1.4"/>
+      <circle cx="20" cy="20" r="11" fill="none" stroke="#d29922" stroke-width="0.9" opacity="0.5"/>
+      <circle cx="20" cy="20" r="3.5" fill="#d29922"/>
+    </g>
+    <text class="name" x="78" y="32">Hub container</text>
+    <text class="meta" x="78" y="52">homelab-monitor</text>
+    <text class="meta" x="78" y="68">runs on your main box</text>
+  </g>
+
+  <!-- arrows from hub to spokes (with the SSH command label floating once) -->
+  <path class="arrow" d="M 308 170 C 420 110, 510 95, 588 92"  marker-end="url(#arr)"/>
+  <path class="arrow" d="M 308 184 C 420 188, 510 190, 588 192" marker-end="url(#arr)"/>
+  <path class="arrow" d="M 308 198 C 420 268, 510 286, 588 292" marker-end="url(#arr)"/>
+
+  <!-- floating label on the centre arrow -->
+  <g transform="translate(380, 168)">
+    <rect class="lbl-pill" x="0" y="0" width="184" height="22" rx="11"/>
+    <text class="lbl-text" x="10" y="15">ssh user@host python3 -</text>
+  </g>
+
+  <!-- SPOKES -->
+  <g transform="translate(588, 60)">
+    <rect class="node" x="0" y="0" width="208" height="64" rx="10"/>
+    <circle class="accent" cx="18" cy="32" r="4"/>
+    <text class="name" x="32" y="30">cloudy</text>
+    <text class="meta" x="32" y="48">Ubuntu 22.04 · systemd</text>
+  </g>
+
+  <g transform="translate(588, 160)">
+    <rect class="node" x="0" y="0" width="208" height="64" rx="10"/>
+    <circle class="accent" cx="18" cy="32" r="4"/>
+    <text class="name" x="32" y="30">nas</text>
+    <text class="meta" x="32" y="48">Debian · ZFS</text>
+  </g>
+
+  <g transform="translate(588, 260)">
+    <rect class="node" x="0" y="0" width="208" height="64" rx="10"/>
+    <circle class="accent" cx="18" cy="32" r="4"/>
+    <text class="name" x="32" y="30">pi-edge</text>
+    <text class="meta" x="32" y="48">Raspberry Pi · arm64</text>
+  </g>
+
+  <!-- footer: cadence + isolation -->
+  <text class="footnote" x="32" y="334">Every <tspan class="accent">10s</tspan>, isolated per-host timeout, errors keep the previous good snapshot. <tspan class="dim">Nothing persists on the remote.</tspan></text>
+</svg>

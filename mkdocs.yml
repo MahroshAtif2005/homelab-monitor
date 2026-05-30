@@ -20,15 +20,15 @@ theme:
   palette:
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: amber
-      accent: amber
+      primary: black
+      accent: blue
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: amber
-      accent: amber
+      primary: black
+      accent: blue
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
@@ -68,6 +68,9 @@ markdown_extensions:
 
 extra_css:
   - assets/extra.css
+
+extra_javascript:
+  - assets/landing.js
 
 extra:
   social:

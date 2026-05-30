@@ -8,19 +8,7 @@ agents, no installs on the remote** — just an SSH key and `python3`.
 
 ## How the loop works
 
-```
-                  ┌────────────────────┐
-                  │   This container   │  ← the "hub"
-                  │   (the dashboard)  │
-                  └─────────┬──────────┘
-                            │ every 10 s, over SSH
-            ┌───────────────┼────────────────┐
-            ▼               ▼                ▼
-        ┌───────┐       ┌────────┐       ┌────────┐
-        │ remote│       │ remote │       │ remote │
-        │  #1   │       │   #2   │       │   #3   │
-        └───────┘       └────────┘       └────────┘
-```
+![Hub-and-spokes — agentless polling over SSH](screenshots/architecture.svg){ width="100%" }
 
 Each cycle the hub pipes a tiny `probe.py` through `ssh user@host python3 -`.
 The remote runs it, prints **one JSON blob** (CPU/RAM/load/uptime/disks/temp +

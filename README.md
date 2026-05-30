@@ -88,15 +88,7 @@ Since 0.8 the hub watches more than its own box. **Open the Hosts tab**, paste
 the hub's auto-generated SSH key onto each remote you want to monitor, and the
 hub will start polling it. No agents, no installs, just SSH + Python 3.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Host:  ● Local (ardi)   ● cloudy   + Add host                │  ← pill bar
-├──────────────────────────────────────────────────────────────┤
-│  Overview  GPU  AI Models  Containers  Services  Host  …      │
-├──────────────────────────────────────────────────────────────┤
-│  All hosts table — every box, every KPI, refreshed each 10s   │
-└──────────────────────────────────────────────────────────────┘
-```
+![Hub-and-spokes architecture](docs/architecture.svg)
 
 **Adding a host (4 steps, no guessing):**
 
@@ -226,18 +218,18 @@ else keeps working.
 
 ## How it works
 
-```
-nvidia-smi ─► per-process VRAM + PID ─► /proc/<pid>/cgroup ─► Docker API ─► container name
-model servers ─► their own API (/api/ps, /v1/models, …) ─► which model + VRAM
-Docker API ─► every container's state + health-check status
-systemd (D-Bus) ─► service state, with your own units highlighted
-host /proc, /sys, statvfs ─► CPU / RAM / load / temp / disk
-        │
-     SQLite ─► downsample-on-read ─► single-page dashboard (Chart.js, vendored)
-```
+The hub stitches five live sources into one view:
 
-A background thread samples on an interval; the web layer buckets any range down to
-~360 points so it stays responsive over months.
+- **`nvidia-smi`** → per-process VRAM + PID → mapped to container via `/proc/<pid>/cgroup` + the Docker API
+- **Model-server APIs** (Ollama `/api/ps`, OpenAI-style `/v1/models`, A1111, TGI, …) → which model is loaded and its VRAM
+- **Docker API** → every container's state + health-check status
+- **systemd D-Bus** → service state, with your own units highlighted
+- **Host `/proc`, `/sys`, `statvfs`** → CPU / RAM / load / temp / disk
+
+Everything is sampled by a background thread on an interval, persisted to
+**SQLite**, and read with downsampling so any range — last hour or last six
+months — stays fast and readable. The dashboard is a single page with vendored
+Chart.js: no build step, no framework, no cloud round-trips.
 
 The container also exposes a tiny **`GET /healthz`** liveness endpoint (no DB, no
 locks — just a 200 with the running version) that the image's `HEALTHCHECK` polls
