@@ -57,6 +57,10 @@ as quickly and reads as cleanly as the last hour.
 
 ## Screenshots
 
+**Overview** — every registered host at a glance, polling every 10 s:
+
+![Overview / All hosts](docs/overview.png)
+
 **GPU — VRAM by service over time** (who held the card, and when):
 
 ![GPU tab](docs/gpu.png)
@@ -65,13 +69,17 @@ as quickly and reads as cleanly as the last hour.
 
 ![Containers tab](docs/containers.png)
 
-**Services** — systemd health, with your own units highlighted and failures first:
+**Services** — systemd health for any registered host, your own units highlighted and failures first:
 
 ![Services tab](docs/services.png)
 
 **Host** — CPU, RAM, load, temperature and disk usage:
 
 ![Host tab](docs/host.png)
+
+**Hosts** — registry + onboarding wizard with the per-capability checklist:
+
+![Hosts tab](docs/hosts.png)
 
 ## Multi-machine monitoring
 
