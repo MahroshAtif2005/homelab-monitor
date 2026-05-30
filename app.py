@@ -864,6 +864,34 @@ def _remedy_sshd_down(os_info):
     return {"where": "on the remote",
             "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
 
+def _clean_ssh_err(err, out, rc):
+    """Build a human summary of an SSH failure. Skips `Warning:` chatter (host
+    key added, deprecated alg, etc.) — those aren't the failure cause; the real
+    error is usually a line below them."""
+    lines = []
+    for l in (err or "").splitlines():
+        s = l.strip()
+        if not s: continue
+        if s.lower().startswith("warning:"): continue
+        if "Pseudo-terminal will not be allocated" in s: continue
+        lines.append(s)
+    if lines:
+        return " · ".join(lines)[:300]
+    if rc == 124:
+        return "ssh timed out"
+    if (out or "").strip():
+        return (out or "").splitlines()[0][:240]
+    return "no response (rc=%d)" % rc
+
+def _tcp_probe(host, port, timeout=2.0):
+    """Quick TCP-connect probe. Lets us distinguish 'host unreachable / port
+    closed' (no point retrying SSH) from 'reached, but auth failed'."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, None
+    except Exception as e:
+        return False, str(e)
+
 def _summarize(checks):
     by = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
     for c in checks:
@@ -894,26 +922,42 @@ def probe_host(name):
     checks = []
     os_info = {}
 
-    # 1) SSH connect
+    # 1) SSH connect.  Pre-probe TCP-22 so we can give a clear "port closed"
+    # answer instead of letting ssh time out cryptically.
+    tcp_ok, tcp_err = _tcp_probe(host, port)
+    if not tcp_ok:
+        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
+                "detail": f"port {port} not reachable: {tcp_err}",
+                "debug": tcp_err,
+                "remedy": {"where": "on the remote",
+                           "cmd": "# sshd may not be running, or the port is firewalled.\n"
+                                  "# On the remote:\nsudo systemctl status sshd\n"
+                                  "# Or check the firewall:\nsudo firewall-cmd --list-ports  # firewalld\nsudo ufw status                  # ufw"}}
+        checks.append(item)
+        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
+        _record_check(name, result)
+        return result
+
     rc, out, err, ms = _ssh(user, host, port, "echo ok", timeout=SSH_CONNECT_TIMEOUT + 2)
     if rc == 0 and out == "ok":
         checks.append({"id": "connect", "label": "SSH reachable",
                        "status": "ok", "detail": f"port {port}, {ms} ms"})
     else:
-        msg = ((err or out or "no response").splitlines() or [""])[0][:240]
+        msg = _clean_ssh_err(err, out, rc)
         hint = None
         e = (err or "")
         if "Permission denied" in e:
             hint = _remedy_pubkey(user)
-        elif "Connection refused" in e or "Connection timed out" in e or rc == 124:
-            hint = _remedy_sshd_down(None)
         elif "Host key verification failed" in e:
             hint = {"where": "on the hub (this container)",
                     "cmd": f"# Clear the saved host key and re-test:\nrm {SSH_KNOWN_HOSTS}"}
         elif "Could not resolve hostname" in e or "Name or service not known" in e:
             hint = {"where": "on the hub (this container)",
                     "cmd": "# Hostname did not resolve. Try the IP, or check the container's DNS."}
-        item = {"id": "connect", "label": "SSH reachable", "status": "fail", "detail": msg}
+        elif rc == 124:
+            hint = _remedy_sshd_down(None)
+        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
+                "detail": msg, "debug": (err or "")[:2000]}
         if hint: item["remedy"] = hint
         checks.append(item)
         result = {"checks": checks, "summary": _summarize(checks), "os": {}}
