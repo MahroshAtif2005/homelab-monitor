@@ -160,14 +160,17 @@
   transform: translateY(-1px);
 }
 
-/* Hero GIF — bigger, with shadow */
+/* Hero GIF — bigger, with shadow + a visible-but-subtle outline so the
+   dark dashboard frame doesn't melt into the dark page bg. */
 .hl-hero .hl-gif {
   max-width: 920px; width: 100%;
-  border: 1px solid var(--hl-bd);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 12px;
   display: block; margin: 8px auto 0;
-  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7),
-              0 8px 20px -8px rgba(88, 166, 255, 0.18);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 30px 80px -20px rgba(0, 0, 0, 0.7),
+    0 8px 20px -8px rgba(88, 166, 255, 0.18);
 }
 
 .hl-hero .hl-badges {
@@ -294,17 +297,21 @@
 }
 .hl-shots a {
   display: block; border-radius: 12px; overflow: hidden;
-  border: 1px solid var(--hl-bd);
+  /* Visible-but-subtle outline so each dark screenshot reads as a distinct
+     card instead of bleeding into the page background. */
+  border: 1px solid rgba(255, 255, 255, 0.09);
   background: var(--hl-card);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
   transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
               border-color 0.3s, box-shadow 0.3s;
   text-decoration: none;
 }
 .hl-shots a:hover {
   transform: translateY(-3px);
-  border-color: var(--hl-bd-2);
+  border-color: rgba(88, 166, 255, 0.45);
   box-shadow: 0 24px 50px -22px rgba(0, 0, 0, 0.6),
-              0 0 0 1px rgba(88, 166, 255, 0.15);
+              0 0 0 1px rgba(88, 166, 255, 0.25),
+              0 0 22px -4px rgba(88, 166, 255, 0.2);
 }
 .hl-shots img {
   display: block; width: 100%; height: auto;
@@ -316,6 +323,14 @@
   color: var(--hl-tx-mut); font-size: 0.8rem;
   border-top: 1px solid var(--hl-bd);
   background: var(--hl-card-2);
+}
+
+/* ── Images inside content pages (multi-host architecture diagram, etc.) ──
+   Same dark-on-dark issue as the screenshot grid; same fix. */
+.md-typeset img {
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
 /* ── Quick install card ───────────────────────────────────────────────────── */
