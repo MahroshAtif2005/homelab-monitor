@@ -1,0 +1,49 @@
+name: Sync README to Docker Hub
+
+# Docker Hub renders the README in its own viewer with no repo context, so
+# relative image paths like `docs/foo.png` 404. This workflow rewrites those
+# to absolute raw.githubusercontent.com URLs and PATCHes Docker Hub's
+# `full_description` field. The GitHub README is left untouched.
+
+on:
+  push:
+    branches: [main]
+    paths: ['README.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync README (rewriting docs/ to absolute URLs)
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REPO: sikamikaniko123/homelab-monitor
+          RAW_BASE: https://raw.githubusercontent.com/${{ github.repository }}/main
+        run: |
+          set -euo pipefail
+
+          README=$(sed -E "s|\]\(docs/|](${RAW_BASE}/docs/|g" README.md)
+
+          JWT=$(curl -fsSL https://hub.docker.com/v2/users/login/ \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg u "$DH_USER" --arg p "$DH_TOKEN" '{username:$u, password:$p}')" \
+            | jq -r .token)
+
+          if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
+            echo "::error::Failed to obtain Docker Hub JWT — check DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets."
+            exit 1
+          fi
+
+          jq -nc --arg d "$README" '{full_description:$d}' \
+            | curl -fsSL -X PATCH "https://hub.docker.com/v2/repositories/${REPO}/" \
+                -H "Authorization: JWT ${JWT}" \
+                -H 'Content-Type: application/json' \
+                --data-binary @- \
+            | jq '{name, hub_full_len: (.full_description | length)}'
