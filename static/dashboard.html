@@ -118,6 +118,16 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .btn-mini:hover{border-color:var(--mut)}
 .btn-mini.danger{color:var(--crit);border-color:#f8514955}
 .btn-mini.danger:hover{border-color:var(--crit)}
+.hostrow .tg-edit{background:#161b22;color:var(--tx);border:1px solid var(--accent);border-radius:5px;padding:2px 7px;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;min-width:220px}
+.lansug{background:#0d1117;border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-top:8px}
+.lansug .row{display:flex;align-items:center;gap:10px;padding:5px 0;border-top:1px dashed var(--bd)}
+.lansug .row:first-child{border-top:0}
+.lansug .ip{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--tx);min-width:120px}
+.lansug .hn{color:var(--mut);font-size:12.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lansug .src{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;border:1px solid var(--bd);border-radius:5px;padding:1px 6px;color:var(--mut)}
+.lansug .ssh{font-size:10.5px;border-radius:5px;padding:1px 6px;color:var(--ok);border:1px solid #3fb95055}
+.lansug .ssh.closed{color:var(--mut);border-color:var(--bd)}
+.lansug .meta{color:var(--mut);font-size:11.5px;margin-bottom:4px}
 </style></head><body><div class="wrap">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -271,8 +281,11 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
       <pre class="hosts-key" id="pubkey_cmd" style="display:none;margin-top:8px"></pre>
     </div>
 
-    <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">
-      Add a host</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:5px">
+      <span class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em">Add a host</span>
+      <span style="flex:1"></span>
+      <button class="btn-mini" id="h_scan">🔍 Scan LAN</button>
+    </div>
     <div class="hosts-form">
       <input type="text" class="hosts-input" id="h_name"   placeholder="name (e.g. ardi)"        autocomplete="off" spellcheck="false">
       <input type="text" class="hosts-input" id="h_target" placeholder="user@host or user@host:port" autocomplete="off" spellcheck="false">
@@ -280,7 +293,10 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
     </div>
     <div class="cap" style="margin-top:6px">
       After adding, hit <b>Test</b> on the row — the checklist will tell you exactly what to paste on the remote for anything not yet working.
+      Made a typo? Click the <b>✎</b> next to a host's SSH target to fix it inline.
     </div>
+
+    <div id="lansuggest" style="display:none"></div>
 
     <div id="hostlist" style="margin-top:14px"></div>
   </div>
@@ -660,7 +676,8 @@ function renderHosts(hosts){
     return `<div class="hostrow ${overall}" data-h="${esc(h.name)}">
       <div class="hd">
         <span class="nm">${esc(h.name)}</span>
-        <span class="tg">${esc(h.ssh_target)}</span>
+        <span class="tg" data-tg="${esc(h.ssh_target)}">${esc(h.ssh_target)}</span>
+        <button class="btn-mini hbtn-edit" data-h="${esc(h.name)}" title="Edit SSH target">✎</button>
         ${badge}
         <span class="ts">checked ${relTime(h.last_check_at)}</span>
         <span class="ac">
@@ -675,6 +692,100 @@ function renderHosts(hosts){
   }).join('');
   wrap.querySelectorAll('.hbtn-test').forEach(b => b.onclick = () => testHost(b.dataset.h));
   wrap.querySelectorAll('.hbtn-del').forEach(b => b.onclick  = () => deleteHost(b.dataset.h));
+  wrap.querySelectorAll('.hbtn-edit').forEach(b => b.onclick = () => beginEditHost(b.dataset.h));
+}
+
+function beginEditHost(name){
+  const row = document.querySelector(`.hostrow[data-h="${CSS.escape(name)}"]`);
+  if(!row) return;
+  const tg = row.querySelector('.tg');
+  const current = tg.dataset.tg || tg.textContent;
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'tg-edit'; input.value = current;
+  input.spellcheck = false; input.autocomplete = 'off';
+  tg.replaceWith(input); input.focus(); input.select();
+  const editBtn = row.querySelector('.hbtn-edit'); editBtn.style.display='none';
+  let done = false;
+  const finish = async (commit) => {
+    if(done) return; done = true;
+    const v = input.value.trim();
+    if(!commit || v === current){ await loadHosts(); return; }
+    let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}`,
+      {method:'PATCH', headers:{'Content-Type':'application/json'},
+       body: JSON.stringify({ssh_target: v})})).json(); }
+    catch(e){ showHostStatus('critical','Edit failed: '+e); await loadHosts(); return; }
+    if(!j.ok){ showHostStatus('critical', j.error || 'Edit failed.'); await loadHosts(); return; }
+    showHostStatus('ok','Updated — re-running Test.');
+    await loadHosts();
+    testHost(name);
+  };
+  input.addEventListener('keydown', e => {
+    if(e.key==='Enter'){ e.preventDefault(); finish(true); }
+    else if(e.key==='Escape'){ e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+async function scanLAN(){
+  const btn = document.getElementById('h_scan');
+  const wrap = document.getElementById('lansuggest');
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⏳ Scanning…';
+  wrap.style.display = 'block';
+  wrap.innerHTML = '<div class="muted" style="padding:8px 2px">Probing ARP cache + sweeping local /24 for SSH on :22… (≤5s)</div>';
+  let j;
+  try{ j = await(await fetch('/api/lan/scan')).json(); }
+  catch(e){
+    wrap.innerHTML = `<div class="muted">Scan failed: ${esc(String(e))}</div>`;
+    btn.disabled=false; btn.textContent=t0; return;
+  }
+  renderLanSuggestions(j);
+  btn.disabled=false; btn.textContent=t0;
+}
+function renderLanSuggestions(j){
+  const wrap = document.getElementById('lansuggest');
+  const hosts = j.hosts || [];
+  if(!hosts.length){
+    wrap.innerHTML = '<div class="lansug"><div class="muted">No candidates found. ' +
+      'Either nothing on the LAN answered, or the container can\'t see the host network — ' +
+      'check that <code>network_mode: host</code> is set.</div></div>';
+    return;
+  }
+  const meta = `Found ${hosts.length} candidate${hosts.length===1?'':'s'} · scanned ${new Date(j.scanned_at*1000).toLocaleTimeString()}. ` +
+    `<span class="muted">SSH-open hosts are most likely worth registering.</span>`;
+  wrap.innerHTML = '<div class="lansug">' +
+    `<div class="meta">${meta}</div>` +
+    hosts.map(h => {
+      const display = h.hostname || h.ip;
+      const ssh = h.ssh_open
+        ? '<span class="ssh">SSH :22 open</span>'
+        : '<span class="ssh closed">no :22</span>';
+      return `<div class="row">
+        <span class="ip">${esc(h.ip)}</span>
+        <span class="hn" title="${esc(h.hostname||'')}">${esc(h.hostname||'(no reverse DNS)')}</span>
+        <span class="src">${esc(h.source)}</span>
+        ${ssh}
+        <button class="btn-mini lan-use"
+                data-ip="${esc(h.ip)}" data-hn="${esc(h.hostname||'')}">Use →</button>
+      </div>`;
+    }).join('') +
+  '</div>';
+  wrap.querySelectorAll('.lan-use').forEach(b => b.onclick = () => useLanSuggestion(b.dataset.hn || b.dataset.ip, b.dataset.ip));
+}
+function useLanSuggestion(host, ip){
+  // Prefill the form. We don't know the SSH user — leave the literal token
+  // "user" so the user types over it.
+  const tgt = document.getElementById('h_target');
+  tgt.value = `user@${host}`;
+  // Best-guess name: hostname stem (before the first dot), else IP dashes.
+  const nameField = document.getElementById('h_name');
+  if(!nameField.value){
+    nameField.value = (host && host.indexOf('.')!==-1) ? host.split('.')[0]
+                    : (host || ip.replace(/\./g,'-'));
+  }
+  // Focus the user portion so they type to replace.
+  tgt.focus();
+  tgt.setSelectionRange(0, 4);  // selects "user"
+  showHostStatus('info','Prefilled — replace "user" with the SSH user, then Add host.');
 }
 function renderChecks(checks){
   return checks.map(c => {
@@ -744,6 +855,7 @@ window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h &
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
 document.getElementById('h_add').onclick = addHost;
+document.getElementById('h_scan').onclick = scanLAN;
 document.getElementById('h_name').addEventListener('keydown', e => { if(e.key==='Enter') addHost(); });
 document.getElementById('h_target').addEventListener('keydown', e => { if(e.key==='Enter') addHost(); });
 document.getElementById('pubkey_copy').onclick = async () => {

@@ -18,7 +18,8 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, Response
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -569,6 +570,155 @@ def delete_host(name):
         cur = DB.execute("DELETE FROM hosts WHERE name=?", (name,))
         DB.commit()
     return cur.rowcount > 0
+
+def update_host(name, ssh_target=None, tags=None):
+    """Patch an existing host. Returns (host_dict, error_or_None). The cached
+    last-check result is cleared because the old probe no longer applies to the
+    new target."""
+    fields, params = [], []
+    if ssh_target is not None:
+        if _parse_ssh_target(ssh_target) is None:
+            return None, "SSH target must look like user@host or user@host:port."
+        fields.append("ssh_target=?"); params.append(ssh_target.strip())
+    if tags is not None:
+        fields.append("tags=?"); params.append((tags or "").strip())
+    if not fields:
+        return None, "Nothing to update."
+    # Clear last-check whenever the target changes.
+    if ssh_target is not None:
+        fields += ["last_check_at=NULL", "last_check_json=NULL"]
+    params.append(name)
+    with LOCK:
+        cur = DB.execute(f"UPDATE hosts SET {','.join(fields)} WHERE name=?", params)
+        DB.commit()
+    if cur.rowcount == 0:
+        return None, f"No host named '{name}'."
+    with LOCK:
+        row = DB.execute("SELECT name, ssh_target, tags FROM hosts WHERE name=?",
+                         (name,)).fetchone()
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
+# ── LAN discovery (suggest hosts instead of asking the user to type) ───────────
+# Three signals merged: kernel ARP cache (free, sees recently-active hosts),
+# TCP-22 sweep across each local /24 (catches anything ARP missed), and reverse
+# DNS for friendly names. Container runs with `network_mode: host` so this sees
+# the host's network exactly. Results cached 30s to keep UI snappy.
+
+_LAN_CACHE = {"at": 0, "data": None}
+_LAN_LOCK  = threading.Lock()
+_LAN_TTL   = 30
+
+def _local_subnets():
+    """Yield (IPv4Network, iface) pairs for the host's small local subnets.
+    Reads /proc/net/route directly so we don't need iproute2 in the image."""
+    out = []
+    try:
+        with open("/proc/net/route") as f:
+            next(f, None)  # header
+            for line in f:
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                iface, dest_hex, _, _, _, _, _, mask_hex = parts[:8]
+                if dest_hex == "00000000":  # default route
+                    continue
+                # Skip Docker / VPN bridges — we don't want to ping every
+                # container, and we'd just rediscover containers we already
+                # know about.
+                if iface.startswith(("docker", "br-", "veth", "tun", "tap")):
+                    continue
+                try:
+                    dest = ".".join(str(int(dest_hex[i:i+2], 16)) for i in (6, 4, 2, 0))
+                    m_bytes = bytes(int(mask_hex[i:i+2], 16) for i in (6, 4, 2, 0))
+                    prefix  = bin(int.from_bytes(m_bytes, "big")).count("1")
+                except Exception:
+                    continue
+                if dest.startswith(("127.", "169.254.")):
+                    continue
+                if prefix < 22:   # too many hosts (>1k) — skip ping-sweep
+                    continue
+                try:
+                    net = ipaddress.IPv4Network(f"{dest}/{prefix}", strict=False)
+                except Exception:
+                    continue
+                if net.num_addresses > 1024:
+                    continue
+                out.append((net, iface))
+    except Exception as e:
+        print("local-subnets read error:", e, flush=True)
+    return out
+
+def discover_lan(port=22, timeout=0.4, max_workers=64):
+    """Discover LAN hosts likely worth registering. Returns a dict with
+    `hosts` (sorted by IP) and `scanned_at`. Each host has: ip, hostname?,
+    iface, source (arp|scan), ssh_open (bool)."""
+    with _LAN_LOCK:
+        now = time.time()
+        if _LAN_CACHE["data"] is not None and now - _LAN_CACHE["at"] < _LAN_TTL:
+            return _LAN_CACHE["data"]
+
+    candidates = {}
+
+    # 1) ARP cache — free, sees hosts the kernel has talked to recently.
+    try:
+        with open("/proc/net/arp") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 6:
+                    ip, _, _, mac, _, iface = parts[:6]
+                    if mac == "00:00:00:00:00:00":
+                        continue
+                    if iface.startswith(("docker", "br-", "veth", "tun", "tap")):
+                        continue
+                    candidates.setdefault(ip, {"ip": ip, "source": "arp", "iface": iface})
+    except Exception:
+        pass
+
+    # 2) Sweep small local subnets we haven't already covered via ARP.
+    own_ips = set()
+    try:
+        for ai in socket.getaddrinfo(socket.gethostname(), None):
+            if ai[0] == socket.AF_INET:
+                own_ips.add(ai[4][0])
+    except Exception:
+        pass
+    for net, iface in _local_subnets():
+        for ip_obj in net.hosts():
+            ip = str(ip_obj)
+            if ip in candidates or ip in own_ips:
+                continue
+            candidates[ip] = {"ip": ip, "source": "scan", "iface": iface}
+
+    # 3) Parallel TCP-22 probe + reverse DNS.
+    def probe(item):
+        ip = item["ip"]
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                item["ssh_open"] = True
+        except Exception:
+            item["ssh_open"] = False
+        try:
+            item["hostname"] = socket.gethostbyaddr(ip)[0]
+        except Exception:
+            pass
+        return item
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = list(ex.map(probe, list(candidates.values())))
+
+    # Keep ARP-seen hosts (interesting context) and anything reachable on :22.
+    keep = [r for r in results if r.get("ssh_open") or r.get("source") == "arp"]
+    try:
+        keep.sort(key=lambda r: tuple(int(o) for o in r["ip"].split(".")))
+    except Exception:
+        keep.sort(key=lambda r: r["ip"])
+
+    out = {"hosts": keep, "scanned_at": int(time.time())}
+    with _LAN_LOCK:
+        _LAN_CACHE["data"] = out
+        _LAN_CACHE["at"]   = time.time()
+    return out
 
 def _record_check(name, result):
     with LOCK:
@@ -1217,10 +1367,24 @@ def api_hosts():
         return jsonify({"ok": True, "host": host}), 201
     return jsonify({"hosts": list_hosts()})
 
-@app.route("/api/hosts/<name>", methods=["DELETE"])
-def api_hosts_delete(name):
-    ok = delete_host(name)
-    return jsonify({"ok": ok}), (200 if ok else 404)
+@app.route("/api/hosts/<name>", methods=["DELETE", "PATCH"])
+def api_hosts_one(name):
+    if request.method == "DELETE":
+        ok = delete_host(name)
+        return jsonify({"ok": ok}), (200 if ok else 404)
+    body = request.get_json(silent=True) or {}
+    host, err = update_host(
+        name,
+        ssh_target=(body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None),
+        tags=(body.get("tags").strip() if isinstance(body.get("tags"), str) else None),
+    )
+    if err:
+        return jsonify({"ok": False, "error": err}), 400 if "look like" in err or "Nothing" in err else 404
+    return jsonify({"ok": True, "host": host})
+
+@app.route("/api/lan/scan")
+def api_lan_scan():
+    return jsonify(discover_lan())
 
 @app.route("/api/hosts/<name>/test", methods=["POST"])
 def api_hosts_test(name):
