@@ -68,6 +68,32 @@ That's the whole pattern. The same shape applies to "add a model-server probe"
 (append to `PROBES` in `app.py`) and "add an alert channel" (extend the alert
 dispatcher).
 
+## Extending the multi-host probe
+
+Since 0.8, the hub can monitor *other* boxes too. To extend what's collected
+remotely:
+
+1. **Add a reader to `probe.py`.** Returns a small dict that gets merged into
+   the JSON blob the hub caches per host. Keep it pure stdlib (no install on
+   the remote) and short-timeout (≤3s) so a stuck command never blocks the
+   poll cycle. Example:
+   ```python
+   def read_smart():
+       try:
+           r = subprocess.run(["smartctl", "-A", "/dev/sda", "-j"],
+                              capture_output=True, timeout=2)
+           ...
+       except Exception:
+           return {}
+   ```
+2. **Wire it into `host_poller`** automatically — `_probe_host_metrics` already
+   ships whatever `probe.py` prints, so adding a new key is enough.
+3. **Render it.** Either add it to the All-hosts table (`/api/fleet` reads
+   `host.<your_key>`) or to a per-host tab.
+
+Keep `probe.py` self-contained — the hub pipes it over SSH on every cycle, so
+external deps would defeat the "agentless" promise.
+
 ## Style
 
 - Keep it **plug-and-play** — anything new should work with `docker compose up
