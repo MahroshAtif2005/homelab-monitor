@@ -5,7 +5,7 @@
 [![Clones (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 [![Unique cloners (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones-unique.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 
-![version](https://img.shields.io/badge/version-0.7.0-blue)
+![version](https://img.shields.io/badge/version-0.8.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
@@ -14,7 +14,9 @@
 A small, friendly dashboard for a self-hosted home lab. One container gives you a
 single page that answers the everyday questions: **is the GPU busy and which model
 is using it, are my containers healthy, are my services running, and is the box
-itself OK?** — readable from your phone over the VPN.
+itself OK?** — readable from your phone over the VPN. Since 0.8, it also covers
+**multiple machines**: register your other boxes over SSH and see every host's
+vitals side-by-side in one cockpit.
 
 It's built to be **plug-and-play**: `docker compose up -d --build`, open the page,
 done. No agents, no Prometheus/Grafana stack, no cloud, and no config required to
@@ -26,10 +28,13 @@ extend.
 
 ## What it shows
 
-The page is organised into tabs so it stays readable as it grows:
+A **host pill bar** at the top lets you switch between the local box and any
+remote you've registered. The page is organised into tabs that scope to the
+active host:
 
-- **Overview** — a status card per subsystem (GPU, Host, Containers, Services) plus
-  plain-language insights, so one glance tells you whether anything needs attention.
+- **Overview** — every registered host side-by-side: CPU% + cores, RAM % + GB,
+  GPU util + VRAM, load, uptime, temp, disks. Click a row to focus that host in
+  the other tabs.
 - **GPU** — live VRAM / utilisation / power / temp, *which container or process*
   holds the VRAM (mapped automatically, nothing hardcoded), and a VRAM-by-service
   timeline.
@@ -37,9 +42,15 @@ The page is organised into tabs so it stays readable as it grows:
   read live from the server's own API.
 - **Containers** — health of **every** Docker container: running / stopped /
   restarting, and whether its health-check is passing.
-- **Services** — **systemd** service health, with the units *you* deployed
-  highlighted and any failed unit surfaced first.
-- **Host** — CPU, RAM, load, uptime, temperature and disk usage, with history.
+- **Services** — **systemd** service health for the active host (local *or*
+  remote), with the units *you* deployed highlighted and any failed unit
+  surfaced first.
+- **Host** — CPU, RAM, load, uptime, temperature and disk usage. History is
+  local-only for now; live KPIs work for any registered host.
+- **Hosts** — a registry and onboarding wizard: paste the hub's public key,
+  add a host, run a per-capability **Test connection** (SSH / `/proc` / Docker
+  socket / systemd / `nvidia-smi`), and use **▶ Run on remote** to execute the
+  fix command on the remote without leaving the dashboard.
 
 History is stored in SQLite and **downsampled on read**, so a six-month view loads
 as quickly and reads as cleanly as the last hour.
@@ -61,6 +72,60 @@ as quickly and reads as cleanly as the last hour.
 **Host** — CPU, RAM, load, temperature and disk usage:
 
 ![Host tab](docs/host.png)
+
+## Multi-machine monitoring
+
+Since 0.8 the hub watches more than its own box. **Open the Hosts tab**, paste
+the hub's auto-generated SSH key onto each remote you want to monitor, and the
+hub will start polling it. No agents, no installs, just SSH + Python 3.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Host:  ● Local (ardi)   ● cloudy   + Add host                │  ← pill bar
+├──────────────────────────────────────────────────────────────┤
+│  Overview  GPU  AI Models  Containers  Services  Host  …      │
+├──────────────────────────────────────────────────────────────┤
+│  All hosts table — every box, every KPI, refreshed each 10s   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Adding a host (4 steps, no guessing):**
+
+1. Open **Hosts** → click **🔍 Scan LAN** to suggest reachable boxes (ARP cache
+   + TCP-22 sweep), or type a host directly as `user@host[:port]`.
+2. Hit **Add host**, then **Test**. The wizard runs a capability checklist:
+   - ✅ SSH reachable (port + ms)
+   - ✅ Detected OS (e.g. `Ubuntu 22.04.5 LTS · systemd`)
+   - ✅ `/proc` readable
+   - ⚠️ Docker socket — if `'arsen' not in the docker group`, the exact
+     remediation appears inline: `sudo usermod -aG docker arsen`.
+   - ✅ systemd D-Bus
+   - ℹ️ `nvidia-smi` (or "not found — GPU panel will be hidden")
+3. For amber/red rows, click **📋 Copy** or **▶ Run on remote** — if the
+   command needs `sudo`, the panel asks for the sudo password with a clear
+   *"used once, not stored, never in argv"* note. Output streams back inline.
+4. Done — the hub starts polling. Switch to **Overview** to see the new row
+   populate within one poll cycle (~10 s).
+
+**Where data comes from.** The hub pipes a small self-contained `probe.py`
+through SSH (`ssh user@host python3 -`). Nothing persists on the remote;
+the script reads `/proc/*`, optionally runs `nvidia-smi` and `systemctl
+list-units`, and prints one JSON blob back. The image installs
+`openssh-client` and `ssh-keygen` for this — the SSH key lives under
+`./data/.ssh/` so it survives rebuilds.
+
+**Security.** Pubkey auth only (passwords disabled). Per-host SSH timeouts so
+a slow remote can never block the loop. The "Run on remote" sudo password is
+piped via stdin to the remote `sudo -S` — never appears in argv on either side
+and is never persisted to SQLite or logs.
+
+**What this slice covers vs. what's coming:** Overview, Host, and Services
+tabs work for any registered host that supports them. GPU / AI Models /
+Containers tabs are local-only for now and tell you exactly why ("cloudy has
+no NVIDIA GPU", "Docker not installed on cloudy", etc.) using the host's
+capability check — per-host versions land in subsequent releases. See
+[#35](https://github.com/SikamikanikoBG/homelab-monitor/issues/35) for the
+broader design and follow-up slices.
 
 ## Quick start
 Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the

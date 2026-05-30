@@ -18,7 +18,8 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, Response
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -27,7 +28,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.7.0"
+VERSION      = "0.8.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -44,6 +45,14 @@ UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
 UPDATE_TTL_POSITIVE = 6 * 3600
 UPDATE_TTL_NEGATIVE = 30 * 60
 MAX_POINTS   = 360
+# Multi-machine monitoring (Issue #35, slice 1: registry + probe). The hub's own
+# SSH key lives under SSH_DIR — it's inside /data so it persists across rebuilds
+# the same way the SQLite history does. Capability probes run via the system
+# `ssh` client (installed in the Dockerfile).
+SSH_DIR         = os.environ.get("SSH_DIR", "/data/.ssh")
+SSH_KEY         = os.path.join(SSH_DIR, "id_ed25519")
+SSH_KNOWN_HOSTS = os.path.join(SSH_DIR, "known_hosts")
+SSH_CONNECT_TIMEOUT = 5
 HEX64        = re.compile(r"[0-9a-f]{64}")
 OOM_RE       = re.compile(r"(out of memory|cuda error: out of memory|failed to allocate|bfcarena|"
                           r"cudamalloc|outofmemory|cublas_status_alloc_failed|cuda_error_out_of_memory)", re.I)
@@ -75,6 +84,14 @@ CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS hosts(
+  name TEXT PRIMARY KEY,
+  ssh_target TEXT NOT NULL,
+  tags TEXT DEFAULT '',
+  added_at INTEGER NOT NULL,
+  last_check_at INTEGER,
+  last_check_json TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
@@ -470,6 +487,697 @@ def health_scan():
 # Everything the notifier needs is configured from the dashboard's Settings tab
 # and stored in the `settings` table, so the container is plug-and-play and the
 # operator never has to edit docker-compose.yml just to enable alerts.
+# ── Hosts registry + SSH capability probe (Issue #35, slice 1) ────────────────
+# A monitored host is just a (name, ssh_target) pair persisted in SQLite. The
+# hub's own ed25519 keypair is generated on first boot under SSH_DIR (inside
+# /data so it survives rebuilds). "Test connection" runs a real per-capability
+# checklist via ssh and returns each result with an inline remedy when the user
+# can fix it on the remote.
+
+_HOST_NAME_RE  = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$", re.I)
+_SSH_TARGET_RE = re.compile(r"^(?P<user>[a-z0-9_.-]+)@(?P<host>[a-z0-9._-]+)(?::(?P<port>\d{1,5}))?$", re.I)
+
+def _ensure_ssh_keypair():
+    """Generate hub ed25519 keypair on first boot; idempotent across restarts."""
+    try:
+        os.makedirs(SSH_DIR, mode=0o700, exist_ok=True)
+    except Exception as e:
+        print("ssh keydir error:", e, flush=True)
+        return
+    if os.path.exists(SSH_KEY):
+        return
+    try:
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-q", "-N", "",
+                        "-C", "homelab-monitor@hub", "-f", SSH_KEY],
+                       check=True, timeout=10)
+        os.chmod(SSH_KEY, 0o600)
+        if os.path.exists(SSH_KEY + ".pub"):
+            os.chmod(SSH_KEY + ".pub", 0o644)
+    except Exception as e:
+        print("ssh-keygen failed:", e, flush=True)
+
+def get_hub_pubkey():
+    pub = SSH_KEY + ".pub"
+    if not os.path.exists(pub):
+        _ensure_ssh_keypair()
+    try:
+        with open(pub) as f:
+            return f.read().strip()
+    except Exception as e:
+        return f"# pubkey unavailable: {e}"
+
+def _parse_ssh_target(t):
+    m = _SSH_TARGET_RE.match((t or "").strip())
+    if not m:
+        return None
+    g = m.groupdict()
+    port = int(g["port"]) if g["port"] else 22
+    if not (1 <= port <= 65535):
+        return None
+    return g["user"], g["host"], port
+
+def list_hosts():
+    with LOCK:
+        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json "
+                          "FROM hosts ORDER BY added_at").fetchall()
+    out = []
+    for name, target, tags, added, checked, blob in rows:
+        try:
+            check = json.loads(blob) if blob else None
+        except Exception:
+            check = None
+        out.append({"name": name, "ssh_target": target,
+                    "tags": [t for t in (tags or "").split(",") if t],
+                    "added_at": added, "last_check_at": checked, "last_check": check})
+    return out
+
+def add_host(name, ssh_target, tags=""):
+    if not _HOST_NAME_RE.match(name or ""):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if _parse_ssh_target(ssh_target) is None:
+        return None, "SSH target must look like user@host or user@host:port."
+    with LOCK:
+        try:
+            DB.execute("INSERT INTO hosts(name, ssh_target, tags, added_at) VALUES(?,?,?,?)",
+                       (name, ssh_target.strip(), (tags or "").strip(), int(time.time())))
+            DB.commit()
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{name}' already exists."
+    return {"name": name, "ssh_target": ssh_target.strip()}, None
+
+def delete_host(name):
+    with LOCK:
+        cur = DB.execute("DELETE FROM hosts WHERE name=?", (name,))
+        DB.commit()
+    return cur.rowcount > 0
+
+def update_host(name, ssh_target=None, tags=None):
+    """Patch an existing host. Returns (host_dict, error_or_None). The cached
+    last-check result is cleared because the old probe no longer applies to the
+    new target."""
+    fields, params = [], []
+    if ssh_target is not None:
+        if _parse_ssh_target(ssh_target) is None:
+            return None, "SSH target must look like user@host or user@host:port."
+        fields.append("ssh_target=?"); params.append(ssh_target.strip())
+    if tags is not None:
+        fields.append("tags=?"); params.append((tags or "").strip())
+    if not fields:
+        return None, "Nothing to update."
+    # Clear last-check whenever the target changes.
+    if ssh_target is not None:
+        fields += ["last_check_at=NULL", "last_check_json=NULL"]
+    params.append(name)
+    with LOCK:
+        cur = DB.execute(f"UPDATE hosts SET {','.join(fields)} WHERE name=?", params)
+        DB.commit()
+    if cur.rowcount == 0:
+        return None, f"No host named '{name}'."
+    with LOCK:
+        row = DB.execute("SELECT name, ssh_target, tags FROM hosts WHERE name=?",
+                         (name,)).fetchone()
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
+# ── LAN discovery (suggest hosts instead of asking the user to type) ───────────
+# Three signals merged: kernel ARP cache (free, sees recently-active hosts),
+# TCP-22 sweep across each local /24 (catches anything ARP missed), and reverse
+# DNS for friendly names. Container runs with `network_mode: host` so this sees
+# the host's network exactly. Results cached 30s to keep UI snappy.
+
+_LAN_CACHE = {"at": 0, "data": None}
+_LAN_LOCK  = threading.Lock()
+_LAN_TTL   = 30
+
+def _local_subnets():
+    """Yield (IPv4Network, iface) pairs for the host's small local subnets.
+    Reads /proc/net/route directly so we don't need iproute2 in the image."""
+    out = []
+    try:
+        with open("/proc/net/route") as f:
+            next(f, None)  # header
+            for line in f:
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                iface, dest_hex, _, _, _, _, _, mask_hex = parts[:8]
+                if dest_hex == "00000000":  # default route
+                    continue
+                # Skip Docker / VPN bridges — we don't want to ping every
+                # container, and we'd just rediscover containers we already
+                # know about.
+                if iface.startswith(("docker", "br-", "veth", "tun", "tap")):
+                    continue
+                try:
+                    dest = ".".join(str(int(dest_hex[i:i+2], 16)) for i in (6, 4, 2, 0))
+                    m_bytes = bytes(int(mask_hex[i:i+2], 16) for i in (6, 4, 2, 0))
+                    prefix  = bin(int.from_bytes(m_bytes, "big")).count("1")
+                except Exception:
+                    continue
+                if dest.startswith(("127.", "169.254.")):
+                    continue
+                if prefix < 22:   # too many hosts (>1k) — skip ping-sweep
+                    continue
+                try:
+                    net = ipaddress.IPv4Network(f"{dest}/{prefix}", strict=False)
+                except Exception:
+                    continue
+                if net.num_addresses > 1024:
+                    continue
+                out.append((net, iface))
+    except Exception as e:
+        print("local-subnets read error:", e, flush=True)
+    return out
+
+def discover_lan(port=22, timeout=0.4, max_workers=64):
+    """Discover LAN hosts likely worth registering. Returns a dict with
+    `hosts` (sorted by IP) and `scanned_at`. Each host has: ip, hostname?,
+    iface, source (arp|scan), ssh_open (bool)."""
+    with _LAN_LOCK:
+        now = time.time()
+        if _LAN_CACHE["data"] is not None and now - _LAN_CACHE["at"] < _LAN_TTL:
+            return _LAN_CACHE["data"]
+
+    candidates = {}
+
+    # 1) ARP cache — free, sees hosts the kernel has talked to recently.
+    try:
+        with open("/proc/net/arp") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 6:
+                    ip, _, _, mac, _, iface = parts[:6]
+                    if mac == "00:00:00:00:00:00":
+                        continue
+                    if iface.startswith(("docker", "br-", "veth", "tun", "tap")):
+                        continue
+                    candidates.setdefault(ip, {"ip": ip, "source": "arp", "iface": iface})
+    except Exception:
+        pass
+
+    # 2) Sweep small local subnets we haven't already covered via ARP.
+    own_ips = set()
+    try:
+        for ai in socket.getaddrinfo(socket.gethostname(), None):
+            if ai[0] == socket.AF_INET:
+                own_ips.add(ai[4][0])
+    except Exception:
+        pass
+    for net, iface in _local_subnets():
+        for ip_obj in net.hosts():
+            ip = str(ip_obj)
+            if ip in candidates or ip in own_ips:
+                continue
+            candidates[ip] = {"ip": ip, "source": "scan", "iface": iface}
+
+    # 3) Parallel TCP-22 probe + reverse DNS.
+    def probe(item):
+        ip = item["ip"]
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                item["ssh_open"] = True
+        except Exception:
+            item["ssh_open"] = False
+        try:
+            item["hostname"] = socket.gethostbyaddr(ip)[0]
+        except Exception:
+            pass
+        return item
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        results = list(ex.map(probe, list(candidates.values())))
+
+    # Keep ARP-seen hosts (interesting context) and anything reachable on :22.
+    keep = [r for r in results if r.get("ssh_open") or r.get("source") == "arp"]
+    try:
+        keep.sort(key=lambda r: tuple(int(o) for o in r["ip"].split(".")))
+    except Exception:
+        keep.sort(key=lambda r: r["ip"])
+
+    out = {"hosts": keep, "scanned_at": int(time.time())}
+    with _LAN_LOCK:
+        _LAN_CACHE["data"] = out
+        _LAN_CACHE["at"]   = time.time()
+    return out
+
+def _record_check(name, result):
+    with LOCK:
+        DB.execute("UPDATE hosts SET last_check_at=?, last_check_json=? WHERE name=?",
+                   (int(time.time()), json.dumps(result), name))
+        DB.commit()
+
+# ── Per-host metric polling (Issue #35 slice 2) ───────────────────────────────
+# Every INTERVAL seconds the background poller pipes probe.py into
+# `ssh user@host python3 -` and parses the JSON it prints back. The script is
+# loaded once at boot from disk; the remote needs no install. Results are
+# cached in memory keyed by host name; the UI's All-hosts table reads from
+# this cache.
+
+_PROBE_PATH = os.path.join(os.path.dirname(__file__), "probe.py")
+try:
+    with open(_PROBE_PATH, "rb") as _f:
+        _PROBE_SCRIPT = _f.read()
+except Exception as e:
+    print("probe.py missing:", e, flush=True)
+    _PROBE_SCRIPT = b""
+
+HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
+HOST_DATA_LOCK = threading.Lock()
+HOST_POLL_TIMEOUT = 15
+
+def probe_host_metrics(user, host, port):
+    """Run probe.py on the remote via SSH stdin, return (data, error)."""
+    if not _PROBE_SCRIPT:
+        return None, "probe.py not packaged in this image"
+    rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
+                                      _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+    if rc != 0:
+        return None, _clean_ssh_err(err, out, rc)
+    out = (out or "").strip()
+    if not out:
+        return None, "empty response from probe"
+    try:
+        return json.loads(out), None
+    except Exception as e:
+        return None, f"bad JSON from probe: {e}"
+
+def _local_now_snapshot():
+    """Build a 'host' block for the hub itself, matching the probe shape so
+    the All-hosts table and the per-host Host tab can render local and remote
+    with the exact same code. We pull from LATEST / HEALTH which the existing
+    collector already keeps fresh."""
+    H = (LATEST or {}).get("host") or {}
+    out = {
+        "cpu":       H.get("cpu"),
+        "cores":     H.get("cores"),
+        "ram_used":  H.get("ram_used"),
+        "ram_total": H.get("ram_total"),
+        "load1":     H.get("load1"),
+        "uptime":    H.get("uptime"),
+        "ctemp":     H.get("ctemp"),
+        "disks":     H.get("disks") or [],
+        "hostname":  socket.gethostname(),
+    }
+    # GPU summary — the existing collector already keeps these on LATEST's top
+    # level. Re-use them so the All-hosts row for `local` matches the shape
+    # probe.py emits for remotes.
+    gpu_total = (LATEST or {}).get("mem_total") or 0
+    if gpu_total > 0:
+        out["gpu"] = {
+            "mem_used":  (LATEST or {}).get("mem_used", 0),
+            "mem_total": gpu_total,
+            "util":      (LATEST or {}).get("util", 0),
+            "temp":      (LATEST or {}).get("temp", 0),
+        }
+    return out
+
+def host_poller():
+    """Loop: probe every registered host whose last Test was healthy. Per-host
+    timeouts isolate slow remotes so the loop never stalls. Errors are kept on
+    the cache row so the UI can show a 'last error' instead of just going dark."""
+    # Stagger the first run a touch so we don't fire before the app is fully up.
+    time.sleep(2)
+    while True:
+        try:
+            for h in list_hosts():
+                check = h.get("last_check") or {}
+                if (check.get("summary") or {}).get("overall") not in ("ok", "warn"):
+                    continue
+                parsed = _parse_ssh_target(h["ssh_target"])
+                if not parsed:
+                    continue
+                u, host, port = parsed
+                data, err = probe_host_metrics(u, host, port)
+                with HOST_DATA_LOCK:
+                    entry = HOST_DATA.get(h["name"], {})
+                    if data:
+                        entry["data"]  = data
+                        entry["at"]    = int(time.time())
+                        entry["error"] = None
+                    else:
+                        entry["error"]      = err or "unknown error"
+                        entry["error_at"]   = int(time.time())
+                    HOST_DATA[h["name"]] = entry
+        except Exception as e:
+            print("host_poller error:", e, flush=True)
+        time.sleep(INTERVAL)
+
+_SSH_BASE_ARGS = [
+    "-i", SSH_KEY,
+    "-o", "BatchMode=yes",
+    "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS}",
+    "-o", "PasswordAuthentication=no",
+    "-o", "PubkeyAuthentication=yes",
+]
+
+def _ssh(user, host, port, cmd, timeout=8):
+    """Run `cmd` on the remote via ssh. Pass the whole command as a single
+    argument so ssh hands it to the remote login shell intact — earlier
+    versions wrapped with `sh -c` which got mangled when ssh joined argv with
+    spaces (`sh -c echo ok` runs echo with $0=ok and produces no output)."""
+    t0 = time.time()
+    try:
+        p = subprocess.run([
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+        ], capture_output=True, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        return (p.returncode,
+                p.stdout.decode("utf-8", "replace").strip(),
+                p.stderr.decode("utf-8", "replace").strip(),
+                ms)
+    except subprocess.TimeoutExpired:
+        ms = int((time.time() - t0) * 1000)
+        return 124, "", f"ssh timed out after {timeout}s", ms
+    except FileNotFoundError:
+        return 127, "", "ssh client not found in container (install openssh-client)", 0
+
+def _ssh_with_stdin(user, host, port, cmd, stdin_bytes, timeout=60):
+    """Like _ssh but feeds bytes to the remote command's stdin. Used to pipe a
+    sudo password into `sudo -S` without ever putting it in argv on either end."""
+    t0 = time.time()
+    try:
+        p = subprocess.run([
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+        ], input=stdin_bytes, capture_output=True, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        return (p.returncode,
+                p.stdout.decode("utf-8", "replace"),
+                p.stderr.decode("utf-8", "replace"),
+                ms)
+    except subprocess.TimeoutExpired:
+        ms = int((time.time() - t0) * 1000)
+        return 124, "", f"ssh timed out after {timeout}s", ms
+    except FileNotFoundError:
+        return 127, "", "ssh client not found in container (install openssh-client)", 0
+
+# ── OS detection + OS-aware remedies (so the "paste this on the remote" hints
+#    match what actually works on the remote's distro). Runs as part of
+#    probe_host(), cached on the host row alongside the capability checks. ─────
+
+_OS_DETECT_SCRIPT = (
+    'echo "UNAME=$(uname -s 2>/dev/null)"; '
+    'echo "ARCH=$(uname -m 2>/dev/null)"; '
+    'if [ -r /etc/os-release ]; then . /etc/os-release; '
+    '  echo "ID=$ID"; echo "ID_LIKE=${ID_LIKE:-}"; '
+    '  echo "VERSION_ID=${VERSION_ID:-}"; echo "PRETTY_NAME=${PRETTY_NAME:-}"; '
+    'fi; '
+    'command -v systemctl >/dev/null 2>&1 && echo "INIT=systemd"; '
+    'command -v rc-service >/dev/null 2>&1 && echo "INIT=openrc"; '
+    ':'   # always exit 0 — the last `&&` would otherwise return non-zero on
+          # hosts without rc-service, making us drop the perfectly-good
+          # discovery output above.
+)
+
+def _detect_os(user, host, port):
+    """Run a tiny discovery script via SSH. Returns a normalized dict. We
+    ignore rc here — we only care about whatever lines did land on stdout."""
+    _, out, _, _ = _ssh(user, host, port, _OS_DETECT_SCRIPT, timeout=10)
+    info = {}
+    for line in (out or "").splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            info[k.strip()] = v.strip().strip('"').strip("'")
+    # Family normalization for branching remedies
+    osid    = (info.get("ID") or "").lower()
+    id_like = (info.get("ID_LIKE") or "").lower()
+    uname   = (info.get("UNAME") or "").lower()
+    if uname == "darwin":
+        family = "macos"
+    elif osid == "alpine":
+        family = "alpine"
+    elif osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like:
+        family = "suse"
+    elif osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:
+        family = "debian"
+    elif osid in ("fedora", "rhel", "centos", "rocky", "almalinux") or "rhel" in id_like or "fedora" in id_like:
+        family = "rhel"
+    elif osid in ("arch", "manjaro", "endeavouros") or "arch" in id_like:
+        family = "arch"
+    elif uname in ("linux", ""):
+        family = "linux"     # generic Linux, init unknown
+    else:
+        family = uname or "unknown"
+    info["family"] = family
+    # Pretty short label for the UI badge
+    pretty = info.get("PRETTY_NAME") or info.get("ID") or info.get("UNAME") or "unknown"
+    init   = info.get("INIT")
+    info["label"] = f"{pretty}" + (f" · {init}" if init else "")
+    return info
+
+def _remedy_docker_group(user, os_info):
+    """Per-OS instructions for joining the docker group / fixing socket perms."""
+    fam = (os_info.get("family") or "linux")
+    if fam == "macos":
+        return {"where": "on the remote (macOS — limited)",
+                "cmd": "# macOS doesn't expose the Docker socket the same way as Linux.\n"
+                       "# Docker Desktop runs inside a VM; SSH-driven container monitoring\n"
+                       "# isn't supported yet. The other panels (host CPU/RAM via /proc) also\n"
+                       "# won't work on macOS — full macOS support is a future enhancement."}
+    if fam == "alpine":
+        return {"where": "on the remote (Alpine)",
+                "cmd": f"sudo addgroup {user} docker\n"
+                       f"# Log out and back in (or just reconnect over SSH) to pick up the new group."}
+    if fam in ("debian", "rhel", "suse", "arch", "linux"):
+        return {"where": "on the remote",
+                "cmd": f"sudo usermod -aG docker {user}\n"
+                       f"# Then log out and back in — the next SSH session inherits the new group."}
+    return {"where": "on the remote",
+            "cmd": f"# Could not detect the OS family; this is the generic Linux fix:\n"
+                   f"sudo usermod -aG docker {user}"}
+
+def _remedy_pubkey(user):
+    return {"where": "on the remote",
+            "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                   f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
+                   f"chmod 600 ~/.ssh/authorized_keys"}
+
+def _remedy_sshd_down(os_info):
+    fam = (os_info or {}).get("family") or "linux"
+    if fam == "alpine":
+        return {"where": "on the remote",
+                "cmd": "# Check that sshd is running:\nsudo rc-service sshd status"}
+    return {"where": "on the remote",
+            "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
+
+def _clean_ssh_err(err, out, rc):
+    """Build a human summary of an SSH failure. Skips `Warning:` chatter (host
+    key added, deprecated alg, etc.) — those aren't the failure cause; the real
+    error is usually a line below them."""
+    lines = []
+    for l in (err or "").splitlines():
+        s = l.strip()
+        if not s: continue
+        if s.lower().startswith("warning:"): continue
+        if "Pseudo-terminal will not be allocated" in s: continue
+        lines.append(s)
+    if lines:
+        return " · ".join(lines)[:300]
+    if rc == 124:
+        return "ssh timed out"
+    if (out or "").strip():
+        return (out or "").splitlines()[0][:240]
+    return "no response (rc=%d)" % rc
+
+def _tcp_probe(host, port, timeout=2.0):
+    """Quick TCP-connect probe. Lets us distinguish 'host unreachable / port
+    closed' (no point retrying SSH) from 'reached, but auth failed'."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _summarize(checks):
+    by = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
+    for c in checks:
+        by[c["status"]] = by.get(c["status"], 0) + 1
+    if by["fail"]:   overall = "fail"
+    elif by["warn"]: overall = "warn"
+    else:            overall = "ok"
+    return {"overall": overall, **by}
+
+def probe_host(name):
+    """Run the capability checklist against a registered host. Each check returns
+    {id, label, status: ok|warn|fail|info, detail, remedy?}. The full result is
+    cached on the host row so the UI can show the last-known state even when
+    the user hasn't re-tested."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        result = {"checks": [{"id": "parse", "label": "SSH target", "status": "fail",
+                              "detail": f"could not parse '{row[0]}'"}]}
+        result["summary"] = _summarize(result["checks"])
+        _record_check(name, result)
+        return result
+    user, host, port = parsed
+    _ensure_ssh_keypair()
+    checks = []
+    os_info = {}
+
+    # 1) SSH connect.  Pre-probe TCP-22 so we can give a clear "port closed"
+    # answer instead of letting ssh time out cryptically.
+    tcp_ok, tcp_err = _tcp_probe(host, port)
+    if not tcp_ok:
+        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
+                "detail": f"port {port} not reachable: {tcp_err}",
+                "debug": tcp_err,
+                "remedy": {"where": "on the remote",
+                           "cmd": "# sshd may not be running, or the port is firewalled.\n"
+                                  "# On the remote:\nsudo systemctl status sshd\n"
+                                  "# Or check the firewall:\nsudo firewall-cmd --list-ports  # firewalld\nsudo ufw status                  # ufw"}}
+        checks.append(item)
+        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
+        _record_check(name, result)
+        return result
+
+    rc, out, err, ms = _ssh(user, host, port, "echo ok", timeout=SSH_CONNECT_TIMEOUT + 2)
+    if rc == 0 and out == "ok":
+        checks.append({"id": "connect", "label": "SSH reachable",
+                       "status": "ok", "detail": f"port {port}, {ms} ms"})
+    else:
+        msg = _clean_ssh_err(err, out, rc)
+        hint = None
+        e = (err or "")
+        if "Permission denied" in e:
+            hint = _remedy_pubkey(user)
+        elif "Host key verification failed" in e:
+            hint = {"where": "on the hub (this container)",
+                    "cmd": f"# Clear the saved host key and re-test:\nrm {SSH_KNOWN_HOSTS}"}
+        elif "Could not resolve hostname" in e or "Name or service not known" in e:
+            hint = {"where": "on the hub (this container)",
+                    "cmd": "# Hostname did not resolve. Try the IP, or check the container's DNS."}
+        elif rc == 124:
+            hint = _remedy_sshd_down(None)
+        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
+                "detail": msg, "debug": (err or "")[:2000]}
+        if hint: item["remedy"] = hint
+        checks.append(item)
+        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
+        _record_check(name, result)
+        return result
+
+    # SSH connected — detect the remote OS so the rest of the checklist can
+    # produce remedies that match the actual distro (and so the UI can show an
+    # OS badge per host).
+    os_info = _detect_os(user, host, port)
+    if (os_info.get("family") or "") == "macos":
+        # Be honest about limitations: macOS doesn't expose /proc, doesn't have
+        # systemd, doesn't expose the Docker socket the same way, and has no
+        # nvidia-smi. We still record the OS but mark the rest as info.
+        checks.append({"id": "os", "label": "Detected OS", "status": "info",
+                       "detail": os_info.get("label") or "macOS"})
+        checks.append({"id": "proc",   "label": "/proc readable",   "status": "info",
+                       "detail": "Linux-only — macOS doesn't expose /proc"})
+        checks.append({"id": "docker", "label": "Docker socket",    "status": "info",
+                       "detail": "macOS Docker socket flow not supported in v0"})
+        checks.append({"id": "dbus",   "label": "systemd D-Bus",    "status": "info",
+                       "detail": "macOS uses launchd, not systemd"})
+        checks.append({"id": "nvidia", "label": "nvidia-smi",       "status": "info",
+                       "detail": "no NVIDIA driver path on macOS"})
+        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
+        _record_check(name, result)
+        return result
+
+    if os_info.get("label"):
+        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
+                       "detail": os_info["label"]})
+
+    # 2) /proc readable
+    rc, out, err, _ = _ssh(user, host, port, "head -n1 /proc/uptime 2>&1")
+    if rc == 0 and out:
+        try:
+            up = float(out.split()[0])
+            detail = f"uptime {int(up)}s"
+        except Exception:
+            detail = out[:60]
+        checks.append({"id": "proc", "label": "/proc readable", "status": "ok", "detail": detail})
+    else:
+        checks.append({"id": "proc", "label": "/proc readable", "status": "warn",
+                       "detail": (err or "unexpected reply")[:160]})
+
+    # 3) Docker socket
+    rc, out, err, _ = _ssh(user, host, port,
+                           "docker version --format '{{.Server.Version}}' 2>&1 || true")
+    out_l = (out or "").lower()
+    err_l = (err or "").lower()
+    if rc == 0 and out and not any(s in out_l for s in
+                                   ("permission denied", "cannot connect", "error", "command not found")):
+        checks.append({"id": "docker", "label": "Docker socket", "status": "ok",
+                       "detail": f"server v{out}"})
+    elif "permission denied" in out_l or "permission denied" in err_l:
+        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
+                       "detail": f"permission denied — '{user}' not in the docker group",
+                       "remedy": _remedy_docker_group(user, os_info)})
+    elif "command not found" in out_l or "command not found" in err_l or out_l == "":
+        checks.append({"id": "docker", "label": "Docker socket", "status": "info",
+                       "detail": "Docker not installed — container panel will be hidden for this host"})
+    else:
+        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
+                       "detail": (out or err or "unknown error")[:160]})
+
+    # 4) systemd D-Bus
+    _, out, _, _ = _ssh(user, host, port,
+                        "[ -S /run/dbus/system_bus_socket ] && echo ok || echo missing")
+    if out == "ok":
+        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "ok",
+                       "detail": "/run/dbus/system_bus_socket present"})
+    else:
+        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "info",
+                       "detail": "not present — services panel will be hidden for this host"})
+
+    # 5) nvidia-smi
+    _, out, _, _ = _ssh(user, host, port,
+                        "command -v nvidia-smi >/dev/null && "
+                        "nvidia-smi --query-gpu=name --format=csv,noheader -i 0 2>/dev/null | head -1 || echo missing")
+    if out and out != "missing":
+        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": out[:120]})
+    else:
+        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
+                       "detail": "not found — GPU panel will be hidden for this host"})
+
+    result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
+    _record_check(name, result)
+    return result
+
+def run_on_host(name, cmd, sudo_password=None):
+    """Execute `cmd` on a registered host. If `sudo_password` is provided, the
+    whole command is wrapped in `sudo -S -p '' bash -c <cmd>` and the password
+    is piped via stdin to sudo on the remote — it never appears in argv on
+    either the local or remote side, and we never log it. Returns:
+    {ok, exit_code, stdout, stderr, ms}."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
+    user, host, port = parsed
+    if sudo_password:
+        # Wrap once with sudo -S so even compound commands (`a && b`) run as
+        # root in a single authentication. Nested `sudo` inside is harmless —
+        # root running sudo doesn't reprompt.
+        wrapped = f"sudo -S -p '' bash -c {shlex.quote(cmd)}"
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, wrapped,
+                                           (sudo_password + "\n").encode("utf-8"),
+                                           timeout=90)
+    else:
+        rc, out, err, ms = _ssh(user, host, port, cmd, timeout=90)
+    # Strip the leading "Password:" prompt or similar that some sudos emit when
+    # `-p ''` isn't fully honored. Be conservative.
+    if err:
+        err = "\n".join(ln for ln in err.splitlines()
+                        if "incorrect password" not in ln.lower() or True)
+    return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
+
+# Generate the hub keypair eagerly so /api/hub/pubkey is instant on first hit.
+_ensure_ssh_keypair()
+
 SETTING_DEFAULTS = {
     "alerts_enabled":     "0",       # "0" / "1"
     "discord_webhook_url": "",
@@ -944,6 +1652,124 @@ def _public_settings():
         out[k + "_set"] = bool(s.get(k))
     return out
 
+@app.route("/api/hub/pubkey")
+def api_hub_pubkey():
+    return jsonify({"pubkey": get_hub_pubkey()})
+
+@app.route("/api/hosts", methods=["GET", "POST"])
+def api_hosts():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        host, err = add_host((body.get("name") or "").strip(),
+                             (body.get("ssh_target") or "").strip(),
+                             (body.get("tags") or "").strip())
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        return jsonify({"ok": True, "host": host}), 201
+    return jsonify({"hosts": list_hosts()})
+
+@app.route("/api/hosts/<name>", methods=["DELETE", "PATCH"])
+def api_hosts_one(name):
+    if request.method == "DELETE":
+        ok = delete_host(name)
+        return jsonify({"ok": ok}), (200 if ok else 404)
+    body = request.get_json(silent=True) or {}
+    host, err = update_host(
+        name,
+        ssh_target=(body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None),
+        tags=(body.get("tags").strip() if isinstance(body.get("tags"), str) else None),
+    )
+    if err:
+        return jsonify({"ok": False, "error": err}), 400 if "look like" in err or "Nothing" in err else 404
+    return jsonify({"ok": True, "host": host})
+
+@app.route("/api/lan/scan")
+def api_lan_scan():
+    return jsonify(discover_lan())
+
+@app.route("/api/host_data/<name>")
+def api_host_data(name):
+    """Per-host metric snapshot. `local` is the hub itself; remotes are served
+    from the in-memory cache populated by host_poller()."""
+    if name == "local":
+        return jsonify({"name": "local", "host": _local_now_snapshot(),
+                        "at": int(time.time()), "online": True})
+    with HOST_DATA_LOCK:
+        entry = HOST_DATA.get(name)
+    if not entry or "data" not in entry:
+        # No successful poll yet (or never registered) — still respond 200 so
+        # the UI can render a "waiting" state instead of erroring.
+        return jsonify({"name": name, "online": False,
+                        "error": (entry or {}).get("error") or "no data yet",
+                        "at": (entry or {}).get("at"),
+                        "host": None})
+    age = int(time.time()) - int(entry["at"])
+    return jsonify({"name": name, "host": entry["data"].get("host", {}),
+                    "at": entry["at"], "online": age < INTERVAL * 3,
+                    "stale_for": age if age >= INTERVAL * 3 else 0,
+                    "error": entry.get("error")})
+
+@app.route("/api/fleet")
+def api_fleet():
+    """Compact summary KPIs for every host in the fleet. Drives the All-hosts
+    table. Order: local first, then registered hosts in the order they were
+    added."""
+    hosts = list_hosts()
+    rows  = []
+
+    # Local row
+    rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
+                 "ssh_target": None, "host": _local_now_snapshot(),
+                 "at": int(time.time()), "online": True, "is_local": True,
+                 "last_check": {"summary": {"overall": "ok"}}})
+
+    with HOST_DATA_LOCK:
+        for h in hosts:
+            entry = HOST_DATA.get(h["name"]) or {}
+            data  = entry.get("data") or {}
+            at    = entry.get("at")
+            online = bool(data) and at and (int(time.time()) - at) < INTERVAL * 3
+            rows.append({
+                "name": h["name"],
+                "label": h["name"],
+                "ssh_target": h["ssh_target"],
+                "host": data.get("host") if data else None,
+                "at": at,
+                "online": online,
+                "is_local": False,
+                "last_check": h.get("last_check"),
+                "error": entry.get("error"),
+            })
+    return jsonify({"hosts": rows, "interval": INTERVAL})
+
+@app.route("/api/hosts/<name>/test", methods=["POST"])
+def api_hosts_test(name):
+    result = probe_host(name)
+    if result is None:
+        return jsonify({"ok": False, "error": "no such host"}), 404
+    return jsonify({"ok": True, "result": result})
+
+@app.route("/api/hosts/<name>/run", methods=["POST"])
+def api_hosts_run(name):
+    """Execute a command on a registered host. Body: {cmd, sudo_password?}.
+    The sudo password is processed in-memory: piped via stdin to `sudo -S`
+    on the remote, NEVER stored in the DB, NEVER written to logs, NEVER
+    in any process's argv. Don't pass arbitrary cmd from untrusted users —
+    the API is reachable to anyone on the LAN who can hit the dashboard."""
+    body = request.get_json(silent=True) or {}
+    cmd = (body.get("cmd") or "").strip()
+    sudo_password = body.get("sudo_password") or None
+    if not cmd:
+        return jsonify({"ok": False, "error": "cmd required"}), 400
+    result = run_on_host(name, cmd, sudo_password=sudo_password)
+    # Drop the password reference ASAP — Python keeps the string object until
+    # GC, but at least we don't hold our own reference past this point.
+    sudo_password = None
+    body = None
+    if result is None:
+        return jsonify({"ok": False, "error": "no such host"}), 404
+    return jsonify(result)
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "POST":
@@ -973,6 +1799,7 @@ def index():
     return app.send_static_file("dashboard.html")
 
 threading.Thread(target=collector, daemon=True).start()
+threading.Thread(target=host_poller, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)

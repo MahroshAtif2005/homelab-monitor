@@ -3,9 +3,10 @@ WORKDIR /app
 
 # flask = web layer; jeepney = pure-Python D-Bus client used to read systemd
 # (no native libs, keeps the image slim). curl only needed to vendor Chart.js below.
+# openssh-client provides ssh + ssh-keygen for the multi-host registry probes.
 RUN pip install --no-cache-dir flask==3.0.3 jeepney==0.8.0 prometheus_client==0.20.0 \
  && apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
+ && apt-get install -y --no-install-recommends curl ca-certificates openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # Vendor Chart.js so the dashboard works fully offline / on a LAN with no internet.
@@ -14,6 +15,7 @@ RUN mkdir -p /app/static \
       -o /app/static/chart.min.js
 
 COPY app.py /app/app.py
+COPY probe.py /app/probe.py
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
 
