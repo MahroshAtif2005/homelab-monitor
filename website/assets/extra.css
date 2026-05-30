@@ -102,10 +102,10 @@
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  /* Let the title wrap on narrow screens — the &nbsp; in the markup is a
-     desktop optimisation; we don't want a one-line title to overflow. */
-  overflow-wrap: anywhere;
+  /* Let it wrap on a word boundary if narrow, but never break mid-word. */
+  overflow-wrap: normal;
   word-break: normal;
+  hyphens: none;
 }
 .hl-hero .hl-title .em { color: inherit; }
 .hl-hero .hl-tag {

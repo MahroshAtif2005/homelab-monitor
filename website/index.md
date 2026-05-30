@@ -6,7 +6,7 @@ hide:
 
 <div class="hl-hero" markdown>
 
-# <span class="hl-title">HomeLab&nbsp;<span class="em">Monitor</span></span>
+# <span class="hl-title">HomeLab <span class="em">Monitor</span></span>
 
 <p class="hl-tag">
 One small container for your home lab — GPU, AI VRAM, Docker, systemd and host
