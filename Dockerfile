@@ -15,6 +15,7 @@ RUN mkdir -p /app/static \
       -o /app/static/chart.min.js
 
 COPY app.py /app/app.py
+COPY probe.py /app/probe.py
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
 

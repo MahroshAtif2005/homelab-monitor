@@ -25,7 +25,16 @@ h1{font-size:22px;margin:0}.ver{color:var(--mut);font-size:12px;border:1px solid
 .sub{color:var(--mut);margin:4px 0 14px;font-size:13.5px}
 h2{font-size:14px;margin:0 0 13px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--mut)}
 /* tab nav — add a monitor by adding one TABS entry + one <section>; nothing else changes */
-.nav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--bd);margin:0 0 4px;position:sticky;top:0;background:var(--bg);z-index:5;padding-top:4px}
+.topnav{position:sticky;top:0;background:var(--bg);z-index:5;padding-top:4px}
+.hostbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 0 8px;border-bottom:1px dashed var(--bd)}
+.hostbar .label{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:2px}
+.hpill{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:18px;padding:4px 11px 4px 8px;cursor:pointer;font:inherit;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;transition:border-color .15s,background .15s}
+.hpill:hover{border-color:var(--mut)}
+.hpill.on{border-color:var(--accent);background:#d2992211}
+.hpill .pdot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
+.hpill .pdot.ok{background:var(--ok)}.hpill .pdot.warn{background:var(--warn)}.hpill .pdot.fail{background:var(--crit)}
+.hpill.add{color:var(--mut);border-style:dashed}
+.nav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--bd);margin:0 0 4px}
 .tab{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);font:inherit;font-size:13.5px;padding:9px 13px;cursor:pointer;display:flex;align-items:center;gap:6px}
 .tab:hover{color:var(--tx)}.tab.on{color:var(--tx);border-bottom-color:var(--accent)}
 .tab .tdot{width:8px;height:8px;border-radius:50%}
@@ -140,6 +149,27 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .runpanel pre.out.ok{border-color:#3fb95055}
 .runpanel .rc{font-size:11px;color:var(--mut)}
 .osbadge{font-size:10.5px;color:var(--mut);background:#161b22;border:1px solid var(--bd);border-radius:5px;padding:1px 7px;margin-left:6px}
+/* Fleet table on Overview */
+.fleet-meta{color:var(--mut);font-size:12px;margin:-4px 0 10px}
+.fleet-tbl{width:100%;border-collapse:collapse;font-size:13px}
+.fleet-tbl th{font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:7px 9px;border-bottom:1px solid var(--bd);text-align:left;white-space:nowrap}
+.fleet-tbl td{padding:9px;border-bottom:1px solid var(--bd);vertical-align:middle}
+.fleet-tbl tr{cursor:pointer}.fleet-tbl tr:hover td{background:#0d1117}
+.fleet-tbl .hostcell{font-weight:600;color:var(--tx)}
+.fleet-tbl .hostcell .sub{color:var(--mut);font-size:11.5px;font-weight:400;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.fleet-tbl .micro{display:inline-block;height:8px;border-radius:3px;background:var(--free);overflow:hidden;width:60px;vertical-align:middle;margin-right:6px}
+.fleet-tbl .micro div{height:100%}
+.fleet-tbl .status{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.fleet-tbl .status .d{width:9px;height:9px;border-radius:50%}
+.fleet-tbl .status.online .d{background:var(--ok)}
+.fleet-tbl .status.warn .d{background:var(--warn)}
+.fleet-tbl .status.offline .d{background:var(--crit)}
+.fleet-tbl .status.unknown .d{background:var(--mut)}
+.fleet-tbl .stale{font-size:11px;color:var(--warn)}
+/* Scope notice on tabs that aren't multi-host yet */
+.scope-notice{display:flex;gap:10px;align-items:flex-start;background:#0d1117;border:1px dashed var(--bd);border-radius:9px;padding:10px 13px;color:var(--mut);font-size:13px;margin-bottom:14px}
+.scope-notice .ic{font-size:16px;line-height:1.3}
+.scope-notice b{color:var(--tx)}
 </style></head><body><div class="wrap">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -149,7 +179,13 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 <span class="live"><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
 <p class="sub">One small container for your home lab — GPU &amp; local-AI, Docker containers, systemd services and host health, all on one page. Everything is discovered automatically; nothing is hardcoded.</p>
 
-<nav class="nav" id="nav"></nav>
+<div class="topnav">
+  <div class="hostbar" id="hostbar">
+    <span class="label">Host:</span>
+    <span class="muted" style="font-size:12px">loading…</span>
+  </div>
+  <nav class="nav" id="nav"></nav>
+</div>
 
 <div class="card" id="controls" hidden><div class="ranges">
 <button class="rb" data-r="1h">1h</button><button class="rb" data-r="6h">6h</button><button class="rb" data-r="24h">24h</button>
@@ -157,10 +193,23 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 <span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
 </div></div>
 
-<!-- ───────── Overview ───────── -->
+<!-- ───────── Overview = All hosts (fleet table) ───────── -->
 <section data-tab="overview">
-  <div class="card"><h2>At a glance</h2><div class="ovgrid" id="ovcards"></div></div>
-  <div class="card"><h2>💡 Insights &amp; recommendations</h2><div id="insights"></div></div>
+  <div class="card">
+    <h2>🛰️ All hosts</h2>
+    <div class="fleet-meta" id="fleet_meta">Every registered host at a glance. Click a row to focus that host in the other tabs.</div>
+    <div style="overflow-x:auto">
+      <table class="fleet-tbl" id="fleet_tbl">
+        <thead>
+          <tr>
+            <th>Host</th><th>Status</th><th>CPU</th><th>RAM</th><th>Load 1m</th>
+            <th>Uptime</th><th>Temp</th><th>Disks</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="8" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </section>
 
 <!-- ───────── GPU ───────── -->
@@ -365,6 +414,13 @@ let TAB = (location.hash.slice(1)) || localStorage.getItem('hl_tab') || 'overvie
 if(!TABS.some(t=>t.id===TAB)) TAB='overview';
 let charts = {}, D = null, HH = null;
 
+// Multi-machine state. CURRENT_HOST is the active host context for per-host
+// tabs (GPU/Containers/Services/Host). The Overview tab is fleet-wide and
+// doesn't care. `local` always means the hub itself.
+let CURRENT_HOST = localStorage.getItem('hl_host') || 'local';
+let FLEET = null;     // last /api/fleet response
+let HOST_DATA = null; // current host's /api/host_data response when remote
+
 const SC = {crit:'var(--crit)',warn:'var(--warn)',ok:'var(--ok)',info:'var(--mut)'};
 const fmtMB = v => v>=1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
 const fmtUp = s => {const d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0; return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;};
@@ -391,6 +447,14 @@ function showTab(id){
   buildCharts();   // charts can only size on a visible canvas, so build on show
   if(id==='alerts') loadAlerts();
   if(id==='hosts')  loadHosts();
+  // Multi-host: scope notice on tabs that are still local-only, plus
+  // host-aware renderers on the ones that already speak per-host.
+  if(LOCAL_ONLY_TABS.has(id)){
+    if(CURRENT_HOST==='local') clearLocalOnlyNotice(id);
+    else renderLocalOnlyNotice(id);
+  }
+  if(id==='overview') renderFleet();
+  if(id==='host')     renderHostTab();
 }
 
 // ── Data loaders ────────────────────────────────────────────────────────────
@@ -411,10 +475,13 @@ function renderData(){
   document.getElementById('ver').textContent='v'+D.version;
   document.getElementById('lastup').textContent='updated '+new Date().toLocaleTimeString();
 
-  // insights (Overview)
-  document.getElementById('insights').innerHTML = (D.insights||[]).map(i=>
+  // insights & at-a-glance cards used to live on the old Overview; that tab is
+  // now the fleet table. The IDs may no longer exist on the page — guard the
+  // writes so renderData() keeps populating everything else.
+  const insEl = document.getElementById('insights');
+  if(insEl){ insEl.innerHTML = (D.insights||[]).map(i=>
     `<div class="ins ${i.level}"><div class="ic">${ICON[i.level]||'•'}</div><div><div class="t">${esc(i.title)}</div><div class="d">${esc(i.detail)}</div></div></div>`).join('')
-    || '<div class="ins ok"><div class="ic">✅</div><div><div class="t">All good</div><div class="d">No issues detected.</div></div></div>';
+    || '<div class="ins ok"><div class="ic">✅</div><div><div class="t">All good</div><div class="d">No issues detected.</div></div></div>'; }
 
   // GPU now
   const memPct=Math.round(n.mem_used/tot*100);
@@ -441,19 +508,22 @@ function renderData(){
     `<tr><td>${esc(m.model)}</td><td class="muted">${esc(m.service)}</td><td>${fmtMB(m.peak)}</td></tr>`).join('')
     : '<tr><td colspan="3" class="muted">No per-model VRAM captured yet.</td></tr>';
 
-  // Host
-  const ramPct = H.ram_total? Math.round(H.ram_used/H.ram_total*100):0;
-  document.getElementById('hostkpis').innerHTML=[
-    {v:Math.round(H.cpu||0)+'%',l:'CPU utilization',s:(H.cores||'?')+' cores'},
-    {v:ramPct+'%',l:'RAM used',s:fmtMB(H.ram_used||0)+' / '+fmtMB(H.ram_total||0)},
-    {v:(H.load1||0).toFixed(2),l:'Load (1m)',s:'of '+(H.cores||'?')+' cores'},
-    {v:fmtUp(H.uptime||0),l:'Uptime'},
-    {v:(H.ctemp||0)+' °C',l:'CPU/system temp'},
-  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
-  document.getElementById('disks').innerHTML=(H.disks||[]).map(dk=>
-    `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
-     <span>💾 ${esc(dk.mount)}</span><span class="muted">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
-     <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
+  // Host KPIs + disks — only when local is the active host. Otherwise
+  // renderHostTab() owns these panels with the remote's polled data.
+  if(CURRENT_HOST === 'local'){
+    const ramPct = H.ram_total? Math.round(H.ram_used/H.ram_total*100):0;
+    document.getElementById('hostkpis').innerHTML=[
+      {v:Math.round(H.cpu||0)+'%',l:'CPU utilization',s:(H.cores||'?')+' cores'},
+      {v:ramPct+'%',l:'RAM used',s:fmtMB(H.ram_used||0)+' / '+fmtMB(H.ram_total||0)},
+      {v:(H.load1||0).toFixed(2),l:'Load (1m)',s:'of '+(H.cores||'?')+' cores'},
+      {v:fmtUp(H.uptime||0),l:'Uptime'},
+      {v:(H.ctemp||0)+' °C',l:'CPU/system temp'},
+    ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+    document.getElementById('disks').innerHTML=(H.disks||[]).map(dk=>
+      `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
+       <span>💾 ${esc(dk.mount)}</span><span class="muted">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
+       <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
+  }
 
   buildCharts();
 }
@@ -474,11 +544,14 @@ function renderHealth(){
     ub.classList.remove('show');
   }
 
-  // Overview status cards (one per subsystem; click to jump to its tab)
-  document.getElementById('ovcards').innerHTML = (HH.overview||[]).map(c=>
-    `<button class="ov ${c.status}" data-go="${c.key}"><div class="h"><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.label)}</div>
-     <div class="m">${esc(c.metric)}</div><div class="d">${esc(c.detail)}</div></button>`).join('');
-  document.querySelectorAll('.ov').forEach(b=>b.onclick=()=>showTab(b.dataset.go));
+  // Overview status cards used to live here too — same guard as #insights.
+  const ovEl = document.getElementById('ovcards');
+  if(ovEl){
+    ovEl.innerHTML = (HH.overview||[]).map(c=>
+      `<button class="ov ${c.status}" data-go="${c.key}"><div class="h"><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.label)}</div>
+       <div class="m">${esc(c.metric)}</div><div class="d">${esc(c.detail)}</div></button>`).join('');
+    document.querySelectorAll('.ov').forEach(b=>b.onclick=()=>showTab(b.dataset.go));
+  }
   // nav dots flag any subsystem needing attention
   (HH.overview||[]).forEach(c=>{const d=document.getElementById('ndot-'+c.key);
     if(d){const bad=c.status==='crit'||c.status==='warn'; d.style.display=bad?'inline-block':'none'; d.style.background=SC[c.status];}});
@@ -976,6 +1049,183 @@ async function deleteHost(name){
   await loadHosts();
 }
 
+// ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
+const HOST_SCOPED_TABS = new Set(['host']);   // tabs that already render from any host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','containers','services','alerts']);
+
+function fmtMBshort(v){
+  if(v==null) return '—';
+  return v>=1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
+}
+function fmtUpShort(s){
+  if(s==null) return '—';
+  const d=s/86400|0, h=s%86400/3600|0, m=s%3600/60|0;
+  return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;
+}
+function fmtAge(at){
+  if(!at) return '—';
+  const s = Math.max(0, Math.round(Date.now()/1000 - at));
+  if(s<60) return s+'s';
+  if(s<3600) return Math.round(s/60)+'m';
+  return Math.round(s/3600)+'h';
+}
+
+function statusOfFleetRow(r){
+  if(!r.online) return 'offline';
+  const summary = (r.last_check && r.last_check.summary) || {};
+  if(summary.overall==='warn') return 'warn';
+  if(summary.overall==='fail') return 'offline';
+  return 'online';
+}
+
+async function loadFleet(){
+  let j;
+  try{ j = await(await fetch('/api/fleet')).json(); }
+  catch(e){ return; }
+  FLEET = j;
+  renderHostBar();
+  if(TAB==='overview') renderFleet();
+}
+function renderHostBar(){
+  if(!FLEET){ return; }
+  const bar = document.getElementById('hostbar');
+  const hosts = FLEET.hosts || [];
+  // If CURRENT_HOST no longer exists (was deleted), fall back to local.
+  if(!hosts.some(h => h.name === CURRENT_HOST)) CURRENT_HOST = 'local';
+  bar.innerHTML = `<span class="label">Host:</span>` + hosts.map(h => {
+    const dot = h.is_local ? 'ok' : statusOfFleetRow(h)==='online' ? 'ok' :
+                statusOfFleetRow(h)==='warn' ? 'warn' : 'fail';
+    const label = h.is_local ? (h.label || 'Local') : h.name;
+    return `<button class="hpill ${h.name===CURRENT_HOST?'on':''}" data-h="${esc(h.name)}">
+      <span class="pdot ${dot}"></span><span>${esc(label)}</span></button>`;
+  }).join('') + `<button class="hpill add" id="hpill_add" title="Manage hosts">+ Add host</button>`;
+  bar.querySelectorAll('.hpill[data-h]').forEach(b => b.onclick = () => setHost(b.dataset.h));
+  document.getElementById('hpill_add').onclick = () => showTab('hosts');
+}
+function setHost(name){
+  if(name === CURRENT_HOST) return;
+  CURRENT_HOST = name;
+  localStorage.setItem('hl_host', name);
+  renderHostBar();
+  // Re-render whatever tab we're on so it picks up the new host.
+  refreshCurrentTab();
+}
+function refreshCurrentTab(){
+  if(TAB === 'overview')  { renderFleet(); return; }
+  if(TAB === 'host')      { renderHostTab(); return; }
+  if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
+}
+
+function renderFleet(){
+  if(!FLEET) return;
+  const meta = document.getElementById('fleet_meta');
+  const tbody = document.querySelector('#fleet_tbl tbody');
+  const rows = FLEET.hosts || [];
+  meta.innerHTML = `${rows.length} host${rows.length===1?'':'s'} · polling every ${FLEET.interval||10}s · ` +
+                   `click a row to focus that host in the other tabs.`;
+  tbody.innerHTML = rows.map(r => {
+    const st = statusOfFleetRow(r);
+    const h = r.host || {};
+    const ramPct = h.ram_total ? Math.round((h.ram_used||0) * 100 / h.ram_total) : null;
+    const cpu = h.cpu==null ? '—' : Math.round(h.cpu)+'%';
+    const ram = h.ram_total
+      ? `<span class="micro"><div style="width:${ramPct}%;background:${sev(ramPct)}"></div></span>${ramPct}%`
+      : '—';
+    const load = h.load1==null ? '—' : h.load1.toFixed(2);
+    const up = fmtUpShort(h.uptime);
+    const temp = h.ctemp==null ? '—' : Math.round(h.ctemp)+' °C';
+    const disks = (h.disks||[]).length
+      ? (h.disks||[]).slice(0,3).map(d =>
+          `<div style="font-size:11.5px;color:var(--mut);margin:1px 0">${esc(d.mount)} · ${d.pct}%</div>`).join('')
+      : '<span class="muted">—</span>';
+    const stale = r.online ? '' : (r.error
+      ? `<div class="stale" title="${esc(r.error)}">${esc(r.error.length>40?r.error.slice(0,40)+'…':r.error)}</div>`
+      : `<div class="stale">no data yet</div>`);
+    const subline = r.is_local ? 'hub' : (r.ssh_target || '');
+    return `<tr data-h="${esc(r.name)}">
+      <td class="hostcell">${esc(r.label||r.name)}<span class="sub">${esc(subline)}</span></td>
+      <td><span class="status ${st}"><span class="d"></span>${st}</span>${stale}</td>
+      <td>${cpu}</td>
+      <td>${ram}</td>
+      <td>${load}</td>
+      <td>${up}</td>
+      <td>${temp}</td>
+      <td>${disks}</td>
+    </tr>`;
+  }).join('');
+  tbody.querySelectorAll('tr[data-h]').forEach(tr => tr.onclick = () => {
+    setHost(tr.dataset.h);
+    showTab('host');
+  });
+}
+
+async function loadHostData(name){
+  if(name === 'local'){ HOST_DATA = null; return; }
+  try{ HOST_DATA = await(await fetch('/api/host_data/'+encodeURIComponent(name))).json(); }
+  catch(e){ HOST_DATA = null; }
+}
+
+async function renderHostTab(){
+  // The Host tab is the simplest per-host scope: same KPIs and disks block as
+  // single-host mode, but data is whichever host is selected. Remote data
+  // comes from probe.py via the hub poller.
+  if(CURRENT_HOST === 'local'){
+    // Use the existing local path — D is populated by loadData(), and
+    // renderData() will populate #hostkpis / #disks for us.
+    if(D) renderData();
+    return;
+  }
+  await loadHostData(CURRENT_HOST);
+  const h = (HOST_DATA && HOST_DATA.host) || {};
+  const hk = document.getElementById('hostkpis');
+  const dk = document.getElementById('disks');
+  if(!HOST_DATA || !HOST_DATA.online){
+    hk.innerHTML = '';
+    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : 'no data yet';
+    dk.innerHTML = `<div class="muted" style="padding:12px 2px">⏳ <b>${esc(CURRENT_HOST)}</b> — ${err}. Probes run every ${FLEET ? (FLEET.interval||10) : 10}s; new hosts take one cycle to populate.</div>`;
+    return;
+  }
+  const ramPct = h.ram_total ? Math.round((h.ram_used||0)*100/h.ram_total) : 0;
+  hk.innerHTML=[
+    {v:Math.round(h.cpu||0)+'%',         l:'CPU utilization', s:(h.cores||'?')+' cores'},
+    {v:ramPct+'%',                       l:'RAM used',        s:fmtMBshort(h.ram_used)+' / '+fmtMBshort(h.ram_total)},
+    {v:(h.load1!=null?h.load1.toFixed(2):'—'), l:'Load (1m)',  s:'of '+(h.cores||'?')+' cores'},
+    {v:fmtUpShort(h.uptime),             l:'Uptime'},
+    {v:(h.ctemp!=null?h.ctemp+' °C':'—'),l:'CPU/system temp'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  dk.innerHTML = (h.disks||[]).map(dkk =>
+    `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
+     <span>💾 ${esc(dkk.mount)}</span><span class="muted">${dkk.used} / ${dkk.total} GB · ${dkk.pct}%</span></div>
+     <div class="dbar"><div style="width:${dkk.pct}%;background:${sev(dkk.pct)}"></div></div></div>`).join('');
+  // History chart is local-only for now (no history on remote yet).
+  const cb = document.querySelector('section[data-tab="host"] .chartbox');
+  if(cb && !cb.querySelector('.scope-notice')){
+    // Keep the canvas in place but stack a notice above it.
+  }
+}
+
+function renderLocalOnlyNotice(tabId){
+  if(CURRENT_HOST === 'local') return;  // nothing to do — local renders normally
+  const sec = document.querySelector(`section[data-tab="${tabId}"]`);
+  if(!sec) return;
+  let notice = sec.querySelector('.scope-notice');
+  if(!notice){
+    notice = document.createElement('div');
+    notice.className = 'scope-notice';
+    sec.insertBefore(notice, sec.firstChild);
+  }
+  notice.innerHTML = `<div class="ic">ℹ️</div>
+    <div><b>${esc(tabId.toUpperCase())} is local-only this slice.</b>
+    The hub already polls <b>${esc(CURRENT_HOST)}</b> for host vitals (visible on Overview and the Host tab).
+    Per-host ${esc(tabId)} support lands in the next slice — meanwhile click <b>Local</b> up top to see this tab,
+    or open the Host tab for ${esc(CURRENT_HOST)}'s vitals.</div>`;
+}
+function clearLocalOnlyNotice(tabId){
+  const sec = document.querySelector(`section[data-tab="${tabId}"]`);
+  const n = sec && sec.querySelector('.scope-notice');
+  if(n) n.remove();
+}
+
 // ── Wire-up ───────────────────────────────────────────────────────────────────
 buildNav();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
@@ -1009,8 +1259,13 @@ document.getElementById('updcopy').onclick = async () => {
   setTimeout(() => { b.textContent = t; }, 1800);
 };
 showTab(TAB);
-loadData(); loadHealth();
-setInterval(()=>{if(document.getElementById('auto').checked){loadData();loadHealth();}},15000);
+loadData(); loadHealth(); loadFleet();
+setInterval(()=>{
+  if(!document.getElementById('auto').checked) return;
+  loadData(); loadHealth(); loadFleet();
+  // Re-render host-scoped tabs so cached remote data refreshes too.
+  if(TAB==='host' && CURRENT_HOST!=='local') renderHostTab();
+},15000);
 // One-shot GitHub star count — lazy, non-blocking, and the link still works offline.
 fetch('https://api.github.com/repos/SikamikanikoBG/homelab-monitor')
   .then(r=>r.ok?r.json():null)

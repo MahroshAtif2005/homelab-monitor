@@ -726,6 +726,91 @@ def _record_check(name, result):
                    (int(time.time()), json.dumps(result), name))
         DB.commit()
 
+# ── Per-host metric polling (Issue #35 slice 2) ───────────────────────────────
+# Every INTERVAL seconds the background poller pipes probe.py into
+# `ssh user@host python3 -` and parses the JSON it prints back. The script is
+# loaded once at boot from disk; the remote needs no install. Results are
+# cached in memory keyed by host name; the UI's All-hosts table reads from
+# this cache.
+
+_PROBE_PATH = os.path.join(os.path.dirname(__file__), "probe.py")
+try:
+    with open(_PROBE_PATH, "rb") as _f:
+        _PROBE_SCRIPT = _f.read()
+except Exception as e:
+    print("probe.py missing:", e, flush=True)
+    _PROBE_SCRIPT = b""
+
+HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
+HOST_DATA_LOCK = threading.Lock()
+HOST_POLL_TIMEOUT = 15
+
+def probe_host_metrics(user, host, port):
+    """Run probe.py on the remote via SSH stdin, return (data, error)."""
+    if not _PROBE_SCRIPT:
+        return None, "probe.py not packaged in this image"
+    rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
+                                      _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+    if rc != 0:
+        return None, _clean_ssh_err(err, out, rc)
+    out = (out or "").strip()
+    if not out:
+        return None, "empty response from probe"
+    try:
+        return json.loads(out), None
+    except Exception as e:
+        return None, f"bad JSON from probe: {e}"
+
+def _local_now_snapshot():
+    """Build a 'host' block for the hub itself, matching the probe shape so
+    the All-hosts table and the per-host Host tab can render local and remote
+    with the exact same code. We pull from LATEST / HEALTH which the existing
+    collector already keeps fresh."""
+    H = (LATEST or {}).get("host") or {}
+    out = {
+        "cpu":       H.get("cpu"),
+        "cores":     H.get("cores"),
+        "ram_used":  H.get("ram_used"),
+        "ram_total": H.get("ram_total"),
+        "load1":     H.get("load1"),
+        "uptime":    H.get("uptime"),
+        "ctemp":     H.get("ctemp"),
+        "disks":     H.get("disks") or [],
+        "hostname":  socket.gethostname(),
+    }
+    return out
+
+def host_poller():
+    """Loop: probe every registered host whose last Test was healthy. Per-host
+    timeouts isolate slow remotes so the loop never stalls. Errors are kept on
+    the cache row so the UI can show a 'last error' instead of just going dark."""
+    # Stagger the first run a touch so we don't fire before the app is fully up.
+    time.sleep(2)
+    while True:
+        try:
+            for h in list_hosts():
+                check = h.get("last_check") or {}
+                if (check.get("summary") or {}).get("overall") not in ("ok", "warn"):
+                    continue
+                parsed = _parse_ssh_target(h["ssh_target"])
+                if not parsed:
+                    continue
+                u, host, port = parsed
+                data, err = probe_host_metrics(u, host, port)
+                with HOST_DATA_LOCK:
+                    entry = HOST_DATA.get(h["name"], {})
+                    if data:
+                        entry["data"]  = data
+                        entry["at"]    = int(time.time())
+                        entry["error"] = None
+                    else:
+                        entry["error"]      = err or "unknown error"
+                        entry["error_at"]   = int(time.time())
+                    HOST_DATA[h["name"]] = entry
+        except Exception as e:
+            print("host_poller error:", e, flush=True)
+        time.sleep(INTERVAL)
+
 _SSH_BASE_ARGS = [
     "-i", SSH_KEY,
     "-o", "BatchMode=yes",
@@ -1591,6 +1676,61 @@ def api_hosts_one(name):
 def api_lan_scan():
     return jsonify(discover_lan())
 
+@app.route("/api/host_data/<name>")
+def api_host_data(name):
+    """Per-host metric snapshot. `local` is the hub itself; remotes are served
+    from the in-memory cache populated by host_poller()."""
+    if name == "local":
+        return jsonify({"name": "local", "host": _local_now_snapshot(),
+                        "at": int(time.time()), "online": True})
+    with HOST_DATA_LOCK:
+        entry = HOST_DATA.get(name)
+    if not entry or "data" not in entry:
+        # No successful poll yet (or never registered) — still respond 200 so
+        # the UI can render a "waiting" state instead of erroring.
+        return jsonify({"name": name, "online": False,
+                        "error": (entry or {}).get("error") or "no data yet",
+                        "at": (entry or {}).get("at"),
+                        "host": None})
+    age = int(time.time()) - int(entry["at"])
+    return jsonify({"name": name, "host": entry["data"].get("host", {}),
+                    "at": entry["at"], "online": age < INTERVAL * 3,
+                    "stale_for": age if age >= INTERVAL * 3 else 0,
+                    "error": entry.get("error")})
+
+@app.route("/api/fleet")
+def api_fleet():
+    """Compact summary KPIs for every host in the fleet. Drives the All-hosts
+    table. Order: local first, then registered hosts in the order they were
+    added."""
+    hosts = list_hosts()
+    rows  = []
+
+    # Local row
+    rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
+                 "ssh_target": None, "host": _local_now_snapshot(),
+                 "at": int(time.time()), "online": True, "is_local": True,
+                 "last_check": {"summary": {"overall": "ok"}}})
+
+    with HOST_DATA_LOCK:
+        for h in hosts:
+            entry = HOST_DATA.get(h["name"]) or {}
+            data  = entry.get("data") or {}
+            at    = entry.get("at")
+            online = bool(data) and at and (int(time.time()) - at) < INTERVAL * 3
+            rows.append({
+                "name": h["name"],
+                "label": h["name"],
+                "ssh_target": h["ssh_target"],
+                "host": data.get("host") if data else None,
+                "at": at,
+                "online": online,
+                "is_local": False,
+                "last_check": h.get("last_check"),
+                "error": entry.get("error"),
+            })
+    return jsonify({"hosts": rows, "interval": INTERVAL})
+
 @app.route("/api/hosts/<name>/test", methods=["POST"])
 def api_hosts_test(name):
     result = probe_host(name)
@@ -1648,6 +1788,7 @@ def index():
     return app.send_static_file("dashboard.html")
 
 threading.Thread(target=collector, daemon=True).start()
+threading.Thread(target=host_poller, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)
