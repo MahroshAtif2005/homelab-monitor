@@ -93,15 +93,19 @@
 
 /* Gradient title — white that fades to amber at the tail */
 .hl-hero .hl-title {
-  font-size: clamp(2.6rem, 6vw, 4.4rem);
+  font-size: clamp(2.1rem, 7vw, 4.4rem);
   font-weight: 700;
   letter-spacing: -0.035em;
-  line-height: 1.05;
+  line-height: 1.06;
   margin: 0 0 18px;
   background: linear-gradient(120deg, #ffffff 10%, #e6edf3 45%, var(--hl-amber) 95%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  /* Let the title wrap on narrow screens — the &nbsp; in the markup is a
+     desktop optimisation; we don't want a one-line title to overflow. */
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .hl-hero .hl-title .em { color: inherit; }
 .hl-hero .hl-tag {
@@ -375,6 +379,73 @@
   .hl-reveal, .hl-reveal.hl-in { opacity: 1; transform: none; transition: none; }
   .hl-hero::before, .hl-hero::after { animation: none; }
   .hl-shots img, .hl-feature, .hl-cta .md-button { transition: none; }
+}
+
+/* ── Mobile (phone-portrait) ──────────────────────────────────────────────
+   Tighter hero, full-width stacked CTAs, smaller aurora blobs (cheaper to
+   blur on phones), tighter section spacing. Cards + screenshots already
+   reflow to a single column via auto-fit minmax. */
+@media (max-width: 640px) {
+  .hl-hero {
+    padding: 56px 14px 28px;
+  }
+  .hl-hero .hl-tag {
+    font-size: 1rem;
+    margin-bottom: 22px;
+  }
+  /* Stack CTAs full-width so they're tappable and don't half-wrap. */
+  .hl-cta { gap: 8px; }
+  .hl-cta .md-button {
+    width: 100%;
+    padding: 14px 18px;        /* taller for thumbs */
+    font-size: 0.95rem;
+  }
+  .hl-hero .hl-gif {
+    border-radius: 10px;
+    border-width: 1px;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 16px 40px -14px rgba(0, 0, 0, 0.65);
+  }
+  .hl-hero .hl-badges {
+    font-size: 0.74rem;
+    gap: 6px;
+  }
+  .hl-hero .hl-badges span { padding: 3px 10px; }
+
+  .hl-hero::before { width: 540px; height: 360px; }
+  .hl-hero::after  { width: 460px; height: 320px; }
+
+  .hl-section-title {
+    margin: 44px 0 16px;
+    letter-spacing: 0.15em;
+    font-size: 0.7rem;
+  }
+  .hl-section-title::before,
+  .hl-section-title::after { width: 18px; margin: 0 8px; }
+
+  .hl-feature { padding: 18px 18px; border-radius: 12px; }
+  .hl-feature h3 { font-size: 0.98rem; }
+  .hl-feature p  { font-size: 0.86rem; }
+
+  .hl-shots { gap: 12px; }
+  .hl-shots a { border-radius: 10px; }
+  .hl-shots .lbl { padding: 9px 12px; font-size: 0.76rem; }
+
+  .hl-install {
+    padding: 16px 18px;
+    margin-bottom: 36px;
+    border-radius: 12px;
+  }
+  .hl-install h3 { font-size: 0.92rem; }
+}
+
+/* Very small phones — squeeze a bit more */
+@media (max-width: 400px) {
+  .hl-hero { padding: 44px 12px 22px; }
+  .hl-hero .hl-title { font-size: 1.95rem; }
+  .hl-hero .hl-tag { font-size: 0.94rem; }
+  .hl-hero .hl-badges { display: none; }   /* badge row gets noisy at 360-400px */
 }
 
 /* ── Tiny status dot for the badges row ───────────────────────────────────── */
