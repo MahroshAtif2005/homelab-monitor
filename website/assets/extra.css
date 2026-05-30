@@ -1,0 +1,155 @@
+/* HomeLab Monitor — landing & docs polish. The dashboard's accent is amber
+   (#d29922); pull it through the Material theme so the site feels of-a-piece
+   with the app itself. */
+
+:root {
+  --hl-accent: #d29922;
+  --hl-accent-soft: #d2992233;
+  --hl-bg: #0d1117;
+  --hl-card: #161b22;
+  --hl-bd: #30363d;
+  --hl-tx: #e6edf3;
+  --hl-mut: #8b949e;
+}
+
+/* Match the dashboard's deep slate, not Material's blue-grey. */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--hl-bg);
+  --md-code-bg-color: var(--hl-card);
+  --md-typeset-a-color: var(--hl-accent);
+  --md-accent-fg-color: var(--hl-accent);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: var(--hl-card);
+}
+
+/* ── Landing hero ───────────────────────────────────────────────────────── */
+.hl-hero {
+  text-align: center;
+  padding: 64px 16px 36px;
+  border-bottom: 1px dashed var(--hl-bd);
+  margin-bottom: 32px;
+}
+.hl-hero .hl-title {
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 14px;
+  color: var(--hl-tx);
+}
+.hl-hero .hl-title .em { color: var(--hl-accent); }
+.hl-hero .hl-tag {
+  font-size: 1.15rem;
+  color: var(--hl-mut);
+  max-width: 720px;
+  margin: 0 auto 24px;
+  line-height: 1.55;
+}
+.hl-hero .hl-cta {
+  display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+  margin: 20px 0 28px;
+}
+.hl-hero .hl-cta .md-button {
+  font-weight: 500;
+}
+.hl-hero .hl-cta .md-button--primary {
+  background-color: var(--hl-accent);
+  color: #1a1409;
+  border-color: var(--hl-accent);
+}
+.hl-hero .hl-cta .md-button--primary:hover {
+  background-color: #e0a82f;
+  border-color: #e0a82f;
+}
+.hl-hero .hl-gif {
+  max-width: 900px; width: 100%;
+  border: 1px solid var(--hl-bd);
+  border-radius: 10px;
+  display: block; margin: 0 auto;
+  box-shadow: 0 10px 40px #0008;
+}
+.hl-hero .hl-badges {
+  margin-top: 18px; color: var(--hl-mut); font-size: 0.85rem;
+  display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;
+}
+.hl-hero .hl-badges code {
+  background: var(--hl-card); border: 1px solid var(--hl-bd);
+  border-radius: 5px; padding: 2px 8px; color: var(--hl-tx);
+}
+
+/* ── Feature grid ───────────────────────────────────────────────────────── */
+.hl-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  margin: 36px 0 48px;
+}
+.hl-feature {
+  background: var(--hl-card);
+  border: 1px solid var(--hl-bd);
+  border-left: 3px solid var(--hl-accent);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+.hl-feature h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--hl-tx);
+  display: flex; align-items: center; gap: 8px;
+}
+.hl-feature h3 .ico { font-size: 1.2rem; }
+.hl-feature p {
+  margin: 0;
+  color: var(--hl-mut);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+/* ── Section headers on landing ─────────────────────────────────────────── */
+.hl-section-title {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--hl-mut);
+  font-weight: 600;
+  margin: 36px 0 14px;
+  text-align: center;
+}
+
+/* ── Screenshot grid ────────────────────────────────────────────────────── */
+.hl-shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  margin: 16px 0 40px;
+}
+.hl-shots a {
+  display: block; border-radius: 9px; overflow: hidden;
+  border: 1px solid var(--hl-bd);
+  background: var(--hl-card);
+  transition: border-color .15s, transform .15s;
+}
+.hl-shots a:hover { border-color: var(--hl-accent); }
+.hl-shots img {
+  display: block; width: 100%; height: auto;
+}
+.hl-shots .lbl {
+  display: block; padding: 8px 12px;
+  color: var(--hl-mut); font-size: 0.82rem;
+  border-top: 1px solid var(--hl-bd);
+}
+
+/* ── Quick-install block ────────────────────────────────────────────────── */
+.hl-install {
+  max-width: 720px; margin: 0 auto 36px;
+  border: 1px solid var(--hl-bd);
+  border-radius: 10px; background: var(--hl-card);
+  padding: 18px 22px;
+}
+.hl-install h3 { margin: 0 0 10px; font-size: 1rem; }
+
+/* Tighten Material's default body width a bit on landing for better hero feel */
+.md-typeset { font-size: 0.85rem; }

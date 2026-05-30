@@ -5,6 +5,7 @@
 [![Clones (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 [![Unique cloners (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones-unique.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 
+[![website](https://img.shields.io/badge/docs-sikamikanikobg.github.io%2Fhomelab--monitor-d29922?logo=readthedocs&logoColor=white)](https://sikamikanikobg.github.io/homelab-monitor/)
 ![version](https://img.shields.io/badge/version-0.8.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)

@@ -5,3 +5,8 @@ data/
 static/chart.min.js
 __pycache__/
 *.pyc
+
+# MkDocs build output + locally-mirrored screenshots (the docs workflow does
+# this copy fresh on each build; not checked in).
+site/
+website/screenshots/
