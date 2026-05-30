@@ -63,10 +63,22 @@ as quickly and reads as cleanly as the last hour.
 ![Host tab](docs/host.png)
 
 ## Quick start
-
 Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 (No GPU? The container, service and host panels still work fine.)
+**Option A — pre-built image (recommended).** No clone, no build:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/SikamikanikoBG/homelab-monitor/main/docker-compose.yml
+docker compose pull
+docker compose up -d
+```
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to
+[`sikamikaniko123/homelab-monitor`](https://hub.docker.com/r/sikamikaniko123/homelab-monitor)
+on every release. To upgrade later: `docker compose pull && docker compose up -d`.
+
+**Option B — from source** (build it yourself, handy if you're tweaking the code):
 
 ```bash
 git clone https://github.com/SikamikanikoBG/homelab-monitor.git
@@ -74,7 +86,7 @@ cd homelab-monitor
 docker compose up -d --build
 ```
 
-Open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
+Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
 
 ## Supported model servers
 
