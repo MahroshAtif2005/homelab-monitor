@@ -12,6 +12,7 @@ on:
       - 'mkdocs.yml'
       - 'docs/*.png'
       - 'docs/*.gif'
+      - 'docs/*.svg'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -39,13 +40,14 @@ jobs:
         run: pip install --quiet mkdocs-material==9.5.39
 
       - name: Mirror screenshots into the site
-        # We keep docs/ as the canonical home of the README's PNGs and the demo
-        # GIF, but the site needs them under its own docs_dir. Copy at build
-        # time so there's a single source of truth.
+        # We keep docs/ as the canonical home of the README's PNGs, the demo
+        # GIF and the architecture SVG, but the site needs them under its own
+        # docs_dir. Copy at build time so there's a single source of truth.
         run: |
           mkdir -p website/screenshots
-          cp docs/*.png website/screenshots/
+          cp docs/*.png website/screenshots/ 2>/dev/null || true
           cp docs/*.gif website/screenshots/ 2>/dev/null || true
+          cp docs/*.svg website/screenshots/ 2>/dev/null || true
 
       - name: Build
         run: mkdocs build --strict
