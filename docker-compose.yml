@@ -1,7 +1,7 @@
 services:
   homelab-monitor:
     build: .
-    image: homelab-monitor:latest
+    image: sikamikaniko123/homelab-monitor:latest
     container_name: homelab-monitor
     restart: unless-stopped
     # host networking lets it reach any model server's API (Ollama/vLLM/TGI/…)
