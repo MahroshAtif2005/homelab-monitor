@@ -94,6 +94,30 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .umodal .notes blockquote{border-left:3px solid var(--bd);padding:.2em 0 .2em 10px;color:var(--mut);margin:.5em 0}
 .umodal .notes hr{border:0;border-top:1px solid var(--bd);margin:1em 0}
 .umodal .notes img{max-width:100%}
+/* Hosts tab (multi-machine monitoring) */
+.hosts-key{background:#0d1117;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--tx);word-break:break-all;white-space:pre-wrap;margin:0}
+.hosts-form{display:grid;grid-template-columns:1fr 1.6fr auto;gap:8px;max-width:760px;align-items:end}
+@media(max-width:680px){.hosts-form{grid-template-columns:1fr}}
+.hosts-input{background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit}
+.hostrow{border:1px solid var(--bd);border-radius:10px;padding:11px 13px;margin-top:9px;background:#0d1117}
+.hostrow.ok{border-left:3px solid var(--ok)}.hostrow.warn{border-left:3px solid var(--warn)}.hostrow.fail{border-left:3px solid var(--crit)}.hostrow.untested{border-left:3px solid var(--bd)}
+.hostrow .hd{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.hostrow .nm{font-weight:600}.hostrow .tg{color:var(--mut);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hostrow .ts{color:var(--mut);font-size:12px;margin-left:auto}
+.hostrow .ac{display:flex;gap:6px;flex-wrap:wrap}
+.hcheck{margin-top:10px;display:none}.hcheck.show{display:block}
+.hcheck .row{display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-top:1px dashed var(--bd)}
+.hcheck .row:first-child{border-top:0}
+.hcheck .ic{font-size:14px;line-height:1.4;width:18px;flex:none;text-align:center}
+.hcheck .lbl{font-weight:600;font-size:13px}.hcheck .det{color:var(--mut);font-size:12.5px}
+.hcheck .rem{margin-top:6px;background:#161b22;border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font-size:12px}
+.hcheck .rem .lbl{color:var(--accent);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;font-weight:600}
+.hcheck .rem pre{margin:5px 0 0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx)}
+.hcheck .rem .cp{margin-top:5px}
+.btn-mini{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit;font-size:12px}
+.btn-mini:hover{border-color:var(--mut)}
+.btn-mini.danger{color:var(--crit);border-color:#f8514955}
+.btn-mini.danger:hover{border-color:var(--crit)}
 </style></head><body><div class="wrap">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -223,6 +247,45 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
   </div>
 </section>
 
+<!-- ───────── Hosts (multi-machine monitoring — Issue #35) ───────── -->
+<section data-tab="hosts" hidden>
+  <div class="card">
+    <h2>🌐 Hosts</h2>
+    <p class="cap" style="margin:-4px 0 12px">
+      Register other machines you'd like this hub to monitor. SSH-only, agentless: the hub uses the
+      key shown below to log in and read <code>/proc</code>, <code>docker.sock</code>, the systemd
+      D-Bus, and <code>nvidia-smi</code>. Per-host data collection, the cockpit grid and the
+      topology view land in follow-up PRs — this slice is registry + Test connection.
+    </p>
+
+    <div id="hoststatus" class="ins info" style="display:none"></div>
+
+    <div style="margin-bottom:16px">
+      <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">
+        Hub's public key — paste on each remote you want to monitor</div>
+      <pre class="hosts-key" id="pubkey">loading…</pre>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn-mini" id="pubkey_copy">📋 Copy pubkey</button>
+        <button class="btn-mini" id="pubkey_show_cmd">Show paste command</button>
+      </div>
+      <pre class="hosts-key" id="pubkey_cmd" style="display:none;margin-top:8px"></pre>
+    </div>
+
+    <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">
+      Add a host</div>
+    <div class="hosts-form">
+      <input type="text" class="hosts-input" id="h_name"   placeholder="name (e.g. ardi)"        autocomplete="off" spellcheck="false">
+      <input type="text" class="hosts-input" id="h_target" placeholder="user@host or user@host:port" autocomplete="off" spellcheck="false">
+      <button class="rb on" id="h_add">Add host</button>
+    </div>
+    <div class="cap" style="margin-top:6px">
+      After adding, hit <b>Test</b> on the row — the checklist will tell you exactly what to paste on the remote for anything not yet working.
+    </div>
+
+    <div id="hostlist" style="margin-top:14px"></div>
+  </div>
+</section>
+
 <!-- ───────── Host ───────── -->
 <section data-tab="host" hidden>
   <div class="card"><h2>🖥️ Host health</h2>
@@ -266,6 +329,7 @@ const TABS = [
   {id:'containers', label:'Containers', charts:false},
   {id:'services',   label:'Services',   charts:false},
   {id:'host',       label:'Host',       charts:true},
+  {id:'hosts',      label:'Hosts',      charts:false},
   {id:'alerts',     label:'Alerts',     charts:false},
 ];
 let R = localStorage.getItem('hl_range') || '6h';
@@ -298,6 +362,7 @@ function showTab(id){
   document.getElementById('controls').hidden = !(TABS.find(t=>t.id===id)||{}).charts;
   buildCharts();   // charts can only size on a visible canvas, so build on show
   if(id==='alerts') loadAlerts();
+  if(id==='hosts')  loadHosts();
 }
 
 // ── Data loaders ────────────────────────────────────────────────────────────
@@ -549,6 +614,127 @@ async function testAlerts(){
   }
 }
 
+// ── Hosts tab (multi-machine monitoring slice 1) ─────────────────────────────
+const HSTATUS_ICON = {ok:'✅', warn:'⚠️', fail:'❌', info:'ℹ️'};
+function showHostStatus(level, text){
+  const el=document.getElementById('hoststatus');
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+function relTime(ts){
+  if(!ts) return 'never tested';
+  const s = Math.max(1, Math.round(Date.now()/1000 - ts));
+  if(s<60) return s+'s ago';
+  if(s<3600) return Math.round(s/60)+'m ago';
+  if(s<86400) return Math.round(s/3600)+'h ago';
+  return Math.round(s/86400)+'d ago';
+}
+async function loadHosts(){
+  // Pubkey (eager, but only once we open the tab)
+  try{
+    const k = await(await fetch('/api/hub/pubkey')).json();
+    document.getElementById('pubkey').textContent = k.pubkey || '(no key generated yet)';
+    document.getElementById('pubkey_cmd').textContent =
+      `mkdir -p ~/.ssh && chmod 700 ~/.ssh\n`+
+      `echo '${k.pubkey||''}' >> ~/.ssh/authorized_keys\n`+
+      `chmod 600 ~/.ssh/authorized_keys`;
+  }catch(e){ document.getElementById('pubkey').textContent='(could not load: '+e+')'; }
+  // Host list
+  let j; try{ j = await(await fetch('/api/hosts')).json(); }
+  catch(e){ document.getElementById('hostlist').innerHTML =
+    `<div class="muted">Couldn't load hosts: ${esc(String(e))}</div>`; return; }
+  renderHosts(j.hosts||[]);
+}
+function renderHosts(hosts){
+  const wrap = document.getElementById('hostlist');
+  if(!hosts.length){
+    wrap.innerHTML = '<div class="muted" style="margin-top:6px">No hosts yet. Add one above to get started.</div>';
+    return;
+  }
+  wrap.innerHTML = hosts.map(h => {
+    const overall = (h.last_check && h.last_check.summary && h.last_check.summary.overall) || 'untested';
+    const badge = h.last_check
+      ? `<span class="badge ${overall==='ok'?'ok':overall==='warn'?'warn':overall==='fail'?'crit':'info'}">${overall.toUpperCase()}</span>`
+      : `<span class="badge info">UNTESTED</span>`;
+    return `<div class="hostrow ${overall}" data-h="${esc(h.name)}">
+      <div class="hd">
+        <span class="nm">${esc(h.name)}</span>
+        <span class="tg">${esc(h.ssh_target)}</span>
+        ${badge}
+        <span class="ts">checked ${relTime(h.last_check_at)}</span>
+        <span class="ac">
+          <button class="btn-mini hbtn-test"   data-h="${esc(h.name)}">Test</button>
+          <button class="btn-mini danger hbtn-del" data-h="${esc(h.name)}">Remove</button>
+        </span>
+      </div>
+      <div class="hcheck${h.last_check?' show':''}" id="hck-${esc(h.name)}">
+        ${h.last_check ? renderChecks(h.last_check.checks||[]) : ''}
+      </div>
+    </div>`;
+  }).join('');
+  wrap.querySelectorAll('.hbtn-test').forEach(b => b.onclick = () => testHost(b.dataset.h));
+  wrap.querySelectorAll('.hbtn-del').forEach(b => b.onclick  = () => deleteHost(b.dataset.h));
+}
+function renderChecks(checks){
+  return checks.map(c => {
+    const ic = HSTATUS_ICON[c.status] || '•';
+    const rem = c.remedy ? `<div class="rem">
+        <div class="lbl">→ ${esc(c.remedy.where||'')}</div>
+        <pre>${esc(c.remedy.cmd||'')}</pre>
+        <div class="cp"><button class="btn-mini hbtn-copyrem" type="button">📋 Copy</button></div>
+      </div>` : '';
+    return `<div class="row">
+      <div class="ic">${ic}</div>
+      <div style="flex:1;min-width:0">
+        <div class="lbl">${esc(c.label)}</div>
+        <div class="det">${esc(c.detail||'')}</div>
+        ${rem}
+      </div>
+    </div>`;
+  }).join('');
+}
+async function addHost(){
+  const name   = document.getElementById('h_name').value.trim();
+  const target = document.getElementById('h_target').value.trim();
+  if(!name || !target){ showHostStatus('warning','Name and SSH target are both required.'); return; }
+  let j; try{ j = await(await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, ssh_target: target})})).json(); }
+  catch(e){ showHostStatus('critical','Add failed: '+e); return; }
+  if(!j.ok){ showHostStatus('critical', j.error || 'Add failed.'); return; }
+  document.getElementById('h_name').value='';
+  document.getElementById('h_target').value='';
+  showHostStatus('ok','Host added — hit Test to check connectivity.');
+  await loadHosts();
+}
+async function testHost(name){
+  const row = document.querySelector(`.hostrow[data-h="${CSS.escape(name)}"]`);
+  if(row){
+    const ck = row.querySelector('.hcheck');
+    ck.classList.add('show');
+    ck.innerHTML = '<div class="row"><div class="ic">⏳</div><div><div class="lbl">Testing…</div><div class="det">SSH probes can take a few seconds.</div></div></div>';
+    row.querySelectorAll('button').forEach(b => b.disabled = true);
+  }
+  let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}/test`,{method:'POST'})).json(); }
+  catch(e){ showHostStatus('critical','Test failed: '+e); await loadHosts(); return; }
+  if(!j.ok){ showHostStatus('critical', j.error || 'Test failed.'); }
+  await loadHosts();
+  // Re-attach copy handlers for any remedy blocks rendered into the row.
+  document.querySelectorAll('.hbtn-copyrem').forEach(b => b.onclick = async () => {
+    const pre = b.closest('.rem').querySelector('pre');
+    try{ await navigator.clipboard.writeText(pre.textContent); b.textContent='✓ Copied'; setTimeout(()=>b.textContent='📋 Copy', 1500); }
+    catch(e){ const r=document.createRange(); r.selectNodeContents(pre); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+  });
+}
+async function deleteHost(name){
+  if(!confirm(`Remove host '${name}'? (history isn't deleted; only the registration.)`)) return;
+  let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}`,{method:'DELETE'})).json(); }
+  catch(e){ showHostStatus('critical','Remove failed: '+e); return; }
+  if(j.ok){ showHostStatus('ok',`Removed ${name}.`); }
+  else    { showHostStatus('warning', j.error || 'Already gone.'); }
+  await loadHosts();
+}
+
 // ── Wire-up ───────────────────────────────────────────────────────────────────
 buildNav();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
@@ -557,6 +743,19 @@ document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
+document.getElementById('h_add').onclick = addHost;
+document.getElementById('h_name').addEventListener('keydown', e => { if(e.key==='Enter') addHost(); });
+document.getElementById('h_target').addEventListener('keydown', e => { if(e.key==='Enter') addHost(); });
+document.getElementById('pubkey_copy').onclick = async () => {
+  try{ await navigator.clipboard.writeText(document.getElementById('pubkey').textContent); }
+  catch(e){ const r=document.createRange(); r.selectNodeContents(document.getElementById('pubkey')); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); return; }
+  const b=document.getElementById('pubkey_copy'), t=b.textContent;
+  b.textContent='✓ Copied'; setTimeout(()=>{b.textContent=t;}, 1500);
+};
+document.getElementById('pubkey_show_cmd').onclick = () => {
+  const el = document.getElementById('pubkey_cmd');
+  el.style.display = (el.style.display==='none' ? 'block' : 'none');
+};
 // Update modal: close via × button, Escape, or backdrop click; copy command to clipboard.
 document.getElementById('updclose').onclick = closeUpdateModal;
 document.getElementById('updmodal').addEventListener('click', e => { if(e.target.id==='updmodal') closeUpdateModal(); });

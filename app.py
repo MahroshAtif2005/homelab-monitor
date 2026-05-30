@@ -44,6 +44,14 @@ UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
 UPDATE_TTL_POSITIVE = 6 * 3600
 UPDATE_TTL_NEGATIVE = 30 * 60
 MAX_POINTS   = 360
+# Multi-machine monitoring (Issue #35, slice 1: registry + probe). The hub's own
+# SSH key lives under SSH_DIR — it's inside /data so it persists across rebuilds
+# the same way the SQLite history does. Capability probes run via the system
+# `ssh` client (installed in the Dockerfile).
+SSH_DIR         = os.environ.get("SSH_DIR", "/data/.ssh")
+SSH_KEY         = os.path.join(SSH_DIR, "id_ed25519")
+SSH_KNOWN_HOSTS = os.path.join(SSH_DIR, "known_hosts")
+SSH_CONNECT_TIMEOUT = 5
 HEX64        = re.compile(r"[0-9a-f]{64}")
 OOM_RE       = re.compile(r"(out of memory|cuda error: out of memory|failed to allocate|bfcarena|"
                           r"cudamalloc|outofmemory|cublas_status_alloc_failed|cuda_error_out_of_memory)", re.I)
@@ -75,6 +83,14 @@ CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS hosts(
+  name TEXT PRIMARY KEY,
+  ssh_target TEXT NOT NULL,
+  tags TEXT DEFAULT '',
+  added_at INTEGER NOT NULL,
+  last_check_at INTEGER,
+  last_check_json TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
@@ -470,6 +486,247 @@ def health_scan():
 # Everything the notifier needs is configured from the dashboard's Settings tab
 # and stored in the `settings` table, so the container is plug-and-play and the
 # operator never has to edit docker-compose.yml just to enable alerts.
+# ── Hosts registry + SSH capability probe (Issue #35, slice 1) ────────────────
+# A monitored host is just a (name, ssh_target) pair persisted in SQLite. The
+# hub's own ed25519 keypair is generated on first boot under SSH_DIR (inside
+# /data so it survives rebuilds). "Test connection" runs a real per-capability
+# checklist via ssh and returns each result with an inline remedy when the user
+# can fix it on the remote.
+
+_HOST_NAME_RE  = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$", re.I)
+_SSH_TARGET_RE = re.compile(r"^(?P<user>[a-z0-9_.-]+)@(?P<host>[a-z0-9._-]+)(?::(?P<port>\d{1,5}))?$", re.I)
+
+def _ensure_ssh_keypair():
+    """Generate hub ed25519 keypair on first boot; idempotent across restarts."""
+    try:
+        os.makedirs(SSH_DIR, mode=0o700, exist_ok=True)
+    except Exception as e:
+        print("ssh keydir error:", e, flush=True)
+        return
+    if os.path.exists(SSH_KEY):
+        return
+    try:
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-q", "-N", "",
+                        "-C", "homelab-monitor@hub", "-f", SSH_KEY],
+                       check=True, timeout=10)
+        os.chmod(SSH_KEY, 0o600)
+        if os.path.exists(SSH_KEY + ".pub"):
+            os.chmod(SSH_KEY + ".pub", 0o644)
+    except Exception as e:
+        print("ssh-keygen failed:", e, flush=True)
+
+def get_hub_pubkey():
+    pub = SSH_KEY + ".pub"
+    if not os.path.exists(pub):
+        _ensure_ssh_keypair()
+    try:
+        with open(pub) as f:
+            return f.read().strip()
+    except Exception as e:
+        return f"# pubkey unavailable: {e}"
+
+def _parse_ssh_target(t):
+    m = _SSH_TARGET_RE.match((t or "").strip())
+    if not m:
+        return None
+    g = m.groupdict()
+    port = int(g["port"]) if g["port"] else 22
+    if not (1 <= port <= 65535):
+        return None
+    return g["user"], g["host"], port
+
+def list_hosts():
+    with LOCK:
+        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json "
+                          "FROM hosts ORDER BY added_at").fetchall()
+    out = []
+    for name, target, tags, added, checked, blob in rows:
+        try:
+            check = json.loads(blob) if blob else None
+        except Exception:
+            check = None
+        out.append({"name": name, "ssh_target": target,
+                    "tags": [t for t in (tags or "").split(",") if t],
+                    "added_at": added, "last_check_at": checked, "last_check": check})
+    return out
+
+def add_host(name, ssh_target, tags=""):
+    if not _HOST_NAME_RE.match(name or ""):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if _parse_ssh_target(ssh_target) is None:
+        return None, "SSH target must look like user@host or user@host:port."
+    with LOCK:
+        try:
+            DB.execute("INSERT INTO hosts(name, ssh_target, tags, added_at) VALUES(?,?,?,?)",
+                       (name, ssh_target.strip(), (tags or "").strip(), int(time.time())))
+            DB.commit()
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{name}' already exists."
+    return {"name": name, "ssh_target": ssh_target.strip()}, None
+
+def delete_host(name):
+    with LOCK:
+        cur = DB.execute("DELETE FROM hosts WHERE name=?", (name,))
+        DB.commit()
+    return cur.rowcount > 0
+
+def _record_check(name, result):
+    with LOCK:
+        DB.execute("UPDATE hosts SET last_check_at=?, last_check_json=? WHERE name=?",
+                   (int(time.time()), json.dumps(result), name))
+        DB.commit()
+
+def _ssh(user, host, port, cmd, timeout=8):
+    """Run a single command on the remote via ssh. Returns (rc, stdout, stderr, ms)."""
+    t0 = time.time()
+    try:
+        p = subprocess.run([
+            "ssh",
+            "-i", SSH_KEY,
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={SSH_KNOWN_HOSTS}",
+            "-o", "PasswordAuthentication=no",
+            "-o", "PubkeyAuthentication=yes",
+            "-p", str(port),
+            f"{user}@{host}",
+            "--", "sh", "-c", cmd,
+        ], capture_output=True, timeout=timeout)
+        ms = int((time.time() - t0) * 1000)
+        return (p.returncode,
+                p.stdout.decode("utf-8", "replace").strip(),
+                p.stderr.decode("utf-8", "replace").strip(),
+                ms)
+    except subprocess.TimeoutExpired:
+        ms = int((time.time() - t0) * 1000)
+        return 124, "", f"ssh timed out after {timeout}s", ms
+    except FileNotFoundError:
+        return 127, "", "ssh client not found in container (install openssh-client)", 0
+
+def _summarize(checks):
+    by = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
+    for c in checks:
+        by[c["status"]] = by.get(c["status"], 0) + 1
+    if by["fail"]:   overall = "fail"
+    elif by["warn"]: overall = "warn"
+    else:            overall = "ok"
+    return {"overall": overall, **by}
+
+def probe_host(name):
+    """Run the capability checklist against a registered host. Each check returns
+    {id, label, status: ok|warn|fail|info, detail, remedy?}. The full result is
+    cached on the host row so the UI can show the last-known state even when
+    the user hasn't re-tested."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        result = {"checks": [{"id": "parse", "label": "SSH target", "status": "fail",
+                              "detail": f"could not parse '{row[0]}'"}]}
+        result["summary"] = _summarize(result["checks"])
+        _record_check(name, result)
+        return result
+    user, host, port = parsed
+    _ensure_ssh_keypair()
+    checks = []
+
+    # 1) SSH connect
+    rc, out, err, ms = _ssh(user, host, port, "echo ok", timeout=SSH_CONNECT_TIMEOUT + 2)
+    if rc == 0 and out == "ok":
+        checks.append({"id": "connect", "label": "SSH reachable",
+                       "status": "ok", "detail": f"port {port}, {ms} ms"})
+    else:
+        msg = ((err or out or "no response").splitlines() or [""])[0][:240]
+        hint = None
+        e = (err or "")
+        if "Permission denied" in e:
+            hint = {"where": "on the remote",
+                    "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                           f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
+                           f"chmod 600 ~/.ssh/authorized_keys"}
+        elif "Connection refused" in e or "Connection timed out" in e or rc == 124:
+            hint = {"where": "on the remote",
+                    "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
+        elif "Host key verification failed" in e:
+            hint = {"where": "on the hub (this container)",
+                    "cmd": f"# Clear the saved host key and re-test:\nrm {SSH_KNOWN_HOSTS}"}
+        elif "Could not resolve hostname" in e or "Name or service not known" in e:
+            hint = {"where": "on the hub (this container)",
+                    "cmd": "# Hostname did not resolve. Try the IP, or check the container's DNS."}
+        item = {"id": "connect", "label": "SSH reachable", "status": "fail", "detail": msg}
+        if hint: item["remedy"] = hint
+        checks.append(item)
+        result = {"checks": checks, "summary": _summarize(checks)}
+        _record_check(name, result)
+        return result
+
+    # 2) /proc readable
+    rc, out, err, _ = _ssh(user, host, port, "head -n1 /proc/uptime 2>&1")
+    if rc == 0 and out:
+        try:
+            up = float(out.split()[0])
+            detail = f"uptime {int(up)}s"
+        except Exception:
+            detail = out[:60]
+        checks.append({"id": "proc", "label": "/proc readable", "status": "ok", "detail": detail})
+    else:
+        checks.append({"id": "proc", "label": "/proc readable", "status": "warn",
+                       "detail": (err or "unexpected reply")[:160],
+                       "remedy": {"where": "note",
+                                  "cmd": "# /proc is Linux-only. macOS/BSD remotes aren't supported in v0."}})
+
+    # 3) Docker socket
+    rc, out, err, _ = _ssh(user, host, port,
+                           "docker version --format '{{.Server.Version}}' 2>&1 || true")
+    out_l = (out or "").lower()
+    err_l = (err or "").lower()
+    if rc == 0 and out and not any(s in out_l for s in
+                                   ("permission denied", "cannot connect", "error", "command not found")):
+        checks.append({"id": "docker", "label": "Docker socket", "status": "ok",
+                       "detail": f"server v{out}"})
+    elif "permission denied" in out_l or "permission denied" in err_l:
+        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
+                       "detail": f"permission denied — '{user}' not in the docker group",
+                       "remedy": {"where": "on the remote",
+                                  "cmd": f"sudo usermod -aG docker {user}\n"
+                                         f"# then log out and back in (new group needs a fresh login)"}})
+    elif "command not found" in out_l or "command not found" in err_l or out_l == "":
+        checks.append({"id": "docker", "label": "Docker socket", "status": "info",
+                       "detail": "Docker not installed — container panel will be hidden for this host"})
+    else:
+        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
+                       "detail": (out or err or "unknown error")[:160]})
+
+    # 4) systemd D-Bus
+    _, out, _, _ = _ssh(user, host, port,
+                        "[ -S /run/dbus/system_bus_socket ] && echo ok || echo missing")
+    if out == "ok":
+        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "ok",
+                       "detail": "/run/dbus/system_bus_socket present"})
+    else:
+        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "info",
+                       "detail": "not present — services panel will be hidden for this host"})
+
+    # 5) nvidia-smi
+    _, out, _, _ = _ssh(user, host, port,
+                        "command -v nvidia-smi >/dev/null && "
+                        "nvidia-smi --query-gpu=name --format=csv,noheader -i 0 2>/dev/null | head -1 || echo missing")
+    if out and out != "missing":
+        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": out[:120]})
+    else:
+        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
+                       "detail": "not found — GPU panel will be hidden for this host"})
+
+    result = {"checks": checks, "summary": _summarize(checks)}
+    _record_check(name, result)
+    return result
+
+# Generate the hub keypair eagerly so /api/hub/pubkey is instant on first hit.
+_ensure_ssh_keypair()
+
 SETTING_DEFAULTS = {
     "alerts_enabled":     "0",       # "0" / "1"
     "discord_webhook_url": "",
@@ -943,6 +1200,34 @@ def _public_settings():
     for k in SETTING_SECRETS:
         out[k + "_set"] = bool(s.get(k))
     return out
+
+@app.route("/api/hub/pubkey")
+def api_hub_pubkey():
+    return jsonify({"pubkey": get_hub_pubkey()})
+
+@app.route("/api/hosts", methods=["GET", "POST"])
+def api_hosts():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        host, err = add_host((body.get("name") or "").strip(),
+                             (body.get("ssh_target") or "").strip(),
+                             (body.get("tags") or "").strip())
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        return jsonify({"ok": True, "host": host}), 201
+    return jsonify({"hosts": list_hosts()})
+
+@app.route("/api/hosts/<name>", methods=["DELETE"])
+def api_hosts_delete(name):
+    ok = delete_host(name)
+    return jsonify({"ok": ok}), (200 if ok else 404)
+
+@app.route("/api/hosts/<name>/test", methods=["POST"])
+def api_hosts_test(name):
+    result = probe_host(name)
+    if result is None:
+        return jsonify({"ok": False, "error": "no such host"}), 404
+    return jsonify({"ok": True, "result": result})
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
