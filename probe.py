@@ -9,7 +9,7 @@ Linux with Python 3.6+.
 JSON shape is a deliberate subset of the hub's own /api/health.now block so the
 UI can render local and remote with the same code paths.
 """
-import json, os, socket, sys, time, glob
+import json, os, socket, subprocess, sys, time, glob
 
 
 def read_loadavg():
@@ -124,6 +124,37 @@ def read_disks():
     return out
 
 
+def read_gpu():
+    """First NVIDIA GPU's snapshot via nvidia-smi. Returns {} if no driver or
+    no GPU. We treat the first GPU as the 'representative' for the table; the
+    detailed per-GPU view lives in the future GPU tab."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu,name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, timeout=3,
+        )
+        if r.returncode != 0:
+            return {}
+        lines = [l for l in r.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
+        if not lines:
+            return {}
+        parts = [p.strip() for p in lines[0].split(",")]
+        if len(parts) < 5:
+            return {}
+        return {"gpu": {
+            "count":     len(lines),
+            "name":      parts[4],
+            "mem_used":  int(parts[0]),   # MB
+            "mem_total": int(parts[1]),   # MB
+            "util":      int(parts[2]),   # %
+            "temp":      int(parts[3]),   # °C
+        }}
+    except Exception:
+        return {}
+
+
 def main():
     data = {
         "host": {
@@ -132,11 +163,12 @@ def main():
             **read_loadavg(),
             **read_uptime(),
             **read_temp(),
+            **read_gpu(),
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
         "at": int(time.time()),
-        "probe_version": "0.1",
+        "probe_version": "0.2",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

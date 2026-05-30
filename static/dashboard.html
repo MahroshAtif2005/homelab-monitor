@@ -157,6 +157,8 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .fleet-tbl tr{cursor:pointer}.fleet-tbl tr:hover td{background:#0d1117}
 .fleet-tbl .hostcell{font-weight:600;color:var(--tx)}
 .fleet-tbl .hostcell .sub{color:var(--mut);font-size:11.5px;font-weight:400;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.fleet-tbl td .pct{font-weight:600}
+.fleet-tbl td .abs{color:var(--mut);font-size:11.5px;display:block;margin-top:1px}
 .fleet-tbl .micro{display:inline-block;height:8px;border-radius:3px;background:var(--free);overflow:hidden;width:60px;vertical-align:middle;margin-right:6px}
 .fleet-tbl .micro div{height:100%}
 .fleet-tbl .status{display:inline-flex;align-items:center;gap:6px;font-size:12px}
@@ -202,11 +204,11 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
       <table class="fleet-tbl" id="fleet_tbl">
         <thead>
           <tr>
-            <th>Host</th><th>Status</th><th>CPU</th><th>RAM</th><th>Load 1m</th>
-            <th>Uptime</th><th>Temp</th><th>Disks</th>
+            <th>Host</th><th>Status</th><th>CPU</th><th>RAM</th><th>GPU</th>
+            <th>Load 1m</th><th>Uptime</th><th>Temp</th><th>Disks</th>
           </tr>
         </thead>
-        <tbody><tr><td colspan="8" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
+        <tbody><tr><td colspan="9" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1107,7 +1109,7 @@ function setHost(name){
   CURRENT_HOST = name;
   localStorage.setItem('hl_host', name);
   renderHostBar();
-  // Re-render whatever tab we're on so it picks up the new host.
+  refreshLocalOnlyNotices();   // hide/show cards across all local-only tabs
   refreshCurrentTab();
 }
 function refreshCurrentTab(){
@@ -1126,17 +1128,33 @@ function renderFleet(){
   tbody.innerHTML = rows.map(r => {
     const st = statusOfFleetRow(r);
     const h = r.host || {};
+    // CPU: percent + cores
+    const cpu = h.cpu==null
+      ? '—'
+      : `<span class="pct">${Math.round(h.cpu)}%</span><span class="abs">${h.cores||'?'} cores</span>`;
+    // RAM: percent bar + absolute GB
     const ramPct = h.ram_total ? Math.round((h.ram_used||0) * 100 / h.ram_total) : null;
-    const cpu = h.cpu==null ? '—' : Math.round(h.cpu)+'%';
     const ram = h.ram_total
-      ? `<span class="micro"><div style="width:${ramPct}%;background:${sev(ramPct)}"></div></span>${ramPct}%`
+      ? `<span class="pct"><span class="micro"><div style="width:${ramPct}%;background:${sev(ramPct)}"></div></span>${ramPct}%</span>` +
+        `<span class="abs">${fmtMBshort(h.ram_used)} / ${fmtMBshort(h.ram_total)}</span>`
       : '—';
-    const load = h.load1==null ? '—' : h.load1.toFixed(2);
+    // GPU: util% + VRAM, only when host has a GPU
+    const g = h.gpu;
+    const gpu = g
+      ? `<span class="pct">${g.util||0}%</span>` +
+        `<span class="abs">${fmtMBshort(g.mem_used)} / ${fmtMBshort(g.mem_total)} VRAM</span>`
+      : '<span class="muted">—</span>';
+    // Load 1m: number + denominator
+    const load = h.load1==null
+      ? '—'
+      : `<span class="pct">${h.load1.toFixed(2)}</span><span class="abs">of ${h.cores||'?'} cores</span>`;
     const up = fmtUpShort(h.uptime);
     const temp = h.ctemp==null ? '—' : Math.round(h.ctemp)+' °C';
+    // Disks: include GB alongside %
     const disks = (h.disks||[]).length
       ? (h.disks||[]).slice(0,3).map(d =>
-          `<div style="font-size:11.5px;color:var(--mut);margin:1px 0">${esc(d.mount)} · ${d.pct}%</div>`).join('')
+          `<div style="font-size:11.5px;margin:1px 0">${esc(d.mount)} · ${d.pct}% ` +
+          `<span style="color:var(--mut)">(${d.used} / ${d.total} GB)</span></div>`).join('')
       : '<span class="muted">—</span>';
     const stale = r.online ? '' : (r.error
       ? `<div class="stale" title="${esc(r.error)}">${esc(r.error.length>40?r.error.slice(0,40)+'…':r.error)}</div>`
@@ -1147,6 +1165,7 @@ function renderFleet(){
       <td><span class="status ${st}"><span class="d"></span>${st}</span>${stale}</td>
       <td>${cpu}</td>
       <td>${ram}</td>
+      <td>${gpu}</td>
       <td>${load}</td>
       <td>${up}</td>
       <td>${temp}</td>
@@ -1205,9 +1224,12 @@ async function renderHostTab(){
 }
 
 function renderLocalOnlyNotice(tabId){
-  if(CURRENT_HOST === 'local') return;  // nothing to do — local renders normally
+  if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
   if(!sec) return;
+  // Hide the existing local cards so the user doesn't see ardi data labelled
+  // with cloudy's name at the top.
+  sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='none');
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');
@@ -1215,15 +1237,26 @@ function renderLocalOnlyNotice(tabId){
     sec.insertBefore(notice, sec.firstChild);
   }
   notice.innerHTML = `<div class="ic">ℹ️</div>
-    <div><b>${esc(tabId.toUpperCase())} is local-only this slice.</b>
-    The hub already polls <b>${esc(CURRENT_HOST)}</b> for host vitals (visible on Overview and the Host tab).
-    Per-host ${esc(tabId)} support lands in the next slice — meanwhile click <b>Local</b> up top to see this tab,
-    or open the Host tab for ${esc(CURRENT_HOST)}'s vitals.</div>`;
+    <div><b>${esc(tabId[0].toUpperCase()+tabId.slice(1))} is local-only for now.</b>
+    You're viewing <b>${esc(CURRENT_HOST)}</b>. The hub already polls it for host vitals (CPU/RAM/GPU/disks
+    on Overview and the Host tab), but per-host ${esc(tabId)} collection lands in the next slice.
+    Switch to <b>Local</b> at the top to see this tab for the hub.</div>`;
 }
 function clearLocalOnlyNotice(tabId){
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
-  const n = sec && sec.querySelector('.scope-notice');
+  if(!sec) return;
+  const n = sec.querySelector('.scope-notice');
   if(n) n.remove();
+  sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
+}
+// Re-apply notices on host switch — necessary so that when the user
+// switches from Local→remote while currently *on* a local-only tab, the
+// notice appears (and cards hide) without needing to leave/return to the tab.
+function refreshLocalOnlyNotices(){
+  LOCAL_ONLY_TABS.forEach(t => {
+    if(CURRENT_HOST === 'local') clearLocalOnlyNotice(t);
+    else renderLocalOnlyNotice(t);
+  });
 }
 
 // ── Wire-up ───────────────────────────────────────────────────────────────────

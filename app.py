@@ -778,6 +778,17 @@ def _local_now_snapshot():
         "disks":     H.get("disks") or [],
         "hostname":  socket.gethostname(),
     }
+    # GPU summary — the existing collector already keeps these on LATEST's top
+    # level. Re-use them so the All-hosts row for `local` matches the shape
+    # probe.py emits for remotes.
+    gpu_total = (LATEST or {}).get("mem_total") or 0
+    if gpu_total > 0:
+        out["gpu"] = {
+            "mem_used":  (LATEST or {}).get("mem_used", 0),
+            "mem_total": gpu_total,
+            "util":      (LATEST or {}).get("util", 0),
+            "temp":      (LATEST or {}).get("temp", 0),
+        }
     return out
 
 def host_poller():
