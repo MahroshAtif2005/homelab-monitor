@@ -160,15 +160,16 @@
   transform: translateY(-1px);
 }
 
-/* Hero GIF — bigger, with shadow + a visible-but-subtle outline so the
-   dark dashboard frame doesn't melt into the dark page bg. */
+/* Hero GIF — bigger, with shadow + a clearly-visible outline. The dashboard
+   itself is very dark; without a real border the screenshot just bleeds into
+   the page bg. */
 .hl-hero .hl-gif {
   max-width: 920px; width: 100%;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-radius: 14px;
   display: block; margin: 8px auto 0;
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 0 0 1px rgba(255, 255, 255, 0.08),
     0 30px 80px -20px rgba(0, 0, 0, 0.7),
     0 8px 20px -8px rgba(88, 166, 255, 0.18);
 }
@@ -296,22 +297,23 @@
   margin: 0 0 48px;
 }
 .hl-shots a {
-  display: block; border-radius: 12px; overflow: hidden;
-  /* Visible-but-subtle outline so each dark screenshot reads as a distinct
-     card instead of bleeding into the page background. */
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  display: block; border-radius: 14px; overflow: hidden;
+  /* Clearly-visible outline so each dark screenshot reads as a distinct
+     card. The dashboard is near-black, so a soft white border is needed for
+     real separation against a near-black page. */
+  border: 2px solid rgba(255, 255, 255, 0.22);
   background: var(--hl-card);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
   transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
               border-color 0.3s, box-shadow 0.3s;
   text-decoration: none;
 }
 .hl-shots a:hover {
   transform: translateY(-3px);
-  border-color: rgba(88, 166, 255, 0.45);
+  border-color: rgba(88, 166, 255, 0.6);
   box-shadow: 0 24px 50px -22px rgba(0, 0, 0, 0.6),
-              0 0 0 1px rgba(88, 166, 255, 0.25),
-              0 0 22px -4px rgba(88, 166, 255, 0.2);
+              0 0 0 1px rgba(88, 166, 255, 0.35),
+              0 0 28px -4px rgba(88, 166, 255, 0.28);
 }
 .hl-shots img {
   display: block; width: 100%; height: auto;
@@ -328,9 +330,9 @@
 /* ── Images inside content pages (multi-host architecture diagram, etc.) ──
    Same dark-on-dark issue as the screenshot grid; same fix. */
 .md-typeset img {
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 /* ── Quick install card ───────────────────────────────────────────────────── */
