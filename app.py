@@ -788,15 +788,17 @@ _OS_DETECT_SCRIPT = (
     '  echo "VERSION_ID=${VERSION_ID:-}"; echo "PRETTY_NAME=${PRETTY_NAME:-}"; '
     'fi; '
     'command -v systemctl >/dev/null 2>&1 && echo "INIT=systemd"; '
-    'command -v rc-service >/dev/null 2>&1 && echo "INIT=openrc"'
+    'command -v rc-service >/dev/null 2>&1 && echo "INIT=openrc"; '
+    ':'   # always exit 0 — the last `&&` would otherwise return non-zero on
+          # hosts without rc-service, making us drop the perfectly-good
+          # discovery output above.
 )
 
 def _detect_os(user, host, port):
-    """Run a tiny discovery script via SSH. Returns a normalized dict."""
-    rc, out, _, _ = _ssh(user, host, port, _OS_DETECT_SCRIPT, timeout=10)
+    """Run a tiny discovery script via SSH. Returns a normalized dict. We
+    ignore rc here — we only care about whatever lines did land on stdout."""
+    _, out, _, _ = _ssh(user, host, port, _OS_DETECT_SCRIPT, timeout=10)
     info = {}
-    if rc != 0:
-        return info
     for line in (out or "").splitlines():
         if "=" in line:
             k, _, v = line.partition("=")
