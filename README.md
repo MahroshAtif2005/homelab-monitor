@@ -66,6 +66,7 @@ as quickly and reads as cleanly as the last hour.
 Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 (No GPU? The container, service and host panels still work fine.)
+
 **Option A — pre-built image (recommended).** No clone, no build:
 
 ```bash
