@@ -1,0 +1,48 @@
+name: CI
+
+# Lightweight smoke for the integration branch. The release / docs / Hub-sync
+# workflows are deliberately scoped to `main` + `v*` tags; this one guards the
+# day-to-day flow so `next` never accumulates code that won't even build.
+#
+# Triggers:
+#   • Pull requests targeting `next` (the integration branch) or `main`.
+#   • Pushes to `next` — a belt-and-braces check after merges land.
+# Intentionally NOT on every main push (tags/main already gate releases).
+
+on:
+  pull_request:
+    branches: [next, main]
+  push:
+    branches: [next]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Byte-compile the app
+        run: python -m py_compile app.py probe.py
+
+      - name: Build the image
+        run: docker build -t homelab-monitor:ci .
+
+      - name: Boot it and hit /healthz
+        run: |
+          docker run -d --name hlm -e PORT=9800 -p 9800:9800 homelab-monitor:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9800/healthz >/dev/null; then
+              echo "healthz OK after ${i}s"; docker rm -f hlm; exit 0
+            fi
+            sleep 1
+          done
+          echo "healthz never came up"; docker logs hlm; docker rm -f hlm; exit 1
