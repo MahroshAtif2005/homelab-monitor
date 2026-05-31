@@ -12,7 +12,7 @@
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
 [![last commit](https://img.shields.io/github/last-commit/SikamikanikoBG/homelab-monitor?color=informational)](https://github.com/SikamikanikoBG/homelab-monitor/commits/main)
 
-> 🆕 **v0.10.0** — three new per-host tabs: **System** (OS, kernel, arch, virtualization, machine model, CPU/GPU), **Network** (interfaces, addresses, DNS, routes, listening sockets with exposure flags) and **Security** (firewall, SSH hardening, SELinux/AppArmor, fail2ban, reboot-pending, auto-updates — issues surfaced first). Works on every host the hub can reach — x86_64, arm64, even i686. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
+> 🆕 **v0.11.0** — **AI Models, upgraded**: every recognised model server now shows even while **Idle** (Ollama, vLLM, llama.cpp, LocalAI, faster-whisper, Stable Diffusion, ComfyUI and ~15 more), so nothing flickers away when a model unloads — plus a **"Driven by"** breakdown revealing *which services are calling each server* (who's actually driving Ollama). [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
 >
 > 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
 
