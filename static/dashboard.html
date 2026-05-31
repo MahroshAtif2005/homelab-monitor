@@ -314,6 +314,28 @@ a{color:var(--info)}
 #controls .ranges .rb{border:0;border-right:1px solid var(--bd);border-radius:0;font-family:var(--mono);font-size:11.5px;padding:4px 9px}
 #controls .ranges .rb:last-child{border-right:0}
 #controls .ranges .rb.on{background:var(--sel);color:var(--tx)}
+/* System / Network / Security detail */
+.infogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px}
+.infocard{background:var(--inset);border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.infocard h3{margin:0 0 8px;font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.inforow{display:flex;gap:10px;padding:4px 0;font-size:13px;align-items:baseline}
+.inforow .k{color:var(--mut);flex:0 0 104px}
+.inforow .v{color:var(--tx);font-family:var(--mono);word-break:break-word}
+.kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.kpirow .kpi{flex:1;min-width:120px}
+.secrow{display:flex;align-items:center;gap:11px;padding:9px 2px;border-bottom:1px solid var(--bd);font-size:13.5px}
+.secrow:last-child{border-bottom:0}
+.secrow .sdot{width:10px;height:10px;border-radius:50%;flex:0 0 10px}
+.secrow .k{flex:0 0 132px;color:var(--mut)}
+.secrow .v{color:var(--tx)}
+.exptag{font-size:11px;padding:1px 6px;border-radius:4px;font-family:var(--mono);white-space:nowrap}
+.exptag.pub{background:rgba(210,153,34,.16);color:var(--warn)}
+.exptag.loc{background:rgba(63,185,80,.15);color:var(--ok)}
+.ntbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+.ntbl th{font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.03em;padding:6px 8px;border-bottom:1px solid var(--bd);text-align:left;white-space:nowrap}
+.ntbl td{padding:6px 8px;border-bottom:1px solid var(--bd);font-family:var(--mono);vertical-align:top}
+.ntbl tr:hover td{background:var(--hover)}
+.subhd{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin:18px 0 2px}
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -352,11 +374,11 @@ a{color:var(--info)}
       <table class="fleet-tbl" id="fleet_tbl">
         <thead>
           <tr>
-            <th>Host</th><th>Status</th><th>CPU</th><th>RAM</th><th>GPU</th>
+            <th>Host</th><th>Status</th><th>OS / Arch</th><th>CPU</th><th>RAM</th><th>GPU</th>
             <th>Load 1m</th><th>Uptime</th><th>Temp</th><th>Disks</th>
           </tr>
         </thead>
-        <tbody><tr><td colspan="9" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
+        <tbody><tr><td colspan="10" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -516,13 +538,30 @@ a{color:var(--info)}
   </div>
 </section>
 
-<!-- ───────── Host ───────── -->
+<!-- ───────── System (host detail) ───────── -->
 <section data-tab="host" hidden>
-  <div class="card"><h2>🖥️ Host health</h2>
+  <div class="card"><h2>🖥️ System</h2>
     <div class="grid" id="hostkpis"></div>
     <div id="disks" style="margin-top:14px"></div>
+    <div id="sysinfo" style="margin-top:16px"></div>
   </div>
-  <div class="card"><h2>🖥️ Host CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
+  <div class="card"><h2>🖥️ CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
+</section>
+
+<!-- ───────── Network ───────── -->
+<section data-tab="network" hidden>
+  <div class="card"><h2>🌐 Network</h2>
+    <div id="netbody"></div>
+  </div>
+</section>
+
+<!-- ───────── Security ───────── -->
+<section data-tab="security" hidden>
+  <div class="card"><h2>🛡️ Security</h2>
+    <div id="secbody"></div>
+    <p class="cap" style="margin-top:12px">Read-only, agentless — no changes are made to any host. Items shown in grey
+       (⚪) couldn't be read without elevated privileges on that machine.</p>
+  </div>
 </section>
 
 <p class="cap">Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.
@@ -558,7 +597,9 @@ const TABS = [
   {id:'models',     label:'AI Models',  charts:false},
   {id:'containers', label:'Containers', charts:false},
   {id:'services',   label:'Services',   charts:false},
-  {id:'host',       label:'Host',       charts:true},
+  {id:'host',       label:'System',     charts:true},
+  {id:'network',    label:'Network',    charts:false},
+  {id:'security',   label:'Security',   charts:false},
   {id:'hosts',      label:'Hosts',      charts:false, settings:true},
   {id:'alerts',     label:'Alerts',     charts:false, settings:true},
 ];
@@ -676,6 +717,8 @@ function showTab(id){
   }
   if(id==='overview') renderFleet();
   if(id==='host')     renderHostTab();
+  if(id==='network')  renderNetwork();
+  if(id==='security') renderSecurity();
   if(id==='services') renderServicesTab();
 }
 
@@ -739,7 +782,12 @@ function renderData(){
       `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
        <span>💾 ${esc(dk.mount)}</span><span class="muted">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
        <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
+    renderSysInfo();
   }
+  // Network/Security read the active host block; re-render them on each data
+  // refresh (and on first load) when one of them is the visible tab.
+  if(TAB==='network')  renderNetwork();
+  if(TAB==='security') renderSecurity();
 
   buildCharts();
 }
@@ -1451,6 +1499,8 @@ function setHost(name){
 function refreshCurrentTab(){
   if(TAB === 'overview')  { renderFleet(); return; }
   if(TAB === 'host')      { renderHostTab(); return; }
+  if(TAB === 'network')   { renderNetwork(); return; }
+  if(TAB === 'security')  { renderSecurity(); return; }
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 
@@ -1496,9 +1546,17 @@ function renderFleet(){
       ? `<div class="stale" title="${esc(r.error)}">${esc(r.error.length>40?r.error.slice(0,40)+'…':r.error)}</div>`
       : `<div class="stale">no data yet</div>`);
     const subline = r.is_local ? 'hub' : (r.ssh_target || '');
+    // OS / Arch — short OS name (strip the "· init" suffix from the label) + arch.
+    const os = h.os || {};
+    const osname = os.pretty || os.id || (os.label ? os.label.split(' · ')[0] : '');
+    const osc = osname
+      ? `<span class="pct" style="font-weight:500">${esc(osname)}</span>` +
+        (os.arch ? `<span class="abs">${esc(os.arch)}</span>` : '')
+      : '<span class="muted">—</span>';
     return `<tr data-h="${esc(r.name)}">
       <td class="hostcell">${esc(r.label||r.name)}<span class="sub">${esc(subline)}</span></td>
       <td><span class="status ${st}"><span class="d"></span>${st}</span>${stale}</td>
+      <td>${osc}</td>
       <td>${cpu}</td>
       <td>${ram}</td>
       <td>${gpu}</td>
@@ -1552,11 +1610,188 @@ async function renderHostTab(){
     `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:12.5px">
      <span>💾 ${esc(dkk.mount)}</span><span class="muted">${dkk.used} / ${dkk.total} GB · ${dkk.pct}%</span></div>
      <div class="dbar"><div style="width:${dkk.pct}%;background:${sev(dkk.pct)}"></div></div></div>`).join('');
+  renderSysInfo();
   // History chart is local-only for now (no history on remote yet).
   const cb = document.querySelector('section[data-tab="host"] .chartbox');
   if(cb && !cb.querySelector('.scope-notice')){
     // Keep the canvas in place but stack a notice above it.
   }
+}
+
+// ── System / Network / Security per-host detail ───────────────────────────────
+// All three read the *active* host's block: local from the hub's own /api/data
+// (or /api/health), remotes from the SSH-probe cache loaded by loadHostData().
+// Everything is optional → missing values render as "—" / ⚪ rather than erroring,
+// so a Pi, a non-root remote and a full server all render through the same code.
+function currentHostBlock(){
+  if(CURRENT_HOST === 'local') return (D && D.now && D.now.host) || (HH && HH.now && HH.now.host) || {};
+  return (HOST_DATA && HOST_DATA.host) || {};
+}
+function waitingHostMsg(){
+  if(CURRENT_HOST === 'local') return null;
+  if(!HOST_DATA || !HOST_DATA.online){
+    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : 'no data yet';
+    return `<div class="muted" style="padding:12px 2px">⏳ <b>${esc(CURRENT_HOST)}</b> — ${err}. `
+         + `Probes run every ${FLEET ? (FLEET.interval||10) : 10}s; new hosts take one cycle to populate.</div>`;
+  }
+  return null;
+}
+function infoRow(k, v){
+  return (v==null || v==='') ? '' : `<div class="inforow"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+}
+
+function renderSysInfo(){
+  const el = document.getElementById('sysinfo');
+  if(!el) return;
+  const h = currentHostBlock(), os = h.os||{}, hw = h.hw||{};
+  if(!h.os && !h.hw){ el.innerHTML = ''; return; }
+  const booted = os.boot_time ? new Date(os.boot_time*1000).toLocaleString() : null;
+  const sys = [
+    infoRow('OS',          os.pretty ? `${esc(os.pretty)}${os.arch?'  ('+esc(os.arch)+')':''}` : (os.arch?esc(os.arch):null)),
+    infoRow('Kernel',      os.kernel ? esc(os.kernel) : null),
+    infoRow('Init / virt', [os.init, os.virt].filter(Boolean).map(esc).join(' · ') || null),
+    infoRow('Hostname',    os.hostname ? esc(os.hostname)+((os.fqdn&&os.fqdn!==os.hostname)?'  ('+esc(os.fqdn)+')':'') : null),
+    infoRow('Booted',      booted ? esc(booted) : null),
+  ].join('');
+  const topo = [hw.sockets&&hw.sockets+' socket'+(hw.sockets>1?'s':''), hw.cores&&hw.cores+' cores',
+                hw.threads&&hw.threads+' threads', hw.cpu_mhz_max&&'max '+(hw.cpu_mhz_max/1000).toFixed(2)+' GHz']
+               .filter(Boolean).join(' · ');
+  const mem = hw.ram_total ? fmtMB(hw.ram_total)+(hw.swap_total?'  (swap '+fmtMB(hw.swap_total)+')':'') : null;
+  const gpu = hw.gpu_name ? esc(hw.gpu_name)+(hw.gpu_mem_total?'  ('+fmtMB(hw.gpu_mem_total)+')':'') : null;
+  const hwh = [
+    infoRow('CPU',      hw.cpu_model ? esc(hw.cpu_model)+(hw.cpu_vendor?'  ('+esc(hw.cpu_vendor)+')':'') : null),
+    infoRow('Topology', topo || null),
+    infoRow('Memory',   mem),
+    infoRow('Machine',  hw.machine ? esc(hw.machine) : null),
+    infoRow('GPU',      gpu),
+  ].join('');
+  el.innerHTML = `<div class="infogrid">
+    <div class="infocard"><h3>System</h3>${sys||'<div class="muted">No system info reported.</div>'}</div>
+    <div class="infocard"><h3>Hardware</h3>${hwh||'<div class="muted">No hardware info reported.</div>'}</div></div>`;
+}
+
+// Compact byte formatter for interface RX/TX counters (distinct from fmtBytes,
+// which renders GB for container/service memory & disk).
+function fmtIO(b){
+  if(b==null) return '—';
+  const u=['B','K','M','G','T','P']; let i=0, n=b;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return (n>=10||i===0?Math.round(n):n.toFixed(1))+u[i];
+}
+
+async function renderNetwork(){
+  if(CURRENT_HOST !== 'local') await loadHostData(CURRENT_HOST);
+  const el = document.getElementById('netbody');
+  if(!el) return;
+  const wait = waitingHostMsg();
+  if(wait){ el.innerHTML = wait; return; }
+  const net = currentHostBlock().net;
+  if(!net){ el.innerHTML = '<div class="muted" style="padding:12px 2px">No network info reported for this host yet.</div>'; return; }
+  const upCount = (net.ifaces||[]).filter(i=>i.state==='up').length;
+  const kpis = [
+    {v:net.primary_ip||'—', l:'Primary IP', s:net.primary_iface?'('+esc(net.primary_iface)+')':''},
+    {v:net.gateway||'—',    l:'Gateway'},
+    {v:upCount,             l:'Interfaces up', s:'of '+(net.ifaces||[]).length},
+    {v:(net.listen||[]).length, l:'Listening ports'},
+    {v:net.established_count!=null?net.established_count:'—', l:'Established conns'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+
+  const ifrows = (net.ifaces||[]).map(i=>{
+    const ips = [].concat(i.ipv4||[], i.ipv6||[]).join(', ') || '—';
+    const sp  = i.speed_mbps ? (i.speed_mbps>=1000?(i.speed_mbps/1000)+' Gb/s':i.speed_mbps+' Mb/s') : '—';
+    const io  = (i.rx_bytes!=null||i.tx_bytes!=null) ? fmtIO(i.rx_bytes)+' / '+fmtIO(i.tx_bytes) : '—';
+    const stc = i.state==='up' ? 'var(--ok)' : (i.state==='down'?'var(--crit)':'var(--mut)');
+    return `<tr><td>${esc(i.name)}<div class="muted" style="font-size:11px">${esc(i.type||'')}</div></td>
+      <td>${esc(ips)}</td><td>${i.mac?esc(i.mac):'—'}</td>
+      <td><span style="color:${stc}">${esc(i.state||'?')}</span></td>
+      <td>${sp}</td><td>${i.mtu||'—'}</td><td>${io}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">No interfaces.</td></tr>';
+
+  const dns = (net.dns||[]).length ? esc((net.dns||[]).join(', ')) : '—';
+  const search = (net.search||[]).length ? '  ·  search: '+esc((net.search||[]).join(' ')) : '';
+
+  const lrows = (net.listen||[]).map(s=>{
+    const tag = s.exposed ? '<span class="exptag pub">🌐 all interfaces</span>' : '<span class="exptag loc">🔒 local</span>';
+    return `<tr><td>${esc(s.proto)}</td><td>${esc(s.addr)}</td><td>${s.port}</td>
+      <td>${s.proc?esc(s.proc):'—'}</td><td>${tag}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted">No listening sockets reported.</td></tr>';
+
+  el.innerHTML =
+    `<div class="kpirow">${kpis}</div>
+     <div class="subhd">Interfaces</div>
+     <table class="ntbl"><thead><tr><th>Interface</th><th>Address</th><th>MAC</th><th>State</th><th>Speed</th><th>MTU</th><th>RX / TX</th></tr></thead><tbody>${ifrows}</tbody></table>
+     <div class="subhd">DNS</div><div style="font-family:var(--mono);font-size:12.5px;padding:2px 0">${dns}${search}</div>
+     <div class="subhd">Listening sockets</div>
+     <table class="ntbl"><thead><tr><th>Proto</th><th>Bind</th><th>Port</th><th>Process</th><th>Exposure</th></tr></thead><tbody>${lrows}</tbody></table>`;
+}
+
+function secRow(k, level, v){
+  return `<div class="secrow"><span class="sdot" style="background:${SC[level]||'var(--mut)'}"></span>`
+       + `<span class="k">${k}</span><span class="v">${v}</span></div>`;
+}
+async function renderSecurity(){
+  if(CURRENT_HOST !== 'local') await loadHostData(CURRENT_HOST);
+  const el = document.getElementById('secbody');
+  if(!el) return;
+  const wait = waitingHostMsg();
+  if(wait){ el.innerHTML = wait; return; }
+  const h = currentHostBlock(), sec = h.sec;
+  if(!sec){ el.innerHTML = '<div class="muted" style="padding:12px 2px">No security info reported for this host yet.</div>'; return; }
+  const rows = [];
+
+  // Firewall
+  const fw = sec.firewall || {};
+  if(!fw.backend){ rows.push(secRow('Firewall','info','⚪ none detected')); }
+  else if(fw.active===true){ rows.push(secRow('Firewall','ok', `${esc(fw.backend)} — active`+(fw.open_ports?`  (${fw.open_ports} ports open)`:''))); }
+  else if(fw.active===false){ rows.push(secRow('Firewall','warn', `${esc(fw.backend)} — inactive`)); }
+  else { rows.push(secRow('Firewall','info', `⚪ ${esc(fw.backend)} — state needs elevated read`)); }
+
+  // SSH server
+  const sh = sec.ssh;
+  if(!sh){ rows.push(secRow('SSH server','info','⚪ config not readable')); }
+  else {
+    const root = (sh.permit_root||'').toLowerCase(), pw = (sh.password_auth||'').toLowerCase();
+    const bad = root==='yes' || pw==='yes';
+    const parts = [];
+    if(sh.permit_root!=null) parts.push('root login: '+esc(sh.permit_root));
+    if(sh.password_auth!=null) parts.push('password auth: '+esc(sh.password_auth));
+    if(sh.port!=null) parts.push('port '+sh.port);
+    rows.push(secRow('SSH server', bad?'warn':'ok', parts.join(' · ')||'configured'));
+  }
+
+  // SELinux / AppArmor (MAC)
+  const se = sec.selinux;
+  if(se==null) rows.push(secRow('SELinux','info','⚪ unknown'));
+  else if(se==='enforcing') rows.push(secRow('SELinux','ok','enforcing'));
+  else if(se==='permissive') rows.push(secRow('SELinux','warn','permissive'));
+  else rows.push(secRow('SELinux','info','disabled'));
+  const aa = sec.apparmor;
+  if(aa==null) rows.push(secRow('AppArmor','info','⚪ unknown'));
+  else rows.push(secRow('AppArmor', aa==='enabled'?'ok':'info', aa));
+
+  // fail2ban
+  const fb = sec.fail2ban || {};
+  if(!fb.installed) rows.push(secRow('fail2ban','info','not installed'));
+  else if(fb.active===true) rows.push(secRow('fail2ban','ok','installed · active'));
+  else if(fb.active===false) rows.push(secRow('fail2ban','warn','installed · inactive'));
+  else rows.push(secRow('fail2ban','info','installed · state ⚪ needs elevated read'));
+
+  // Reboot required
+  const rb = sec.reboot_required;
+  if(rb==null) rows.push(secRow('Reboot needed','info','⚪ unknown'));
+  else rows.push(secRow('Reboot needed', rb?'warn':'ok', rb?'yes — pending':'no'));
+
+  // Auto-updates
+  const au = sec.auto_updates;
+  if(au==null) rows.push(secRow('Auto-updates','info','⚪ unknown'));
+  else rows.push(secRow('Auto-updates', au?'ok':'warn', au?'enabled':'disabled'));
+
+  // Exposed ports (derived from the network listen list)
+  const exposed = ((currentHostBlock().net||{}).listen||[]).filter(s=>s.exposed).map(s=>s.port);
+  const uniq = [...new Set(exposed)].sort((a,b)=>a-b);
+  if(uniq.length) rows.push(secRow('Exposed ports', uniq.length>8?'warn':'info', '🌐 '+uniq.join(', ')+'  bound to all interfaces'));
+
+  el.innerHTML = rows.join('');
 }
 
 function hostCapability(hostName, capId){
@@ -1683,7 +1918,9 @@ setInterval(()=>{
   if(!document.getElementById('auto').checked) return;
   loadData(); loadHealth(); loadFleet();
   // Re-render host-scoped tabs so cached remote data refreshes too.
-  if(TAB==='host' && CURRENT_HOST!=='local') renderHostTab();
+  if(TAB==='host')     renderHostTab();
+  if(TAB==='network')  renderNetwork();
+  if(TAB==='security') renderSecurity();
 },15000);
 // One-shot GitHub star count — lazy, non-blocking, and the link still works offline.
 fetch('https://api.github.com/repos/SikamikanikoBG/homelab-monitor')

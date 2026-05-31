@@ -18,7 +18,11 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct
+try:
+    import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
+except ImportError:
+    fcntl = None
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, Response
 try:
@@ -253,7 +257,439 @@ def read_host():
         except Exception: pass
     h["ctemp"] = round(t, 1)
     h["disks"] = read_disks()
+    # Slow-changing context (OS / hardware / network / security) for the System,
+    # Network and Security tabs. Cached so it isn't recomputed on every 10 s sample.
+    h["os"]  = _cached_inv("os",  300, _local_os)
+    h["hw"]  = _cached_inv("hw",  300, _local_hw)
+    h["net"] = _cached_inv("net",  60, _local_net)
+    h["sec"] = _cached_inv("sec", 300, _local_sec)
     return h
+
+# ── System / Hardware / Network / Security inventory (local hub) ──────────────
+# Mirror of probe.py's read_os/hw/net/sec for the box the hub itself runs on.
+# The container shares the host PID + network namespaces (pid:host,
+# network_mode:host in docker-compose), so /proc, /proc/net and /sys/class/net
+# are already the host's. Only the container's own /etc, /run, /var differ —
+# those are read through the read-only host-root bind mount (HOST_ROOT) via _hp().
+# The slim image has no ip/ss/ufw, so we read kernel files directly and fall back
+# to config files; anything undeterminable is omitted/None and the UI shows a
+# neutral placeholder. Everything is best-effort and never raises out.
+
+_HR = HOST_ROOT if os.path.isdir(HOST_ROOT) else "/"
+def _hp(p):
+    """Map an absolute host path through the host-root bind mount (or pass through)."""
+    return (_HR.rstrip("/") + p) if _HR != "/" else p
+
+def _rt(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _rt_dt(*paths):
+    for p in paths:
+        try:
+            v = open(p, "rb").read().decode("utf-8", "replace").strip("\x00").strip()
+            if v:
+                return v
+        except Exception:
+            continue
+    return None
+
+_INV_CACHE, _INV_LOCK = {}, threading.Lock()
+def _cached_inv(key, ttl, fn):
+    now = time.time()
+    with _INV_LOCK:
+        ent = _INV_CACHE.get(key)
+        if ent and now - ent[0] < ttl:
+            return ent[1]
+    try:
+        val = fn()
+    except Exception as e:
+        print(f"inventory {key} error:", e, flush=True)
+        val = {}
+    with _INV_LOCK:
+        _INV_CACHE[key] = (now, val)
+    return val
+
+def _os_family(osid, id_like="", uname=""):
+    """Normalize an os-release ID into a family. Shared with _detect_os()."""
+    osid, id_like, uname = (osid or "").lower(), (id_like or "").lower(), (uname or "").lower()
+    if uname == "darwin":                                                         return "macos"
+    if osid == "alpine":                                                          return "alpine"
+    if osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like: return "suse"
+    if osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:   return "debian"
+    if osid in ("fedora", "rhel", "centos", "rocky", "almalinux") or "rhel" in id_like or "fedora" in id_like: return "rhel"
+    if osid in ("arch", "manjaro", "endeavouros") or "arch" in id_like:           return "arch"
+    return "linux"
+
+def _local_virt():
+    """Detect the *host's* hypervisor from DMI (the hub's own /.dockerenv would
+    only describe its container, not the box, so we don't use it here)."""
+    blob = ((_rt("/sys/class/dmi/id/product_name") or "") + " " +
+            (_rt("/sys/class/dmi/id/sys_vendor") or "")).lower()
+    for key, name in (("kvm", "kvm"), ("virtualbox", "virtualbox"), ("vmware", "vmware"),
+                      ("qemu", "qemu"), ("xen", "xen"), ("microsoft", "hyper-v")):
+        if key in blob:
+            return name
+    if " hypervisor" in (_rt("/proc/cpuinfo") or ""):
+        return "vm"
+    return "bare-metal" if blob.strip() else None
+
+def _local_os():
+    info = {}
+    try:
+        u = os.uname(); info["kernel"], info["arch"] = u.release, u.machine
+    except Exception:
+        pass
+    rel = {}
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        txt = _rt(_hp(path))
+        if txt:
+            for line in txt.splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("="); rel[k.strip()] = v.strip().strip('"').strip("'")
+            if rel:
+                break
+    osid = (rel.get("ID") or "").lower()
+    info["id"] = osid or None
+    info["pretty"] = rel.get("PRETTY_NAME") or rel.get("NAME") or None
+    info["version_id"] = rel.get("VERSION_ID") or None
+    info["family"] = _os_family(osid, rel.get("ID_LIKE"))
+    info["hostname"] = socket.gethostname()
+    init = None
+    if os.path.isdir(_hp("/run/systemd/system")) or os.path.isdir("/run/systemd/system"):
+        init = "systemd"
+    else:
+        comm = (_rt("/proc/1/comm") or "").strip()        # host PID 1 (pid:host)
+        init = "systemd" if comm == "systemd" else ("openrc" if os.path.exists("/run/openrc") else comm or None)
+    info["init"] = init
+    info["virt"] = _local_virt()
+    try:
+        info["fqdn"] = socket.getfqdn()
+    except Exception:
+        pass
+    for line in (_rt("/proc/stat") or "").splitlines():
+        if line.startswith("btime"):
+            try:
+                info["boot_time"] = int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+            break
+    pretty = info.get("pretty") or osid or info.get("kernel") or "unknown"
+    info["label"] = pretty + (" · " + init if init else "")
+    return {k: v for k, v in info.items() if v is not None}
+
+def _count_physical_cores(cpuinfo):
+    pairs, cur = set(), None
+    for line in cpuinfo.splitlines():
+        k, _, v = line.partition(":"); k, v = k.strip().lower(), v.strip()
+        if k == "physical id":
+            cur = v
+        elif k == "core id":
+            pairs.add((cur, v))
+    return len(pairs)
+
+def _local_hw():
+    hw = {}
+    ci = _rt("/proc/cpuinfo") or ""
+    mname = arm = vendor = None
+    phys = set()
+    for line in ci.splitlines():
+        k, _, v = line.partition(":"); k, v = k.strip().lower(), v.strip()
+        if not v:
+            continue
+        if k == "model name" and not mname:        mname = v       # full CPU string
+        elif k == "vendor_id" and not vendor:      vendor = v
+        elif k == "physical id":                   phys.add(v)
+        elif k == "hardware" and not arm:          arm = v         # ARM SoC name
+    # Never use the numeric x86 "model :" field; fall back arm-field → device tree.
+    model = mname or arm or _rt_dt("/proc/device-tree/model", "/sys/firmware/devicetree/base/model")
+    threads = os.cpu_count() or 1
+    if model:  hw["cpu_model"] = model
+    if vendor: hw["cpu_vendor"] = vendor
+    hw["sockets"], hw["cores"], hw["threads"] = len(phys) or 1, _count_physical_cores(ci) or threads, threads
+    khz = _rt("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+    try:
+        hw["cpu_mhz_max"] = round(int(khz.strip()) / 1000)
+    except (AttributeError, ValueError):
+        m = re.search(r"cpu MHz\s*:\s*([\d.]+)", ci)
+        if m:
+            hw["cpu_mhz_max"] = round(float(m.group(1)))
+    try:
+        mi = {}
+        for line in (_rt("/proc/meminfo") or "").splitlines():
+            k, _, v = line.partition(":")
+            if v:
+                mi[k.strip()] = int(v.split()[0])
+        if mi.get("MemTotal"):  hw["ram_total"]  = mi["MemTotal"]  // 1024
+        if mi.get("SwapTotal"): hw["swap_total"] = mi["SwapTotal"] // 1024
+    except Exception:
+        pass
+    machine = (_rt("/sys/class/dmi/id/product_name") or "").strip()
+    if machine.lower() in ("", "to be filled by o.e.m.", "system product name", "default string"):
+        machine = _rt_dt("/proc/device-tree/model", "/sys/firmware/devicetree/base/model") or ""
+    if machine:
+        hw["machine"] = machine
+    # GPU name isn't kept on LATEST (only util/mem), so ask nvidia-smi once (cached).
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+                            "--format=csv,noheader,nounits"], capture_output=True, timeout=3)
+        if r.returncode == 0:
+            line = r.stdout.decode("utf-8", "replace").splitlines()[0]
+            nm, _, mt = line.partition(",")
+            if nm.strip():
+                hw["gpu_name"] = nm.strip()
+            try:
+                hw["gpu_mem_total"] = int(mt.strip())
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return hw
+
+def _iface_type(name, d):
+    if name == "lo":                                          return "loopback"
+    if os.path.isdir(d + "/wireless"):                        return "wifi"
+    if name.startswith("wg"):                                 return "wireguard"
+    if name.startswith(("tun", "tap")):                       return "tunnel"
+    if name.startswith(("docker", "br-", "veth", "virbr")):   return "virtual"
+    if name.startswith("bond"):                               return "bond"
+    if os.path.exists(d + "/device"):                         return "ethernet"
+    return "other"
+
+def _ifaddr_v4(name):
+    if not fcntl:
+        return None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        res = fcntl.ioctl(s.fileno(), 0x8915,                  # SIOCGIFADDR
+                          struct.pack("256s", name[:15].encode()))
+        s.close()
+        return socket.inet_ntoa(res[20:24])
+    except Exception:
+        return None
+
+def _sys_ifaces():
+    out = []
+    base = "/sys/class/net"
+    try:
+        names = sorted(os.listdir(base))
+    except Exception:
+        return out
+    for n in names:
+        # Skip container plumbing (veth pairs, Docker per-network br-<hex> bridges)
+        # — pure noise that dominates the list on any Docker host.
+        if n.startswith("veth") or re.match(r"br-[0-9a-f]{8,}$", n):
+            continue
+        d = base + "/" + n
+        rd = lambda f: (_rt(d + "/" + f) or "").strip() or None
+        iface = {"name": n, "ipv4": [], "ipv6": [], "type": _iface_type(n, d)}
+        mac = rd("address")
+        if mac and mac != "00:00:00:00:00:00":
+            iface["mac"] = mac
+        st = rd("operstate")
+        if st:
+            iface["state"] = st
+        try:
+            iface["mtu"] = int(rd("mtu"))
+        except (TypeError, ValueError):
+            pass
+        try:
+            sp = int(rd("speed"))
+            if sp > 0:
+                iface["speed_mbps"] = sp
+        except (TypeError, ValueError):
+            pass
+        for stat, key in (("statistics/rx_bytes", "rx_bytes"), ("statistics/tx_bytes", "tx_bytes")):
+            try:
+                iface[key] = int(rd(stat))
+            except (TypeError, ValueError):
+                pass
+        ip = _ifaddr_v4(n)
+        if ip:
+            iface["ipv4"].append(ip)
+        out.append(iface)
+    return out
+
+def _route_default():
+    for line in (_rt("/proc/net/route") or "").splitlines()[1:]:
+        p = line.split()
+        if len(p) >= 3 and p[1] == "00000000":
+            try:
+                return p[0], ".".join(str(int(p[2][i:i + 2], 16)) for i in (6, 4, 2, 0))
+            except ValueError:
+                return p[0], None
+    return None, None
+
+def _primary_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]; s.close()
+        return ip
+    except Exception:
+        return None
+
+def _resolv():
+    ns, search = [], []
+    for line in (_rt(_hp("/etc/resolv.conf")) or "").splitlines():
+        line = line.strip()
+        if line.startswith("nameserver"):
+            parts = line.split()
+            if len(parts) > 1:
+                ns.append(parts[1])
+        elif line.startswith(("search", "domain")):
+            search += line.split()[1:]
+    return ns, search
+
+def _hex_to_ip(h, fam):
+    try:
+        if fam == 4:
+            return socket.inet_ntoa(bytes(int(h[i:i + 2], 16) for i in (6, 4, 2, 0)))
+        raw = bytes(int(h[i:i + 2], 16) for i in range(0, 32, 2))
+        return socket.inet_ntop(socket.AF_INET6, b"".join(raw[i:i + 4][::-1] for i in (0, 4, 8, 12)))
+    except Exception:
+        return h
+
+def _proc_listen():
+    """Listening sockets from /proc/net/{tcp,udp}[6] (no ss in the slim image).
+    Flags `exposed` for all-zero bind addresses (0.0.0.0 / ::)."""
+    out, seen = [], set()
+    for path, proto, fam, want in (("/proc/net/tcp", "tcp", 4, "0A"), ("/proc/net/tcp6", "tcp", 6, "0A"),
+                                   ("/proc/net/udp", "udp", 4, "07"), ("/proc/net/udp6", "udp", 6, "07")):
+        txt = _rt(path)
+        if not txt:
+            continue
+        for line in txt.splitlines()[1:]:
+            cols = line.split()
+            if len(cols) < 4 or cols[3] != want or ":" not in cols[1]:
+                continue
+            hexip, hexport = cols[1].rsplit(":", 1)
+            try:
+                port = int(hexport, 16)
+            except ValueError:
+                continue
+            allzero = set(hexip) <= {"0"}
+            addr = (("0.0.0.0" if fam == 4 else "::") if allzero else _hex_to_ip(hexip, fam))
+            key = (proto, addr, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"proto": proto, "addr": addr, "port": port, "exposed": allzero, "proc": None})
+    out.sort(key=lambda s: (not s["exposed"], s["port"]))
+    return out
+
+def _established_count():
+    n = 0
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        txt = _rt(path)
+        if not txt:
+            continue
+        for line in txt.splitlines()[1:]:
+            cols = line.split()
+            if len(cols) > 3 and cols[3] == "01":
+                n += 1
+    return n
+
+def _local_net():
+    net = {}
+    ifaces = _sys_ifaces()
+    route_if, gw = _route_default()
+    if gw:
+        net["gateway"] = gw
+    pip = _primary_ip()
+    if pip:
+        net["primary_ip"] = pip
+    primary = route_if or next((i["name"] for i in ifaces if pip and pip in i["ipv4"]), None)
+    if primary:
+        net["primary_iface"] = primary
+    ns, search = _resolv()
+    if ns:
+        net["dns"] = ns
+    if search:
+        net["search"] = search
+    try:
+        net["fqdn"] = socket.getfqdn()
+    except Exception:
+        pass
+    net["ifaces"] = ifaces
+    net["listen"] = _proc_listen()
+    net["established_count"] = _established_count()
+    return net
+
+def _local_firewall():
+    conf = _rt(_hp("/etc/ufw/ufw.conf"))
+    if conf is not None:
+        return {"backend": "ufw", "active": "ENABLED=yes" in conf.replace(" ", "")}
+    if os.path.isdir(_hp("/etc/firewalld")):
+        return {"backend": "firewalld", "active": None}
+    if os.path.exists(_hp("/etc/nftables.conf")):
+        return {"backend": "nftables", "active": None}
+    return {"backend": None, "active": None}
+
+def _ssh_from_file():
+    cfg = {}
+    for line in (_rt(_hp("/etc/ssh/sshd_config")) or "").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                cfg.setdefault(parts[0].lower(), parts[1].strip())
+    if not cfg:
+        return None
+    out = {}
+    if "permitrootlogin" in cfg:
+        out["permit_root"] = cfg["permitrootlogin"].split()[0]
+    if "passwordauthentication" in cfg:
+        out["password_auth"] = cfg["passwordauthentication"].split()[0]
+    try:
+        out["port"] = int(cfg["port"].split()[0])
+    except (KeyError, ValueError):
+        pass
+    return out or None
+
+def _selinux_local():
+    if os.path.exists("/sys/fs/selinux/enforce"):
+        v = (_rt("/sys/fs/selinux/enforce") or "").strip()
+        return "enforcing" if v == "1" else "permissive" if v == "0" else None
+    return "disabled"
+
+def _apparmor_local():
+    v = (_rt("/sys/module/apparmor/parameters/enabled") or "").strip()
+    if v:
+        return "enabled" if v in ("Y", "y") else "disabled"
+    return "enabled" if os.path.isdir("/sys/kernel/security/apparmor") else "disabled"
+
+def _fail2ban_local():
+    installed = (os.path.isdir(_hp("/etc/fail2ban"))
+                 or os.path.exists(_hp("/lib/systemd/system/fail2ban.service"))
+                 or os.path.exists(_hp("/etc/systemd/system/fail2ban.service")))
+    return {"installed": bool(installed), "active": None}
+
+def _reboot_local():
+    return (os.path.exists(_hp("/var/run/reboot-required"))
+            or os.path.exists(_hp("/run/reboot-required")))
+
+def _auto_updates_local():
+    txt = _rt(_hp("/etc/apt/apt.conf.d/20auto-upgrades"))
+    if txt:
+        m = re.search(r'Unattended-Upgrade"\s+"(\d+)"', txt)
+        if m:
+            return m.group(1) != "0"
+    return None
+
+def _local_sec():
+    return {
+        "firewall":        _local_firewall(),
+        "ssh":             _ssh_from_file(),
+        "selinux":         _selinux_local(),
+        "apparmor":        _apparmor_local(),
+        "fail2ban":        _fail2ban_local(),
+        "reboot_required": _reboot_local(),
+        "auto_updates":    _auto_updates_local(),
+    }
 
 # ── Health monitors: Docker containers + systemd services ──────────────────────
 # These describe *current state* (is it up? healthy? failed?) rather than a time
@@ -971,6 +1407,11 @@ def _local_now_snapshot():
         "disks":     H.get("disks") or [],
         "hostname":  socket.gethostname(),
     }
+    # System / Network / Security inventory — pass through so the per-host tabs
+    # and the fleet row for `local` render from the same sub-objects as remotes.
+    for k in ("os", "hw", "net", "sec"):
+        if H.get(k):
+            out[k] = H[k]
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.
@@ -1092,26 +1533,13 @@ def _detect_os(user, host, port):
         if "=" in line:
             k, _, v = line.partition("=")
             info[k.strip()] = v.strip().strip('"').strip("'")
-    # Family normalization for branching remedies
-    osid    = (info.get("ID") or "").lower()
-    id_like = (info.get("ID_LIKE") or "").lower()
-    uname   = (info.get("UNAME") or "").lower()
-    if uname == "darwin":
-        family = "macos"
-    elif osid == "alpine":
-        family = "alpine"
-    elif osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like:
-        family = "suse"
-    elif osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:
-        family = "debian"
-    elif osid in ("fedora", "rhel", "centos", "rocky", "almalinux") or "rhel" in id_like or "fedora" in id_like:
-        family = "rhel"
-    elif osid in ("arch", "manjaro", "endeavouros") or "arch" in id_like:
-        family = "arch"
-    elif uname in ("linux", ""):
-        family = "linux"     # generic Linux, init unknown
-    else:
-        family = uname or "unknown"
+    # Family normalization for branching remedies (shared with the local inventory).
+    uname = (info.get("UNAME") or "").lower()
+    family = _os_family(info.get("ID"), info.get("ID_LIKE"), uname)
+    # _os_family() collapses unknown to "linux"; preserve a non-linux uname (e.g.
+    # an exotic kernel) the way the old logic did.
+    if family == "linux" and uname not in ("linux", ""):
+        family = uname
     info["family"] = family
     # Pretty short label for the UI badge
     pretty = info.get("PRETTY_NAME") or info.get("ID") or info.get("UNAME") or "unknown"
