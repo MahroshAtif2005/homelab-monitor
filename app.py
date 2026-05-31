@@ -86,6 +86,7 @@ DB.executescript("""
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
+CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS hosts(
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS hosts(
 );
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
+CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """)
 for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL"):
@@ -108,7 +110,7 @@ for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp 
 DB.commit()
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "host": {}}
+          "procs": [], "models": [], "callers": [], "host": {}}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
@@ -134,8 +136,12 @@ def containers():
         for ct in json.loads(_docker("/containers/json")):
             nets = (ct.get("NetworkSettings") or {}).get("Networks") or {}
             ip = next((n.get("IPAddress") for n in nets.values() if n.get("IPAddress")), None)
+            ports = set()
+            for pm in (ct.get("Ports") or []):
+                if pm.get("PrivatePort"): ports.add(pm["PrivatePort"])
+                if pm.get("PublicPort"):  ports.add(pm["PublicPort"])
             out.append({"id": ct["Id"][:12], "name": (ct.get("Names") or ["/?"])[0].lstrip("/"),
-                        "image": ct.get("Image", ""), "ip": ip})
+                        "image": ct.get("Image", ""), "ip": ip, "ports": sorted(ports)})
         _ct_cache.update(list=out, at=time.time())
     except Exception as e:
         print("docker list error:", e, flush=True)
@@ -210,7 +216,17 @@ def probe_a1111(ip):
     return [(m, None)] if m else []
 
 def probe_comfy(ip):
-    return [("ComfyUI graph", None)] if _http_json(ip, 8188, "/system_stats") is not None else []
+    """ComfyUI: list installed checkpoints from /object_info (real model names). It has no
+    'currently loaded' concept, so checkpoints show Idle and the server's GPU VRAM
+    (nvidia-smi) attributes to the card. Falls back to a sentinel if it's up but bare."""
+    if _http_json(ip, 8188, "/system_stats") is None:
+        return []
+    info = _http_json(ip, 8188, "/object_info/CheckpointLoaderSimple") or {}
+    try:
+        names = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    except Exception:
+        names = []
+    return [(n, None) for n in names] or [("ComfyUI (no checkpoints)", None)]
 
 # (key-substring → probe). The key is matched against the container's image AND name,
 # first match wins, so order specific→generic. Most servers speak the OpenAI
@@ -2087,6 +2103,80 @@ def service_for_pid(pid, nm):
     except Exception:
         return f"pid:{pid}"
 
+# ── Caller attribution ────────────────────────────────────────────────────────
+# "Which service is driving Ollama?" Ollama's API never reveals its callers, so we
+# observe it from the outside: for each container we read its OWN ESTABLISHED sockets
+# (/proc/<pid>/net/tcp[6] — visible because the hub runs as root in the host PID ns)
+# and match the REMOTE port against the ports a model server listens on. A caller
+# reaching a server via host.docker.internal collapses onto the gateway IP, so the
+# port — not the IP — is what identifies the server. Sampled every tick: long-lived
+# LLM streams are caught reliably, sub-second calls (e.g. embeddings) are approximate.
+_cpid_cache = {"at": 0, "map": {}}
+def container_pids(nm):
+    """Map container-name → one representative host PID (any pid shares the netns),
+    by scanning /proc once. Cached briefly; the PID is only used to read net/tcp."""
+    if time.time() - _cpid_cache["at"] < 25 and _cpid_cache["map"]:
+        return _cpid_cache["map"]
+    out = {}
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cgroup") as f:
+                    h = HEX64.search(f.read())
+            except Exception:
+                continue
+            if h:
+                name = nm.get(h.group(0)[:12])
+                if name and name not in out:
+                    out[name] = pid
+    except Exception:
+        pass
+    _cpid_cache.update(at=time.time(), map=out)
+    return out
+
+def _est_remote_ports(pid):
+    """Remote ports (int) of a pid's ESTABLISHED TCP connections (state 01)."""
+    ports = []
+    for fn in (f"/proc/{pid}/net/tcp", f"/proc/{pid}/net/tcp6"):
+        try:
+            with open(fn) as f:
+                next(f, None)
+                for line in f:
+                    p = line.split()
+                    if len(p) > 3 and p[3] == "01":
+                        try:
+                            ports.append(int(p[2].split(":")[1], 16))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    return ports
+
+def sample_callers(conts, ai_names):
+    """{(caller, server): conn_count} for this instant. The hub's own containers are
+    excluded so their probe traffic doesn't masquerade as real model usage."""
+    targets = {}                                    # remote port → server name
+    for c in conts:
+        if c["name"] in ai_names:
+            for p in (c.get("ports") or []):
+                targets.setdefault(p, c["name"])
+    if not targets:
+        return {}
+    nm = {c["id"]: c["name"] for c in conts}
+    selfish = {c["name"] for c in conts
+               if "homelab-monitor" in c["image"].lower() or "gpu-monitor" in c["image"].lower()}
+    edges = {}
+    for name, pid in container_pids(nm).items():
+        if name in selfish:
+            continue
+        for port in _est_remote_ports(pid):
+            srv = targets.get(port)
+            if srv and srv != name:
+                edges[(name, srv)] = edges.get((name, srv), 0) + 1
+    return edges
+
 def sample_once():
     g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
              "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
@@ -2121,6 +2211,9 @@ def sample_once():
                 else:
                     models.append((svc, mdl, None))         # server up but idle / can't attribute
 
+    # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
+    edges = sample_callers(conts, {c["name"] for c in ai})
+
     host = read_host()
     ts = int(time.time())
     with LOCK:
@@ -2133,13 +2226,17 @@ def sample_once():
         for svc, mdl, vram in models:
             if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
                 DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
+        for (caller, server), n in edges.items():
+            DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "events"):
+            for t in ("samples", "proc", "models", "edges", "events"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models], host=host)
+                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
+                                 key=lambda x: -x["conns"]), host=host)
 
 def oom_scan():
     targets = ({p["service"] for p in LATEST["procs"]} |
@@ -2257,6 +2354,12 @@ def api_data():
                                 for s, m, pk, av in cur.execute(
                                     "SELECT service,model,MAX(vram),AVG(vram) FROM models WHERE ts>=? AND vram IS NOT NULL "
                                     "GROUP BY service,model", (since,)).fetchall()), key=lambda x: -x["peak"])
+        # Caller attribution: connection-seconds per (caller → server) over the range.
+        # Each sample of `conns` open connections represents INTERVAL seconds of traffic.
+        callers = sorted(({"caller": c, "server": s, "seconds": int((tot or 0) * INTERVAL), "samples": n}
+                          for c, s, tot, n in cur.execute(
+                              "SELECT caller,server,SUM(conns),COUNT(DISTINCT ts) FROM edges WHERE ts>=? "
+                              "GROUP BY caller,server", (since,)).fetchall()), key=lambda x: -x["seconds"])
         evs = [{"ts": t, "service": s, "kind": k, "detail": d}
                for t, s, k, d in cur.execute("SELECT ts,service,kind,detail FROM events WHERE ts>=? ORDER BY ts",
                                               (since,)).fetchall()]
@@ -2271,7 +2374,7 @@ def api_data():
         insights = build_insights(total, services, mem_total, evs, LATEST["host"])
     return jsonify({"version": VERSION, "range": rng, "bucket_sec": bk, "labels": labels, "total": total,
                     "services": services, "other": other, "summary": summary, "model_summary": model_summary,
-                    "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
+                    "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
 @app.route("/healthz")

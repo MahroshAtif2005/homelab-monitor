@@ -825,16 +825,29 @@ function renderModels(){
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
         <td>${m.avg!=null?fmtMB(m.avg):'—'}</td>
         <td class="vbars"><div class="vbar" title="peak ${m.peak!=null?fmtMB(m.peak):'—'}"><i style="width:${pW}%;background:${c}"></i></div>
-          <div class="vbar" title="avg ${m.avg!=null?fmtMB(m.avg):'—'}"><i style="width:${aW}%;background:${c}99"></i></div></td></tr>`;
+          <div class="vbar" title="avg ${m.avg!=null?fmtMB(m.avg):'—'}"><i style="width:${aW}%;background:${c};opacity:.5"></i></div></td></tr>`;
     }).join('');
     return `<div class="card">
       <h2 style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--tx)">
         <span class="dot" style="background:${c}"></span>${esc(svc)}
         <span class="pill" style="margin-left:auto;text-transform:none">resident ${ss.present!=null?ss.present+'%':'—'} · server peak ${ss.peak!=null?fmtMB(ss.peak):'—'}</span></h2>
       ${modelSpark(svc,tot)}
+      ${callersFor(svc)}
       <table style="margin-top:12px"><thead><tr><th>Model</th><th>Status</th><th>Now</th><th>Peak</th><th>Avg</th><th>Peak·Avg</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }).join('');
+}
+// Caller attribution — "who is driving this server", from connection-seconds (D.callers).
+function callersFor(svc){
+  const all=(D.callers||[]).filter(c=>c.server===svc).sort((a,b)=>b.seconds-a.seconds);
+  if(!all.length) return '';
+  const tot=all.reduce((s,c)=>s+(c.seconds||0),0)||1;
+  const live=new Set(((D.now&&D.now.callers)||[]).filter(c=>c.server===svc).map(c=>c.caller));
+  const chips=all.map(c=>{const pct=Math.round(c.seconds/tot*100), m=Math.round(c.seconds/60);
+    return `<span class="pill" style="text-transform:none" title="${c.seconds}s of connection time over the range${live.has(c.caller)?' · active now':''}">`
+      +`${live.has(c.caller)?'🟢 ':''}${esc(c.caller)} <b>${pct}%</b>${m?` · ${m}m`:''}</span>`;}).join(' ');
+  return `<div class="mspark-cap" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">`
+    +`<span>Driven by</span> ${chips}</div>`;
 }
 function modelSpark(service,tot){
   const arr=(D.services&&D.services[service])||[];
