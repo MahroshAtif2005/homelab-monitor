@@ -407,7 +407,7 @@ a{color:var(--info)}
 <!-- ───────── AI Models ───────── -->
 <section data-tab="models" hidden>
   <div id="modelsbody"></div>
-  <p class="cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. Recognised servers: Ollama, vLLM, HF TGI, llama.cpp, Stable Diffusion, ComfyUI.</p>
+  <p class="cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, llama.cpp, LocalAI, HF TGI/TEI, faster-whisper/Speaches, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, Aphrodite, Infinity, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
 </section>
 
 <!-- ───────── Containers ───────── -->
@@ -812,7 +812,7 @@ function renderModels(){
   live.forEach(m=>{const arr=bySvc[m.service]=bySvc[m.service]||[]; if(!arr.some(x=>x.model===m.model)) arr.push({model:m.model,peak:null,avg:null,vram:m.vram});});
   const host=document.getElementById('modelsbody'); if(!host) return;
   const services=Object.keys(bySvc);
-  if(!services.length){ host.innerHTML='<div class="card"><div class="muted">No model server has held the GPU in the selected range.</div></div>'; return; }
+  if(!services.length){ host.innerHTML='<div class="card"><div class="muted">No recognised AI model server is running. Start one (Ollama, vLLM, faster-whisper, Stable Diffusion, …) and it will appear here.</div></div>'; return; }
   const maxV=Math.max(tot||1, ...sums.map(m=>m.peak||0));
   host.innerHTML = services.map(svc=>{
     const ss=svcSum[svc]||{}, c=colorFor(svc);
@@ -825,16 +825,29 @@ function renderModels(){
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
         <td>${m.avg!=null?fmtMB(m.avg):'—'}</td>
         <td class="vbars"><div class="vbar" title="peak ${m.peak!=null?fmtMB(m.peak):'—'}"><i style="width:${pW}%;background:${c}"></i></div>
-          <div class="vbar" title="avg ${m.avg!=null?fmtMB(m.avg):'—'}"><i style="width:${aW}%;background:${c}99"></i></div></td></tr>`;
+          <div class="vbar" title="avg ${m.avg!=null?fmtMB(m.avg):'—'}"><i style="width:${aW}%;background:${c};opacity:.5"></i></div></td></tr>`;
     }).join('');
     return `<div class="card">
       <h2 style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--tx)">
         <span class="dot" style="background:${c}"></span>${esc(svc)}
         <span class="pill" style="margin-left:auto;text-transform:none">resident ${ss.present!=null?ss.present+'%':'—'} · server peak ${ss.peak!=null?fmtMB(ss.peak):'—'}</span></h2>
       ${modelSpark(svc,tot)}
+      ${callersFor(svc)}
       <table style="margin-top:12px"><thead><tr><th>Model</th><th>Status</th><th>Now</th><th>Peak</th><th>Avg</th><th>Peak·Avg</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }).join('');
+}
+// Caller attribution — "who is driving this server", from connection-seconds (D.callers).
+function callersFor(svc){
+  const all=(D.callers||[]).filter(c=>c.server===svc).sort((a,b)=>b.seconds-a.seconds);
+  if(!all.length) return '';
+  const tot=all.reduce((s,c)=>s+(c.seconds||0),0)||1;
+  const live=new Set(((D.now&&D.now.callers)||[]).filter(c=>c.server===svc).map(c=>c.caller));
+  const chips=all.map(c=>{const pct=Math.round(c.seconds/tot*100), m=Math.round(c.seconds/60);
+    return `<span class="pill" style="text-transform:none" title="${c.seconds}s of connection time over the range${live.has(c.caller)?' · active now':''}">`
+      +`${live.has(c.caller)?'🟢 ':''}${esc(c.caller)} <b>${pct}%</b>${m?` · ${m}m`:''}</span>`;}).join(' ');
+  return `<div class="mspark-cap" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">`
+    +`<span>Driven by</span> ${chips}</div>`;
 }
 function modelSpark(service,tot){
   const arr=(D.services&&D.services[service])||[];
