@@ -21,8 +21,6 @@ on:
       - 'docs/*.gif'
       - 'docs/*.svg'
       - '.github/workflows/docs.yml'
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
