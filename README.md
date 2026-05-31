@@ -43,8 +43,11 @@ active host:
 - **GPU** — live VRAM / utilisation / power / temp, *which container or process*
   holds the VRAM (mapped automatically, nothing hardcoded), and a VRAM-by-service
   timeline.
-- **AI Models** — for recognised model servers, *which model* is loaded and its VRAM,
-  read live from the server's own API.
+- **AI Models** — every recognised model server (Ollama, vLLM, llama.cpp, faster-whisper,
+  Stable Diffusion, ComfyUI, …), *which model* is loaded and its VRAM, read live from the
+  server's own API. Servers stay listed as **Idle** when their model unloads (nothing
+  flickers away), and a **"Driven by"** breakdown shows *which services are calling each
+  server* — so you can see what's actually driving Ollama.
 - **Containers** — health of **every** Docker container with uptime, memory,
   disk footprint and **clickable port chips** that open `host:port` in a new tab.
 - **Services** — **systemd** service health for the active host (local *or*
@@ -181,16 +184,32 @@ Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or 
 
 ## Supported model servers
 
+Recognised even while **Idle**, so the server stays on the dashboard when its model is unloaded. Per-model VRAM comes from the server's API where available, otherwise it's attributed from `nvidia-smi`.
+
 | Server | Model name | Per-model VRAM |
 |---|---|---|
-| **Ollama** | ✅ | ✅ via `/api/ps` (validated) |
-| **vLLM** | ✅ via `/v1/models` | — |
-| **HF TGI** | ✅ via `/info` | — |
-| **llama.cpp** | ✅ via `/v1/models` | — |
-| **Automatic1111 (SD)** | ✅ via `/sdapi/v1/options` | — |
-| **ComfyUI** | detected | — |
+| **Ollama** | ✅ loaded + pulled catalogue | ✅ via `/api/ps` (validated) |
+| **vLLM** | ✅ via `/v1/models` | attributed |
+| **llama.cpp / llama-server** | ✅ via `/v1/models` | attributed |
+| **LocalAI** | ✅ via `/v1/models` | attributed |
+| **HF TGI / TEI** | ✅ via `/info` | attributed |
+| **faster-whisper / Speaches** | ✅ via `/v1/models` | attributed |
+| **koboldcpp** | ✅ via `/api/v1/model` | attributed |
+| **tabbyAPI · text-generation-webui · LM Studio · xinference · Aphrodite · Infinity** | ✅ via `/v1/models` | attributed |
+| **Stable Diffusion (A1111 / Forge / SD.Next)** | ✅ via `/sdapi/v1/options` | attributed |
+| **InvokeAI** | ✅ via `/api/v2/models/` | attributed |
+| **ComfyUI** | ✅ checkpoints via `/object_info` | attributed |
 
-Don't see yours? Adding a probe is a one-liner — append to `PROBES` in `app.py`.
+Don't see yours? Adding a probe is a one-liner — append to `PROBES` in `app.py`. Most servers speak the OpenAI `/v1/models` shape and differ only by port.
+
+### Who's calling? (caller attribution)
+
+Model-server APIs never reveal *who* is calling them. The monitor works it out from the
+outside: it samples each container's own established connections and matches the remote
+port to a model server, then attributes **connection-time per caller → server** — surfaced
+as the **"Driven by"** breakdown on each server card. It's sampled, so long LLM streams are
+tracked reliably while sub-second calls (e.g. embeddings) are approximate; the hub's own
+probe traffic is excluded.
 
 ## Configuration
 
@@ -242,10 +261,11 @@ else keeps working.
 
 ## How it works
 
-The hub stitches five live sources into one view:
+The hub stitches several live sources into one view:
 
 - **`nvidia-smi`** → per-process VRAM + PID → mapped to container via `/proc/<pid>/cgroup` + the Docker API
 - **Model-server APIs** (Ollama `/api/ps`, OpenAI-style `/v1/models`, A1111, TGI, …) → which model is loaded and its VRAM
+- **`/proc/<pid>/net/tcp`** → each container's own established connections → matched to a model-server port for **caller attribution** ("who's driving Ollama")
 - **Docker API** → every container's state + health-check status
 - **systemd D-Bus** → service state, with your own units highlighted
 - **Host `/proc`, `/sys`, `statvfs`** → CPU / RAM / load / temp / disk
