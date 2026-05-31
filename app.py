@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.10.0"
+VERSION      = "0.11.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -86,6 +86,7 @@ DB.executescript("""
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
+CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS hosts(
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS hosts(
 );
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
+CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """)
 for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL"):
@@ -108,7 +110,7 @@ for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp 
 DB.commit()
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "host": {}}
+          "procs": [], "models": [], "callers": [], "host": {}}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
@@ -134,8 +136,12 @@ def containers():
         for ct in json.loads(_docker("/containers/json")):
             nets = (ct.get("NetworkSettings") or {}).get("Networks") or {}
             ip = next((n.get("IPAddress") for n in nets.values() if n.get("IPAddress")), None)
+            ports = set()
+            for pm in (ct.get("Ports") or []):
+                if pm.get("PrivatePort"): ports.add(pm["PrivatePort"])
+                if pm.get("PublicPort"):  ports.add(pm["PublicPort"])
             out.append({"id": ct["Id"][:12], "name": (ct.get("Names") or ["/?"])[0].lstrip("/"),
-                        "image": ct.get("Image", ""), "ip": ip})
+                        "image": ct.get("Image", ""), "ip": ip, "ports": sorted(ports)})
         _ct_cache.update(list=out, at=time.time())
     except Exception as e:
         print("docker list error:", e, flush=True)
@@ -163,38 +169,133 @@ def _http_json(ip, port, path, timeout=2):
     return json.loads(body) if r.status < 400 else None
 
 def probe_ollama(ip):
-    d = _http_json(ip, 11434, "/api/ps")
-    return [(m["name"], (m.get("size_vram") or 0) / 1048576 or None) for m in (d or {}).get("models", [])]
-def probe_vllm(ip):
-    d = _http_json(ip, 8000, "/v1/models");  return [(m["id"], None) for m in (d or {}).get("data", [])]
-def probe_tgi(ip):
-    d = _http_json(ip, 80, "/info") or _http_json(ip, 3000, "/info")
-    return [(d["model_id"], None)] if d and d.get("model_id") else []
-def probe_llamacpp(ip):
-    d = _http_json(ip, 8080, "/v1/models"); return [(m["id"], None) for m in (d or {}).get("data", [])]
-def probe_a1111(ip):
-    d = _http_json(ip, 7860, "/sdapi/v1/options"); m = (d or {}).get("sd_model_checkpoint")
-    return [(m, None)] if m else []
-def probe_comfy(ip):
-    return [("ComfyUI graph", None)] if _http_json(ip, 8188, "/system_stats") is not None else []
+    """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
+    fall back to the pulled catalogue (/api/tags) so the server still shows as Idle."""
+    ps = _http_json(ip, 11434, "/api/ps")
+    loaded = [(m["name"], (m.get("size_vram") or 0) / 1048576 or None)
+              for m in (ps or {}).get("models", []) if m.get("name")]
+    if loaded:
+        return loaded
+    tags = _http_json(ip, 11434, "/api/tags")
+    return [(m["name"], None) for m in (tags or {}).get("models", []) if m.get("name")]
 
-PROBES = [("ollama", probe_ollama), ("vllm", probe_vllm),
-          ("text-generation-inference", probe_tgi), ("tgi", probe_tgi),
-          ("llama.cpp", probe_llamacpp), ("llamacpp", probe_llamacpp), ("ggml", probe_llamacpp),
-          ("automatic1111", probe_a1111), ("stable-diffusion-webui", probe_a1111), ("sd-webui", probe_a1111),
-          ("comfyui", probe_comfy)]
-
-def probe_models(ct):
-    img, name, ip = ct.get("image", "").lower(), ct.get("name", "").lower(), ct.get("ip")
-    if not ip:
+def _openai_models(*ports):
+    """Factory for the OpenAI-compatible `GET /v1/models` shape (`data[].id`), shared by
+    vLLM, llama.cpp/llama-server, LocalAI, faster-whisper-server/Speaches, koboldcpp,
+    tabbyAPI, text-generation-webui, LM Studio, xinference, … — they differ only by port.
+    Tries each candidate port until one answers with a non-empty model list."""
+    def fn(ip):
+        for p in ports:
+            d = _http_json(ip, p, "/v1/models")
+            data = (d or {}).get("data")
+            if data:
+                return [(m.get("id"), None) for m in data if m.get("id")]
         return []
+    return fn
+
+def probe_tgi(ip):
+    """HF Text-Generation-Inference / Text-Embeddings-Inference: `GET /info` → model_id."""
+    d = _http_json(ip, 80, "/info") or _http_json(ip, 3000, "/info") or _http_json(ip, 8080, "/info")
+    return [(d["model_id"], None)] if d and d.get("model_id") else []
+
+def probe_koboldcpp(ip):
+    d = _http_json(ip, 5001, "/api/v1/model")
+    if d and d.get("result"):
+        return [(d["result"], None)]
+    return _openai_models(5001)(ip)
+
+def probe_invokeai(ip):
+    """InvokeAI v4+: `GET /api/v2/models/` → models[].name (its installed catalogue)."""
+    d = _http_json(ip, 9090, "/api/v2/models/")
+    return [(m.get("name"), None) for m in (d or {}).get("models", []) if m.get("name")]
+
+def probe_a1111(ip):
+    """AUTOMATIC1111 / SD.Next / Forge: the currently-loaded checkpoint. Kept to a single
+    entry so the server's GPU VRAM (from nvidia-smi) attributes cleanly to it."""
+    m = (_http_json(ip, 7860, "/sdapi/v1/options") or {}).get("sd_model_checkpoint")
+    return [(m, None)] if m else []
+
+def probe_comfy(ip):
+    """ComfyUI: list installed checkpoints from /object_info (real model names). It has no
+    'currently loaded' concept, so checkpoints show Idle and the server's GPU VRAM
+    (nvidia-smi) attributes to the card. Falls back to a sentinel if it's up but bare."""
+    if _http_json(ip, 8188, "/system_stats") is None:
+        return []
+    info = _http_json(ip, 8188, "/object_info/CheckpointLoaderSimple") or {}
+    try:
+        names = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    except Exception:
+        names = []
+    return [(n, None) for n in names] or [("ComfyUI (no checkpoints)", None)]
+
+# (key-substring → probe). The key is matched against the container's image AND name,
+# first match wins, so order specific→generic. Most servers speak the OpenAI
+# /v1/models shape and differ only by their default internal port.
+PROBES = [
+    ("ollama",                     probe_ollama),
+    ("vllm",                       _openai_models(8000)),
+    ("text-generation-inference",  probe_tgi),
+    ("text-embeddings-inference",  probe_tgi),
+    ("faster-whisper",             _openai_models(8000)),
+    ("speaches",                   _openai_models(8000)),
+    ("whisper",                    _openai_models(8000, 9000)),
+    ("localai",                    _openai_models(8080)),
+    ("local-ai",                   _openai_models(8080)),
+    ("llama.cpp",                  _openai_models(8080, 8000)),
+    ("llama-server",               _openai_models(8080, 8000)),
+    ("llamacpp",                   _openai_models(8080, 8000)),
+    ("ggml",                       _openai_models(8080, 8000)),
+    ("koboldcpp",                  probe_koboldcpp),
+    ("tabbyapi",                   _openai_models(5000)),
+    ("exllama",                    _openai_models(5000)),
+    ("text-generation-webui",      _openai_models(5000)),
+    ("oobabooga",                  _openai_models(5000)),
+    ("lmstudio",                   _openai_models(1234)),
+    ("lm-studio",                  _openai_models(1234)),
+    ("xinference",                 _openai_models(9997)),
+    ("xorbits",                    _openai_models(9997)),
+    ("aphrodite",                  _openai_models(2242)),
+    ("mistral-rs",                 _openai_models(1234, 8080)),
+    ("infinity",                   _openai_models(7997)),
+    ("invokeai",                   probe_invokeai),
+    ("invoke-ai",                  probe_invokeai),
+    ("automatic1111",              probe_a1111),
+    ("stable-diffusion-webui",     probe_a1111),
+    ("sd-webui",                   probe_a1111),
+    ("sdnext",                     probe_a1111),
+    ("comfyui",                    probe_comfy),
+]
+
+def _match_probe(ct):
+    """Return the probe fn for a container whose image/name matches a known server, else None."""
+    img, name = ct.get("image", "").lower(), ct.get("name", "").lower()
     for key, fn in PROBES:
         if key in img or key in name:
-            try:
-                return [(m, v) for m, v in fn(ip) if m]
-            except Exception:
-                return []
-    return []
+            return fn
+    return None
+
+CATALOG_MAX = 15   # max idle "available" models listed per server before collapsing to a count
+
+def probe_models(ct):
+    fn = _match_probe(ct)
+    if not fn:
+        return []
+    # Host-networked servers have no per-container IP; the hub shares the host net
+    # namespace, so localhost reaches them on their published/default port.
+    ip = ct.get("ip") or "127.0.0.1"
+    try:
+        found = [(m, v) for m, v in fn(ip) if m]
+    except Exception:
+        return []
+    loaded = [x for x in found if x[1] is not None]
+    idle   = [x for x in found if x[1] is None]
+    # Collapse an oversized idle catalogue (faster-whisper, for one, exposes its full
+    # upstream registry of 400+ models) into a single summary row so it can't flood
+    # the panel. Loaded models and small catalogues (e.g. your pulled Ollama models)
+    # are kept verbatim.
+    if len(idle) > CATALOG_MAX:
+        idle = [(f"{len(idle)} models available", None)]
+    return loaded + idle
 
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
 def _cpu_pct():
@@ -2002,11 +2103,86 @@ def service_for_pid(pid, nm):
     except Exception:
         return f"pid:{pid}"
 
+# ── Caller attribution ────────────────────────────────────────────────────────
+# "Which service is driving Ollama?" Ollama's API never reveals its callers, so we
+# observe it from the outside: for each container we read its OWN ESTABLISHED sockets
+# (/proc/<pid>/net/tcp[6] — visible because the hub runs as root in the host PID ns)
+# and match the REMOTE port against the ports a model server listens on. A caller
+# reaching a server via host.docker.internal collapses onto the gateway IP, so the
+# port — not the IP — is what identifies the server. Sampled every tick: long-lived
+# LLM streams are caught reliably, sub-second calls (e.g. embeddings) are approximate.
+_cpid_cache = {"at": 0, "map": {}}
+def container_pids(nm):
+    """Map container-name → one representative host PID (any pid shares the netns),
+    by scanning /proc once. Cached briefly; the PID is only used to read net/tcp."""
+    if time.time() - _cpid_cache["at"] < 25 and _cpid_cache["map"]:
+        return _cpid_cache["map"]
+    out = {}
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cgroup") as f:
+                    h = HEX64.search(f.read())
+            except Exception:
+                continue
+            if h:
+                name = nm.get(h.group(0)[:12])
+                if name and name not in out:
+                    out[name] = pid
+    except Exception:
+        pass
+    _cpid_cache.update(at=time.time(), map=out)
+    return out
+
+def _est_remote_ports(pid):
+    """Remote ports (int) of a pid's ESTABLISHED TCP connections (state 01)."""
+    ports = []
+    for fn in (f"/proc/{pid}/net/tcp", f"/proc/{pid}/net/tcp6"):
+        try:
+            with open(fn) as f:
+                next(f, None)
+                for line in f:
+                    p = line.split()
+                    if len(p) > 3 and p[3] == "01":
+                        try:
+                            ports.append(int(p[2].split(":")[1], 16))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    return ports
+
+def sample_callers(conts, ai_names):
+    """{(caller, server): conn_count} for this instant. The hub's own containers are
+    excluded so their probe traffic doesn't masquerade as real model usage."""
+    targets = {}                                    # remote port → server name
+    for c in conts:
+        if c["name"] in ai_names:
+            for p in (c.get("ports") or []):
+                targets.setdefault(p, c["name"])
+    if not targets:
+        return {}
+    nm = {c["id"]: c["name"] for c in conts}
+    selfish = {c["name"] for c in conts
+               if "homelab-monitor" in c["image"].lower() or "gpu-monitor" in c["image"].lower()}
+    edges = {}
+    for name, pid in container_pids(nm).items():
+        if name in selfish:
+            continue
+        for port in _est_remote_ports(pid):
+            srv = targets.get(port)
+            if srv and srv != name:
+                edges[(name, srv)] = edges.get((name, srv), 0) + 1
+    return edges
+
 def sample_once():
     g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
              "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
     util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
-    nm = {c["id"]: c["name"] for c in containers()}
+    conts = containers()
+    nm = {c["id"]: c["name"] for c in conts}
     procs = {}
     for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
         if line.strip():
@@ -2014,15 +2190,29 @@ def sample_once():
             svc = service_for_pid(pid, nm)
             procs[svc] = procs.get(svc, 0) + float(mem or 0)
 
-    by_name = {c["name"]: c for c in containers()}
+    # Detect models from EVERY recognised AI server, not just the ones holding the GPU
+    # right now — so a server that has unloaded its model (e.g. OLLAMA_KEEP_ALIVE
+    # expired) or sits between requests still shows up as Idle instead of vanishing.
+    # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
+    ai = [c for c in conts if _match_probe(c)]
     models = []
-    for svc, mem in procs.items():
-        found = probe_models(by_name.get(svc, {}))
-        if len(found) == 1 and found[0][1] is None:
-            models.append((svc, found[0][0], round(mem)))
-        else:
+    if ai:
+        with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
+            found_lists = list(ex.map(probe_models, ai))
+        for ct, found in zip(ai, found_lists):
+            svc = ct["name"]
+            smem = procs.get(svc)                         # MB this server holds on the GPU now
+            api_vram = any(v is not None for _, v in found)
             for mdl, vram in found:
-                models.append((svc, mdl, round(vram) if vram else None))
+                if vram is not None:                      # server reported its own VRAM (Ollama)
+                    models.append((svc, mdl, round(vram)))
+                elif not api_vram and len(found) == 1 and smem:
+                    models.append((svc, mdl, round(smem)))  # single model ↔ all the server's VRAM
+                else:
+                    models.append((svc, mdl, None))         # server up but idle / can't attribute
+
+    # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
+    edges = sample_callers(conts, {c["name"] for c in ai})
 
     host = read_host()
     ts = int(time.time())
@@ -2034,14 +2224,19 @@ def sample_once():
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
         for svc, mdl, vram in models:
-            DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))
+            if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
+                DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
+        for (caller, server), n in edges.items():
+            DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "events"):
+            for t in ("samples", "proc", "models", "edges", "events"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models], host=host)
+                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
+                                 key=lambda x: -x["conns"]), host=host)
 
 def oom_scan():
     targets = ({p["service"] for p in LATEST["procs"]} |
@@ -2159,6 +2354,12 @@ def api_data():
                                 for s, m, pk, av in cur.execute(
                                     "SELECT service,model,MAX(vram),AVG(vram) FROM models WHERE ts>=? AND vram IS NOT NULL "
                                     "GROUP BY service,model", (since,)).fetchall()), key=lambda x: -x["peak"])
+        # Caller attribution: connection-seconds per (caller → server) over the range.
+        # Each sample of `conns` open connections represents INTERVAL seconds of traffic.
+        callers = sorted(({"caller": c, "server": s, "seconds": int((tot or 0) * INTERVAL), "samples": n}
+                          for c, s, tot, n in cur.execute(
+                              "SELECT caller,server,SUM(conns),COUNT(DISTINCT ts) FROM edges WHERE ts>=? "
+                              "GROUP BY caller,server", (since,)).fetchall()), key=lambda x: -x["seconds"])
         evs = [{"ts": t, "service": s, "kind": k, "detail": d}
                for t, s, k, d in cur.execute("SELECT ts,service,kind,detail FROM events WHERE ts>=? ORDER BY ts",
                                               (since,)).fetchall()]
@@ -2173,7 +2374,7 @@ def api_data():
         insights = build_insights(total, services, mem_total, evs, LATEST["host"])
     return jsonify({"version": VERSION, "range": rng, "bucket_sec": bk, "labels": labels, "total": total,
                     "services": services, "other": other, "summary": summary, "model_summary": model_summary,
-                    "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
+                    "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
 @app.route("/healthz")
