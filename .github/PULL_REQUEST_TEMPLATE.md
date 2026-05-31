@@ -7,7 +7,10 @@ we need — the rest is optional. -->
 
 ## Checklist
 
-- [ ] Branched off the **latest `main`** (`git pull origin main` before
+- [ ] **Base branch is `next`** (the integration branch), not `main`. Change the
+      base dropdown above if it still says `main`. *(Hotfixes for the current
+      release may target `main` — note that in the description if so.)*
+- [ ] Branched off the **latest `next`** (`git pull origin next` before
       branching) — avoids stale-branch merge churn.
 - [ ] Tested locally with `docker compose up -d --build` and the dashboard
       behaves as expected.

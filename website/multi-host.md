@@ -68,9 +68,10 @@ That's it — the hub picks up the host on its next poll cycle (~10 s) and the
 
 ## What's local-only (for now)
 
-Per-host **Host** and **Services** tabs work for any registered remote. **GPU
-/ AI Models / Containers** tabs are local-only this slice and tell you exactly
-why for the active host — read from that host's own capability check:
+Per-host **System**, **Network**, **Security** and **Services** tabs work for
+any registered remote. **GPU / AI Models / Containers** tabs are local-only
+this slice and tell you exactly why for the active host — read from that host's
+own capability check:
 
 - *"cloudy has no NVIDIA GPU"* — `nvidia-smi` was absent during Test.
 - *"Docker is not installed on cloudy"* — `docker` CLI wasn't found.

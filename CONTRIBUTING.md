@@ -28,18 +28,35 @@ logs: `docker compose logs -f`.
 > Without a GPU the container, service and host panels still work fine — handy
 > for developing non-GPU features on a laptop.
 
-## Branch off the latest `main`
+## Where to branch from — and where to send the PR
 
-Before you start, please **sync `main` and branch from it**:
+This repo runs two long-lived branches:
+
+- **`main`** — the stable, released line. It's what `docker compose pull` ships
+  and what people clone to *run* the tool. Releases are cut from here as `vX.Y.Z`
+  tags. **Don't send feature PRs here.**
+- **`next`** — the integration branch for the upcoming version. **All feature and
+  fix PRs target `next`.** When `next` is ready, the maintainer merges it into
+  `main` and tags a release.
+
+So before you start, **sync `next` and branch from it**:
 
 ```bash
-git checkout main
-git pull origin main
+git fetch origin
+git checkout next
+git pull origin next
 git checkout -b your-feature
 ```
 
-`main` moves, and rebasing a stale branch onto a moved-on `main` is the most
+Then open your PR **against `next`** (GitHub defaults the base to `main` — change
+the base branch dropdown to `next`).
+
+`next` moves, and rebasing a stale branch onto a moved-on `next` is the most
 common source of merge churn here. Fresh branches save everyone time.
+
+> Tiny, release-worthy hotfixes (a typo in shipped docs, a crash in the current
+> release) may target `main` directly — when in doubt, target `next` and say so
+> in the PR.
 
 ## The "add a monitor" pattern
 
@@ -107,9 +124,12 @@ external deps would defeat the "agentless" promise.
 
 ## Submitting a PR
 
+- **Target `next`**, not `main` (see "Where to branch from" above).
 - Open an issue first for anything larger than a small fix, so we can agree on
   the shape before you spend time on it.
 - Keep PRs focused — one feature or fix per PR is easier to review.
+- CI runs a build + boot smoke on every PR; please get it green before asking
+  for review.
 - Leave the version bump to the maintainer; it happens on release, not per PR.
 
 Thanks again — every issue, suggestion, and PR helps. 🛰️
