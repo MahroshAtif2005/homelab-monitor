@@ -163,38 +163,123 @@ def _http_json(ip, port, path, timeout=2):
     return json.loads(body) if r.status < 400 else None
 
 def probe_ollama(ip):
-    d = _http_json(ip, 11434, "/api/ps")
-    return [(m["name"], (m.get("size_vram") or 0) / 1048576 or None) for m in (d or {}).get("models", [])]
-def probe_vllm(ip):
-    d = _http_json(ip, 8000, "/v1/models");  return [(m["id"], None) for m in (d or {}).get("data", [])]
+    """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
+    fall back to the pulled catalogue (/api/tags) so the server still shows as Idle."""
+    ps = _http_json(ip, 11434, "/api/ps")
+    loaded = [(m["name"], (m.get("size_vram") or 0) / 1048576 or None)
+              for m in (ps or {}).get("models", []) if m.get("name")]
+    if loaded:
+        return loaded
+    tags = _http_json(ip, 11434, "/api/tags")
+    return [(m["name"], None) for m in (tags or {}).get("models", []) if m.get("name")]
+
+def _openai_models(*ports):
+    """Factory for the OpenAI-compatible `GET /v1/models` shape (`data[].id`), shared by
+    vLLM, llama.cpp/llama-server, LocalAI, faster-whisper-server/Speaches, koboldcpp,
+    tabbyAPI, text-generation-webui, LM Studio, xinference, … — they differ only by port.
+    Tries each candidate port until one answers with a non-empty model list."""
+    def fn(ip):
+        for p in ports:
+            d = _http_json(ip, p, "/v1/models")
+            data = (d or {}).get("data")
+            if data:
+                return [(m.get("id"), None) for m in data if m.get("id")]
+        return []
+    return fn
+
 def probe_tgi(ip):
-    d = _http_json(ip, 80, "/info") or _http_json(ip, 3000, "/info")
+    """HF Text-Generation-Inference / Text-Embeddings-Inference: `GET /info` → model_id."""
+    d = _http_json(ip, 80, "/info") or _http_json(ip, 3000, "/info") or _http_json(ip, 8080, "/info")
     return [(d["model_id"], None)] if d and d.get("model_id") else []
-def probe_llamacpp(ip):
-    d = _http_json(ip, 8080, "/v1/models"); return [(m["id"], None) for m in (d or {}).get("data", [])]
+
+def probe_koboldcpp(ip):
+    d = _http_json(ip, 5001, "/api/v1/model")
+    if d and d.get("result"):
+        return [(d["result"], None)]
+    return _openai_models(5001)(ip)
+
+def probe_invokeai(ip):
+    """InvokeAI v4+: `GET /api/v2/models/` → models[].name (its installed catalogue)."""
+    d = _http_json(ip, 9090, "/api/v2/models/")
+    return [(m.get("name"), None) for m in (d or {}).get("models", []) if m.get("name")]
+
 def probe_a1111(ip):
-    d = _http_json(ip, 7860, "/sdapi/v1/options"); m = (d or {}).get("sd_model_checkpoint")
+    """AUTOMATIC1111 / SD.Next / Forge: the currently-loaded checkpoint. Kept to a single
+    entry so the server's GPU VRAM (from nvidia-smi) attributes cleanly to it."""
+    m = (_http_json(ip, 7860, "/sdapi/v1/options") or {}).get("sd_model_checkpoint")
     return [(m, None)] if m else []
+
 def probe_comfy(ip):
     return [("ComfyUI graph", None)] if _http_json(ip, 8188, "/system_stats") is not None else []
 
-PROBES = [("ollama", probe_ollama), ("vllm", probe_vllm),
-          ("text-generation-inference", probe_tgi), ("tgi", probe_tgi),
-          ("llama.cpp", probe_llamacpp), ("llamacpp", probe_llamacpp), ("ggml", probe_llamacpp),
-          ("automatic1111", probe_a1111), ("stable-diffusion-webui", probe_a1111), ("sd-webui", probe_a1111),
-          ("comfyui", probe_comfy)]
+# (key-substring → probe). The key is matched against the container's image AND name,
+# first match wins, so order specific→generic. Most servers speak the OpenAI
+# /v1/models shape and differ only by their default internal port.
+PROBES = [
+    ("ollama",                     probe_ollama),
+    ("vllm",                       _openai_models(8000)),
+    ("text-generation-inference",  probe_tgi),
+    ("text-embeddings-inference",  probe_tgi),
+    ("faster-whisper",             _openai_models(8000)),
+    ("speaches",                   _openai_models(8000)),
+    ("whisper",                    _openai_models(8000, 9000)),
+    ("localai",                    _openai_models(8080)),
+    ("local-ai",                   _openai_models(8080)),
+    ("llama.cpp",                  _openai_models(8080, 8000)),
+    ("llama-server",               _openai_models(8080, 8000)),
+    ("llamacpp",                   _openai_models(8080, 8000)),
+    ("ggml",                       _openai_models(8080, 8000)),
+    ("koboldcpp",                  probe_koboldcpp),
+    ("tabbyapi",                   _openai_models(5000)),
+    ("exllama",                    _openai_models(5000)),
+    ("text-generation-webui",      _openai_models(5000)),
+    ("oobabooga",                  _openai_models(5000)),
+    ("lmstudio",                   _openai_models(1234)),
+    ("lm-studio",                  _openai_models(1234)),
+    ("xinference",                 _openai_models(9997)),
+    ("xorbits",                    _openai_models(9997)),
+    ("aphrodite",                  _openai_models(2242)),
+    ("mistral-rs",                 _openai_models(1234, 8080)),
+    ("infinity",                   _openai_models(7997)),
+    ("invokeai",                   probe_invokeai),
+    ("invoke-ai",                  probe_invokeai),
+    ("automatic1111",              probe_a1111),
+    ("stable-diffusion-webui",     probe_a1111),
+    ("sd-webui",                   probe_a1111),
+    ("sdnext",                     probe_a1111),
+    ("comfyui",                    probe_comfy),
+]
 
-def probe_models(ct):
-    img, name, ip = ct.get("image", "").lower(), ct.get("name", "").lower(), ct.get("ip")
-    if not ip:
-        return []
+def _match_probe(ct):
+    """Return the probe fn for a container whose image/name matches a known server, else None."""
+    img, name = ct.get("image", "").lower(), ct.get("name", "").lower()
     for key, fn in PROBES:
         if key in img or key in name:
-            try:
-                return [(m, v) for m, v in fn(ip) if m]
-            except Exception:
-                return []
-    return []
+            return fn
+    return None
+
+CATALOG_MAX = 15   # max idle "available" models listed per server before collapsing to a count
+
+def probe_models(ct):
+    fn = _match_probe(ct)
+    if not fn:
+        return []
+    # Host-networked servers have no per-container IP; the hub shares the host net
+    # namespace, so localhost reaches them on their published/default port.
+    ip = ct.get("ip") or "127.0.0.1"
+    try:
+        found = [(m, v) for m, v in fn(ip) if m]
+    except Exception:
+        return []
+    loaded = [x for x in found if x[1] is not None]
+    idle   = [x for x in found if x[1] is None]
+    # Collapse an oversized idle catalogue (faster-whisper, for one, exposes its full
+    # upstream registry of 400+ models) into a single summary row so it can't flood
+    # the panel. Loaded models and small catalogues (e.g. your pulled Ollama models)
+    # are kept verbatim.
+    if len(idle) > CATALOG_MAX:
+        idle = [(f"{len(idle)} models available", None)]
+    return loaded + idle
 
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
 def _cpu_pct():
@@ -2006,7 +2091,8 @@ def sample_once():
     g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
              "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
     util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
-    nm = {c["id"]: c["name"] for c in containers()}
+    conts = containers()
+    nm = {c["id"]: c["name"] for c in conts}
     procs = {}
     for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
         if line.strip():
@@ -2014,15 +2100,26 @@ def sample_once():
             svc = service_for_pid(pid, nm)
             procs[svc] = procs.get(svc, 0) + float(mem or 0)
 
-    by_name = {c["name"]: c for c in containers()}
+    # Detect models from EVERY recognised AI server, not just the ones holding the GPU
+    # right now — so a server that has unloaded its model (e.g. OLLAMA_KEEP_ALIVE
+    # expired) or sits between requests still shows up as Idle instead of vanishing.
+    # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
+    ai = [c for c in conts if _match_probe(c)]
     models = []
-    for svc, mem in procs.items():
-        found = probe_models(by_name.get(svc, {}))
-        if len(found) == 1 and found[0][1] is None:
-            models.append((svc, found[0][0], round(mem)))
-        else:
+    if ai:
+        with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
+            found_lists = list(ex.map(probe_models, ai))
+        for ct, found in zip(ai, found_lists):
+            svc = ct["name"]
+            smem = procs.get(svc)                         # MB this server holds on the GPU now
+            api_vram = any(v is not None for _, v in found)
             for mdl, vram in found:
-                models.append((svc, mdl, round(vram) if vram else None))
+                if vram is not None:                      # server reported its own VRAM (Ollama)
+                    models.append((svc, mdl, round(vram)))
+                elif not api_vram and len(found) == 1 and smem:
+                    models.append((svc, mdl, round(smem)))  # single model ↔ all the server's VRAM
+                else:
+                    models.append((svc, mdl, None))         # server up but idle / can't attribute
 
     host = read_host()
     ts = int(time.time())
@@ -2034,7 +2131,8 @@ def sample_once():
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
         for svc, mdl, vram in models:
-            DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))
+            if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
+                DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
         if ts % 360 < INTERVAL:
             for t in ("samples", "proc", "models", "events"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
