@@ -323,25 +323,12 @@ a{color:var(--info)}
 .inforow .v{color:var(--tx);font-family:var(--mono);word-break:break-word}
 .kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .kpirow .kpi{flex:1;min-width:120px}
-.secsum{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-2px 0 14px}
-.secsum .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-weight:700;font-size:12.5px}
-.secsum .pill.crit{background:var(--crit);color:#fff}
-.secsum .pill.warn{background:var(--warn);color:#1a1500}
-.secsum .pill.ok{background:rgba(63,185,80,.16);color:var(--ok)}
-.secsum .who{color:var(--mut);font-size:12.5px}
-.secrow{display:flex;align-items:center;gap:12px;padding:11px 13px;margin-bottom:7px;border:1px solid var(--bd);border-left:4px solid var(--mut);border-radius:9px;background:var(--inset);font-size:13.5px}
-.secrow.ok{border-left-color:var(--ok)}
-.secrow.info{border-left-color:var(--mut);opacity:.85}
-.secrow.warn{border-left-color:var(--warn);border-color:rgba(210,153,34,.5);background:rgba(210,153,34,.09)}
-.secrow.crit{border-left-color:var(--crit);border-color:rgba(248,81,73,.55);background:rgba(248,81,73,.09)}
-.secrow .sicon{flex:0 0 22px;text-align:center;font-size:15px;font-weight:700}
-.secrow .k{flex:0 0 140px;font-weight:600}
-.secrow .v{flex:1;color:var(--tx);word-break:break-word}
-.secrow .stag{flex:0 0 auto;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 8px;border-radius:5px}
-.secrow .stag.crit{background:var(--crit);color:#fff}
-.secrow .stag.warn{background:var(--warn);color:#1a1500}
-.secrow .stag.ok{background:rgba(63,185,80,.18);color:var(--ok)}
-.secrow .stag.info{background:var(--hover);color:var(--mut)}
+/* Security check rows reuse the app's .badge + .sdot + table styling; the only
+   extra is a subtle severity tint on rows that need attention so they stand out. */
+.sectbl tr.warn td{background:var(--warnbg)}
+.sectbl tr.crit td{background:var(--critbg)}
+.sectbl tr.warn td:first-child{box-shadow:inset 3px 0 var(--warn)}
+.sectbl tr.crit td:first-child{box-shadow:inset 3px 0 var(--crit)}
 .exptag{font-size:11px;padding:1px 6px;border-radius:4px;font-family:var(--mono);white-space:nowrap}
 .exptag.pub{background:rgba(210,153,34,.16);color:var(--warn)}
 .exptag.loc{background:rgba(63,185,80,.15);color:var(--ok)}
@@ -1741,15 +1728,8 @@ async function renderNetwork(){
      </div>`;
 }
 
-const SEC_ICON = {ok:'✓', warn:'!', crit:'✕', info:'–'};
-const SEC_TAG  = {ok:'OK', warn:'REVIEW', crit:'RISK', info:'N/A'};
-function secRow(k, level, v, tag){
-  const icon = SEC_ICON[level] || '–';
-  const tg   = tag || SEC_TAG[level] || '';
-  return `<div class="secrow ${level}"><span class="sicon" style="color:${SC[level]}">${icon}</span>`
-       + `<span class="k">${k}</span><span class="v">${v}</span>`
-       + (tg ? `<span class="stag ${level}">${tg}</span>` : '') + `</div>`;
-}
+// Security verdict word shown in the status badge (reusing the app's .badge).
+const SEC_TAG = {ok:'OK', warn:'REVIEW', crit:'RISK', info:'N/A'};
 async function renderSecurity(){
   if(CURRENT_HOST !== 'local') await loadHostData(CURRENT_HOST);
   const el = document.getElementById('secbody');
@@ -1757,14 +1737,14 @@ async function renderSecurity(){
   const wait = waitingHostMsg();
   if(wait){ el.innerHTML = wait; return; }
   const h = currentHostBlock(), sec = h.sec;
-  if(!sec){ el.innerHTML = '<div class="muted" style="padding:12px 2px">No security info reported for this host yet.</div>'; return; }
-  const items = [];                                  // {level, html}
-  const add = (k, level, v, tag) => items.push({level, html: secRow(k, level, v, tag)});
+  if(!sec){ el.innerHTML = '<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">No security info yet</div><div class="d">Nothing has been reported for this host.</div></div></div>'; return; }
+  const items = [];                                  // {check, level, detail, tag?}
+  const add = (check, level, detail, tag) => items.push({check, level, detail, tag});
 
   // Firewall
   const fw = sec.firewall || {};
-  if(!fw.backend)            add('Firewall','warn', 'no firewall detected', 'REVIEW');
-  else if(fw.active===true)  add('Firewall','ok',   `${esc(fw.backend)} — active`+(fw.open_ports?`  (${fw.open_ports} ports open)`:''));
+  if(!fw.backend)            add('Firewall','warn', 'no firewall detected');
+  else if(fw.active===true)  add('Firewall','ok',   `${esc(fw.backend)} — active`+(fw.open_ports?` · ${fw.open_ports} ports open`:''));
   else if(fw.active===false) add('Firewall','warn', `${esc(fw.backend)} — inactive`);
   else                       add('Firewall','info', `${esc(fw.backend)} — state needs elevated read`);
 
@@ -1813,20 +1793,28 @@ async function renderSecurity(){
   if(uniq.length){
     const lvl = uniq.length>8 ? 'warn' : 'info';
     const shown = uniq.slice(0,24).join(', ') + (uniq.length>24 ? `, +${uniq.length-24} more` : '');
-    add('Exposed ports', lvl, `${uniq.length} bound to all interfaces — ${shown}`);
+    add('Exposed ports', lvl, `${uniq.length} bound to all interfaces · ${shown}`);
   }
 
-  // Issues first so problems are immediately visible, then a summary banner.
+  // Issues first so problems are immediately visible.
   const rank = {crit:0, warn:1, ok:2, info:3};
   items.sort((a,b)=>rank[a.level]-rank[b.level]);
   const nCrit = items.filter(i=>i.level==='crit').length;
   const nWarn = items.filter(i=>i.level==='warn').length;
-  const who = `<span class="who">on ${esc(CURRENT_HOST==='local' ? (h.os&&h.os.hostname||'this host') : CURRENT_HOST)}</span>`;
-  const sum = (nCrit||nWarn)
-    ? `<div class="secsum">${nCrit?`<span class="pill crit">✕ ${nCrit} risk${nCrit>1?'s':''}</span>`:''}`
-      + `${nWarn?`<span class="pill warn">! ${nWarn} to review</span>`:''}${who}</div>`
-    : `<div class="secsum"><span class="pill ok">✓ all clear</span>${who}</div>`;
-  el.innerHTML = sum + items.map(i=>i.html).join('');
+  const who = CURRENT_HOST==='local' ? (h.os&&h.os.hostname||'this host') : CURRENT_HOST;
+
+  // Summary uses the app's existing insight card (.ins) so it matches everywhere else.
+  let summary;
+  if(nCrit)      summary = `<div class="ins critical"><div class="ic">🛑</div><div><div class="t">${nCrit} risk${nCrit>1?'s':''} need attention</div><div class="d">on ${esc(who)}${nWarn?` · ${nWarn} more to review`:''}</div></div></div>`;
+  else if(nWarn) summary = `<div class="ins warning"><div class="ic">⚠️</div><div><div class="t">${nWarn} item${nWarn>1?'s':''} to review</div><div class="d">on ${esc(who)} — nothing critical</div></div></div>`;
+  else           summary = `<div class="ins ok"><div class="ic">✅</div><div><div class="t">All clear</div><div class="d">on ${esc(who)} — no issues found in what could be read</div></div></div>`;
+
+  const body = items.map(i =>
+    `<tr class="${i.level}"><td><span class="sdot" style="background:${SC[i.level]}"></span>${esc(i.check)}</td>
+       <td><span class="badge ${i.level}">${i.tag||SEC_TAG[i.level]}</span></td>
+       <td class="muted">${i.detail}</td></tr>`).join('');
+  el.innerHTML = summary +
+    `<table class="sectbl" style="margin-top:14px"><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function hostCapability(hostName, capId){
