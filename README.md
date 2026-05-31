@@ -6,13 +6,13 @@
 [![Unique cloners (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones-unique.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 
 [![website](https://img.shields.io/badge/docs-sikamikanikobg.github.io%2Fhomelab--monitor-d29922?logo=readthedocs&logoColor=white)](https://sikamikanikobg.github.io/homelab-monitor/)
-![version](https://img.shields.io/badge/version-0.9.1-blue)
+![version](https://img.shields.io/badge/version-0.10.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
 [![last commit](https://img.shields.io/github/last-commit/SikamikanikoBG/homelab-monitor?color=informational)](https://github.com/SikamikanikoBG/homelab-monitor/commits/main)
 
-> 🆕 **v0.9.1** — remote hosts now report the real CPU **package** temperature instead of a board/ambient sensor, fixing readings that ran 20–30 °C too low on some boxes. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
+> 🆕 **v0.10.0** — three new per-host tabs: **System** (OS, kernel, arch, virtualization, machine model, CPU/GPU), **Network** (interfaces, addresses, DNS, routes, listening sockets with exposure flags) and **Security** (firewall, SSH hardening, SELinux/AppArmor, fail2ban, reboot-pending, auto-updates — issues surfaced first). Works on every host the hub can reach — x86_64, arm64, even i686. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
 >
 > 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
 
@@ -50,8 +50,17 @@ active host:
 - **Services** — **systemd** service health for the active host (local *or*
   remote), with the units *you* deployed highlighted, any failed unit surfaced
   first, plus per-unit uptime, memory, and listen ports.
-- **Host** — CPU, RAM, load, uptime, temperature and disk usage. History is
-  local-only for now; live KPIs work for any registered host.
+- **System** — CPU, RAM, load, uptime, temperature and disk usage, **plus** a
+  full inventory panel: OS + version, kernel, **architecture**, init system,
+  bare-metal/VM detection, machine model, CPU model & topology, and GPU.
+  History is local-only for now; live KPIs + inventory work for any host.
+- **Network** — per-host interfaces (IPv4/IPv6, MAC, link state, speed, MTU,
+  RX/TX), default gateway, DNS resolvers, and a listening-socket table that
+  flags which ports are bound to **all interfaces** vs localhost.
+- **Security** — a read-only posture check per host: firewall (ufw/firewalld/
+  nftables), SSH hardening (root login / password auth), SELinux/AppArmor,
+  fail2ban, reboot-pending and auto-updates — **issues surfaced first**, with
+  anything that needs root to read marked clearly rather than guessed.
 - **Hosts** — a registry and onboarding wizard: paste the hub's public key,
   add a host, run a per-capability **Test connection** (SSH / `/proc` / Docker
   socket / systemd / `nvidia-smi`), and use **▶ Run on remote** to execute the
@@ -78,9 +87,17 @@ as quickly and reads as cleanly as the last hour.
 
 ![Services tab](docs/services.png)
 
-**Host** — CPU, RAM, load, temperature and disk usage:
+**System** — KPIs + disks, plus the OS / architecture / hardware inventory for any host:
 
-![Host tab](docs/host.png)
+![System tab](docs/system.png)
+
+**Network** — interfaces, DNS, and listening sockets with exposure flags:
+
+![Network tab](docs/network.png)
+
+**Security** — firewall, SSH hardening, MAC, fail2ban, reboot & updates — issues first:
+
+![Security tab](docs/security.png)
 
 **Hosts** — registry + onboarding wizard with the per-capability checklist:
 
@@ -114,8 +131,11 @@ hub will start polling it. No agents, no installs, just SSH + Python 3.
 
 **Where data comes from.** The hub pipes a small self-contained `probe.py`
 through SSH (`ssh user@host python3 -`). Nothing persists on the remote;
-the script reads `/proc/*`, optionally runs `nvidia-smi` and `systemctl
-list-units`, and prints one JSON blob back. The image installs
+the script reads `/proc/*`, `/sys/*` and a handful of config files (for the
+OS / hardware / network / security inventory), optionally runs `nvidia-smi`
+and `systemctl list-units`, and prints one JSON blob back. It's pure-stdlib
+Python 3.6+ and degrades field-by-field, so it runs the same on x86_64, arm64
+and i686. The image installs
 `openssh-client` and `ssh-keygen` for this — the SSH key lives under
 `./data/.ssh/` so it survives rebuilds.
 
@@ -124,9 +144,9 @@ a slow remote can never block the loop. The "Run on remote" sudo password is
 piped via stdin to the remote `sudo -S` — never appears in argv on either side
 and is never persisted to SQLite or logs.
 
-**What this slice covers vs. what's coming:** Overview, Host, and Services
-tabs work for any registered host that supports them. GPU / AI Models /
-Containers tabs are local-only for now and tell you exactly why ("cloudy has
+**What this slice covers vs. what's coming:** Overview, System, Network,
+Security and Services tabs work for any registered host that supports them.
+GPU / AI Models / Containers tabs are local-only for now and tell you exactly why ("cloudy has
 no NVIDIA GPU", "Docker not installed on cloudy", etc.) using the host's
 capability check — per-host versions land in subsequent releases. See
 [#35](https://github.com/SikamikanikoBG/homelab-monitor/issues/35) for the

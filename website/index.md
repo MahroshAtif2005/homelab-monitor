@@ -67,6 +67,13 @@ on the remote — nothing to install. [Walkthrough →](multi-host.md)
 </div>
 
 <div class="hl-feature hl-reveal delay-6" markdown>
+### <span class="ico">🛡️</span> System, Network &amp; Security
+Per host: OS, kernel, **architecture**, machine model and CPU/GPU; interfaces,
+DNS and listening sockets with exposure flags; and a read-only security posture
+check (firewall, SSH hardening, SELinux/AppArmor, fail2ban) — issues first.
+</div>
+
+<div class="hl-feature hl-reveal delay-6" markdown>
 ### <span class="ico">🔔</span> Alerts
 Discord webhook or [ntfy.sh](https://ntfy.sh). Edge-triggered: one ping per
 state change, never a spam flood. Configured from the UI.
@@ -103,9 +110,19 @@ state change, never a spam flood. Configured from the UI.
   <span class="lbl">Containers — every Docker container</span>
 </a>
 
-<a class="hl-reveal delay-6" href="screenshots/host.png" target="_blank">
-  <img src="screenshots/host.png" alt="Host tab">
-  <span class="lbl">Host — CPU / RAM / load / disks with history</span>
+<a class="hl-reveal delay-6" href="screenshots/system.png" target="_blank">
+  <img src="screenshots/system.png" alt="System tab">
+  <span class="lbl">System — OS, architecture &amp; hardware inventory</span>
+</a>
+
+<a class="hl-reveal delay-1" href="screenshots/network.png" target="_blank">
+  <img src="screenshots/network.png" alt="Network tab">
+  <span class="lbl">Network — interfaces, DNS &amp; listening sockets</span>
+</a>
+
+<a class="hl-reveal delay-2" href="screenshots/security.png" target="_blank">
+  <img src="screenshots/security.png" alt="Security tab">
+  <span class="lbl">Security — posture check, issues surfaced first</span>
 </a>
 
 </div>
