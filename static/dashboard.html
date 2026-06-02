@@ -104,6 +104,13 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .upd{display:none;align-items:center;gap:5px;font-size:12px;color:var(--info);text-decoration:none;border:1px solid #58a6ff55;border-radius:20px;padding:2px 10px;background:#58a6ff11;cursor:pointer;font:inherit}
 .upd:hover{border-color:var(--info)}
 .upd.show{display:inline-flex}
+/* OS/kernel-updates badge — amber to distinguish from the blue app-update one */
+.upd.osupd{color:var(--warn);border-color:#d2992255;background:#d2992211}
+.upd.osupd:hover{border-color:var(--warn)}
+.oslist{list-style:none;margin:8px 0 0;padding:0}
+.oslist li{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:#0d1117;margin-top:6px;font-size:13px}
+.oslist .hn{font-weight:600;color:var(--tx)}
+.oslist .meta{color:var(--mut);text-align:right}
 .umodal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:50;padding:18px}
 .umodal.show{display:flex}
 .umodal .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;max-width:640px;width:100%;max-height:84vh;display:flex;flex-direction:column}
@@ -340,6 +347,7 @@ a{color:var(--info)}
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
+<button type="button" class="upd osupd" id="osupdbadge" title="One or more machines have OS/kernel updates pending — click for details">⬆ <span id="osupdtext">updates</span></button>
 <a class="ghstar" id="ghstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener" title="Star HomeLab Monitor on GitHub">
 <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 <span id="ghlabel">Star</span> <span class="cnt" id="ghcount"></span></a>
@@ -375,11 +383,11 @@ a{color:var(--info)}
       <table class="fleet-tbl" id="fleet_tbl">
         <thead>
           <tr>
-            <th>Host</th><th>Status</th><th>OS / Arch</th><th>CPU</th><th>RAM</th><th>GPU</th>
+            <th>Host</th><th>Status</th><th>OS / Arch</th><th>Updates</th><th>CPU</th><th>RAM</th><th>GPU</th>
             <th>Load 1m</th><th>Uptime</th><th>Temp</th><th>Disks</th>
           </tr>
         </thead>
-        <tbody><tr><td colspan="10" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
+        <tbody><tr><td colspan="11" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -589,6 +597,21 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
     </div>
   </div>
 </div>
+
+<!-- ───────── OS-updates modal ───────── -->
+<div class="umodal" id="osupdmodal" role="dialog" aria-modal="true" aria-labelledby="osupdtitle">
+  <div class="box">
+    <div class="hd">
+      <strong id="osupdtitle">OS updates available</strong>
+      <button class="x" type="button" id="osupdclose" aria-label="Close">×</button>
+    </div>
+    <div class="bd">
+      <div class="muted" id="osupdsummary"></div>
+      <ul class="oslist" id="osupdlist"></ul>
+      <div class="muted" style="margin-top:12px;font-size:12px">Counts are read from each host's package manager (cached, no refresh). Click a host row in the All-hosts table to see its full Security tab.</div>
+    </div>
+  </div>
+</div>
 <script>
 // ── Tab registry. Add a monitor: append one entry here + a matching <section
 //    data-tab="..."> above + a render in renderData()/renderHealth(). ──────────
@@ -658,6 +681,7 @@ function mountShell(){
   const hb = document.getElementById('hostbar'); if(hb) tb.appendChild(hb);
   const ctr = document.getElementById('controls'); if(ctr) tb.appendChild(ctr);
   const upd = document.getElementById('updbadge'); if(upd) tb.appendChild(upd);
+  const osupd = document.getElementById('osupdbadge'); if(osupd) tb.appendChild(osupd);
   const live = document.querySelector('header .live'); if(live) tb.appendChild(live);
   const foot = document.getElementById('foot');
   const star = document.getElementById('ghstar'); if(star) foot.appendChild(star);
@@ -882,6 +906,22 @@ function renderHealth(){
     ub.classList.remove('show');
   }
 
+  // OS/kernel-updates badge — visible when any machine in the fleet is behind on
+  // packages or has a newer distro release available.
+  const osu = HH.os_updates || {};
+  const osb = document.getElementById('osupdbadge');
+  if(osb){
+    if(osu.hosts_behind > 0){
+      const sec = osu.security ? ` · ${osu.security} security` : '';
+      document.getElementById('osupdtext').textContent =
+        `${osu.hosts_behind} host${osu.hosts_behind===1?'':'s'} behind${sec}`;
+      osb.classList.add('show');
+      osb.onclick = () => openOsUpdateModal(osu);
+    } else {
+      osb.classList.remove('show');
+    }
+  }
+
   // Overview status cards used to live here too — same guard as #insights.
   const ovEl = document.getElementById('ovcards');
   if(ovEl){
@@ -993,6 +1033,29 @@ function openUpdateModal(up){
   document.getElementById('updmodal').classList.add('show');
 }
 function closeUpdateModal(){ document.getElementById('updmodal').classList.remove('show'); }
+
+// ── OS-updates modal ──────────────────────────────────────────────────────────
+function openOsUpdateModal(osu){
+  const parts = [];
+  if(osu.total_updates)  parts.push(`${osu.total_updates} package update${osu.total_updates===1?'':'s'} pending`);
+  if(osu.security)       parts.push(`${osu.security} security`);
+  if((osu.new_release||[]).length) parts.push(`${osu.new_release.length} new OS release${osu.new_release.length===1?'':'s'}`);
+  document.getElementById('osupdsummary').textContent =
+    `${osu.hosts_behind} machine${osu.hosts_behind===1?'':'s'} behind` + (parts.length ? ' — ' + parts.join(' · ') : '') + '.';
+  // The /api/health summary only carries the new-release labels per host; the
+  // per-package counts live on each host's Security tab, so we list the
+  // new-release machines here and point at the table for the rest.
+  const byHost = {};
+  (osu.new_release||[]).forEach(r => { byHost[r.host] = r.label; });
+  const names = Object.keys(byHost);
+  const list = document.getElementById('osupdlist');
+  list.innerHTML = names.length
+    ? names.map(n => `<li><span class="hn">${esc(n==='local'?'this hub':n)}</span>`
+        + `<span class="meta">⬆ ${esc(byHost[n])} available</span></li>`).join('')
+    : '<li><span class="meta">Package updates pending — open a host\'s Security tab for the per-host counts.</span></li>';
+  document.getElementById('osupdmodal').classList.add('show');
+}
+function closeOsUpdateModal(){ document.getElementById('osupdmodal').classList.remove('show'); }
 
 // ── Charts (only built for the visible tab) ───────────────────────────────────
 function buildCharts(){
@@ -1570,10 +1633,20 @@ function renderFleet(){
       ? `<span class="pct" style="font-weight:500">${esc(osname)}</span>` +
         (os.arch ? `<span class="abs">${esc(os.arch)}</span>` : '')
       : '<span class="muted">—</span>';
+    // Updates: pending package count (+ security/kernel) and any newer OS release.
+    const u = (h.sec||{}).updates, orel = (h.os_upgrade||{}).new_release, ufr = [];
+    if(u && u.count!=null){
+      if(u.count===0) ufr.push('<span class="pct" style="color:var(--ok)">✓</span><span class="abs">up to date</span>');
+      else ufr.push(`<span class="pct" style="color:${u.security?'var(--crit)':'var(--warn)'};font-weight:600">${u.count}</span>` +
+        `<span class="abs">${u.security?u.security+' sec':'pending'}${u.kernel?' · kernel':''}</span>`);
+    }
+    if(orel) ufr.push(`<span class="abs" style="color:var(--warn)">⬆ ${esc(orel.candidate)} available</span>`);
+    const updc = ufr.length ? ufr.join('') : '<span class="muted">—</span>';
     return `<tr data-h="${esc(r.name)}">
       <td class="hostcell">${esc(r.label||r.name)}<span class="sub">${esc(subline)}</span></td>
       <td><span class="status ${st}"><span class="d"></span>${st}</span>${stale}</td>
       <td>${osc}</td>
+      <td>${updc}</td>
       <td>${cpu}</td>
       <td>${ram}</td>
       <td>${gpu}</td>
@@ -1804,6 +1877,22 @@ async function renderSecurity(){
   if(au==null)                add('Auto-updates','info','unknown');
   else                        add('Auto-updates', au?'ok':'warn', au?'enabled':'disabled');
 
+  // Pending package updates (counts the host's package manager already computed —
+  // cached, no refresh). null ⇒ couldn't read; 0 ⇒ up to date; >0 ⇒ behind.
+  const upd = sec.updates;
+  if(upd==null || upd.count==null) add('Updates available','info','needs elevated read / unknown');
+  else if(upd.count===0)           add('Updates available','ok','up to date');
+  else {
+    const bits = [`${upd.count} update${upd.count===1?'':'s'} pending`];
+    if(upd.security)             bits.push(`${upd.security} security`);
+    if(upd.kernel)               bits.push('kernel update pending');
+    add('Updates available', upd.security ? 'crit' : 'warn', bits.join(' · '));
+  }
+
+  // Newer OS release (hub-side check via endoflife.date; attached to the host block).
+  const nr = (currentHostBlock().os_upgrade||{}).new_release;
+  if(nr) add('New OS release','warn', `${esc(nr.label)} available — you're on ${esc(nr.current)}`);
+
   // Exposed ports (derived from the network listen list)
   const uniq = [...new Set(((currentHostBlock().net||{}).listen||[]).filter(s=>s.exposed).map(s=>s.port))].sort((a,b)=>a-b);
   if(uniq.length){
@@ -1944,7 +2033,9 @@ document.getElementById('pubkey_show_cmd').onclick = () => {
 // Update modal: close via × button, Escape, or backdrop click; copy command to clipboard.
 document.getElementById('updclose').onclick = closeUpdateModal;
 document.getElementById('updmodal').addEventListener('click', e => { if(e.target.id==='updmodal') closeUpdateModal(); });
-document.addEventListener('keydown', e => { if(e.key==='Escape') closeUpdateModal(); });
+document.getElementById('osupdclose').onclick = closeOsUpdateModal;
+document.getElementById('osupdmodal').addEventListener('click', e => { if(e.target.id==='osupdmodal') closeOsUpdateModal(); });
+document.addEventListener('keydown', e => { if(e.key==='Escape'){ closeUpdateModal(); closeOsUpdateModal(); } });
 document.getElementById('updcopy').onclick = async () => {
   const b = document.getElementById('updcopy'), t = b.textContent;
   const ok = await copyText(document.getElementById('updcmd').textContent);
