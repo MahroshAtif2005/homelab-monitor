@@ -76,16 +76,72 @@ def read_cpu():
         return {}
 
 
-def read_temp():
-    """Hottest plausible CPU temp from /sys/class/thermal. Coarse, but matches
-    what the hub itself reports for its own box (app.py takes the max zone too).
+# hwmon drivers that expose the actual CPU die/core sensors (Intel/AMD/ARM).
+_CPU_HWMON = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal")
+# thermal_zone *types* that are the CPU (never acpitz/pch/nvme/wifi).
+_CPU_ZONE  = ("x86_pkg_temp", "cpu_thermal", "cpu-thermal")
 
-    Taking the *max* — not the first zone — matters on boxes that expose an
-    `acpitz` board/ambient sensor alongside the real `x86_pkg_temp`/`coretemp`
-    die sensor. `acpitz` sorts first (thermal_zone0) and reads ~ambient, so the
-    old first-match logic under-reported the CPU by 20-30 °C (e.g. a Celeron
-    reading 28 °C off acpitz while its package sat at 59 °C)."""
+def _cpu_temp_c():
+    """CPU temperature in °C that matches what `sensors` shows for the CPU cores.
+
+    The old logic took the max of *every* /sys/class/thermal zone, which on many
+    boards grabs a chipset/PCH/NVMe or an mis-calibrated package sensor reading
+    10-20 °C hotter than the cores — so the dashboard showed e.g. 51 °C while
+    `sensors` showed Core N at 37 °C. We now prefer the coretemp/k10temp hwmon and
+    report the hottest *core*; then a CPU-typed thermal zone; and only as a last
+    resort the old hottest-plausible-zone (so exotic/ARM boards still report)."""
     best = None
+    # 1) hwmon coretemp/k10temp/zenpower — the real die/core sensors.
+    try:
+        for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+            try:
+                name = open(hw + "/name").read().strip()
+            except Exception:
+                continue
+            if name not in _CPU_HWMON:
+                continue
+            cores, allt = [], []
+            for inp in glob.glob(hw + "/temp*_input"):
+                try:
+                    t = int(open(inp).read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if not (0 < t < 130):
+                    continue
+                allt.append(t)
+                try:
+                    lbl = open(inp[:-6] + "_label").read().strip().lower()
+                except Exception:
+                    lbl = ""
+                if lbl.startswith("core"):          # Intel "Core N" — exclude Package
+                    cores.append(t)
+            pick = max(cores) if cores else (max(allt) if allt else None)
+            if pick is not None and (best is None or pick > best):
+                best = pick
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    # 2) thermal zones explicitly typed as the CPU.
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                ztype = open(z + "/type").read().strip().lower()
+            except Exception:
+                continue
+            if ztype in _CPU_ZONE or "cpu" in ztype:
+                try:
+                    t = int(open(z + "/temp").read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if 0 < t < 130 and (best is None or t > best):
+                    best = t
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    # 3) last resort: hottest plausible zone (original behaviour) so we still
+    #    report *something* on boards without coretemp or a CPU-typed zone.
     try:
         for z in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
             try:
@@ -96,7 +152,12 @@ def read_temp():
                 continue
     except Exception:
         pass
-    return {"ctemp": round(best, 1)} if best is not None else {}
+    return round(best, 1) if best is not None else None
+
+
+def read_temp():
+    t = _cpu_temp_c()
+    return {"ctemp": t} if t is not None else {}
 
 
 def read_disks():
