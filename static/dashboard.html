@@ -977,6 +977,10 @@ function renderHealth(){
   const gpuPresent = !!(HH.now && HH.now.gpu && HH.now.gpu.available);
   ['gpu','models'].forEach(id=>document.querySelectorAll(`[data-t="${id}"]`)
     .forEach(el=>{ el.style.display = gpuPresent ? '' : 'none'; }));
+  // If we landed on a GPU-only tab (persisted hl_tab / #gpu) on a GPU-less host,
+  // its nav button is now hidden but the section still shows zeroed panels —
+  // redirect to Overview so the user isn't stranded on a dead tab.
+  if(!gpuPresent && (TAB==='gpu' || TAB==='models')) showTab('overview');
 
   // Overview status cards used to live here too — same guard as #insights.
   const ovEl = document.getElementById('ovcards');
