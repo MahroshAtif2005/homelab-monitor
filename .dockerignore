@@ -1,0 +1,9 @@
+# Keep the build context tiny and avoid stat-ing runtime/data dirs that may be
+# root-owned (e.g. a dev bind-mount's ./data-dev), which breaks `docker build`.
+.git
+__pycache__/
+*.pyc
+data/
+data-dev/
+*.bak
+docker-compose*.yml

@@ -41,6 +41,11 @@ HOST_ROOT    = os.environ.get("HOST_ROOT", "/rootfs")          # host / mounted 
 PORT         = int(os.environ.get("PORT", "9800"))
 PRESSURE_MB  = int(os.environ.get("PRESSURE_FREE_MB", "2048"))
 CHECK_UPDATES = os.environ.get("CHECK_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
+# Per-host "a newer OS release exists" check. The probe reads pending *package*
+# updates offline; detecting a whole new distro release needs the network, so the
+# hub does it centrally (endoflife.date). Air-gapped users can switch off just
+# this network lookup and keep the offline package counts.
+CHECK_OS_UPDATES = os.environ.get("CHECK_OS_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
 UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
 # Split cache: once we know there's an update, the answer won't change for hours
 # so we can cache it long. But "no update found" / network errors should expire
@@ -856,6 +861,30 @@ def _auto_updates_local():
             return m.group(1) != "0"
     return None
 
+def _updates_local():
+    """Pending updates for the hub's own host. We only trust the pre-rendered
+    update-notifier file (read through HOST_ROOT) — running a package manager
+    here would query the *container*, not the host, so on non-apt hosts (or
+    without the file) we return None and the UI shows 'needs elevated read'. The
+    hub's network-side new-release check still works from os.version_id."""
+    txt = _rt(_hp("/var/lib/update-notifier/updates-available"))
+    if not txt:
+        return None
+    out = {"count": None, "security": None, "kernel": None,
+           "source": "apt", "checked": "cached"}
+    # Same line-by-line parse as the probe: the security line gives the security
+    # count, the first other count-bearing line gives the total (wording varies).
+    for line in txt.splitlines():
+        m = re.search(r"(\d+)", line)
+        if not m:
+            continue
+        n, low = int(m.group(1)), line.lower()
+        if "securit" in low:
+            out["security"] = n
+        elif out["count"] is None and ("update" in low or "package" in low or "can be" in low):
+            out["count"] = n
+    return out
+
 def _local_sec():
     return {
         "firewall":        _local_firewall(),
@@ -865,6 +894,7 @@ def _local_sec():
         "fail2ban":        _fail2ban_local(),
         "reboot_required": _reboot_local(),
         "auto_updates":    _auto_updates_local(),
+        "updates":         _updates_local(),
     }
 
 # ── Health monitors: Docker containers + systemd services ──────────────────────
@@ -1391,10 +1421,160 @@ def collect_update():
         _UPDATE_CACHE.update({"at": now, "data": data})
     return data
 
+# ── Newer-OS-release check (endoflife.date) ───────────────────────────────────
+# The probe reports each host's pending *package* updates offline. Detecting that
+# a whole new distro release exists needs to know the latest upstream version, so
+# the hub fetches it once per distro from endoflife.date and caches it (same split
+# TTL as the app-update check). os_upgrade_for() then compares a host's
+# version_id against the newest cycle — pure cache read, no network at serve time.
+# Degrades silently on any error so an offline hub never lights up the UI red.
+
+# os-release ID → endoflife.date product slug. Rolling distros (arch, gentoo,
+# nixos, tumbleweed, void) have no fixed release to be "behind" → intentionally
+# absent so they're skipped.
+# Verified against endoflife.date's /api/<slug>.json (slugs are not always the
+# obvious os-release ID — Leap is "opensuse", Rocky is "rocky-linux").
+_EOL_SLUG = {
+    "ubuntu": "ubuntu", "pop": "ubuntu", "neon": "ubuntu", "elementary": "ubuntu",
+    "debian": "debian", "raspbian": "debian",
+    "linuxmint": "linuxmint",
+    "opensuse-leap": "opensuse", "opensuse": "opensuse", "sles": "sles",
+    "fedora": "fedora",
+    "almalinux": "almalinux", "rocky": "rocky-linux", "rhel": "rhel",
+    "centos": "centos",
+    "amzn": "amazon-linux", "alpine": "alpine",
+}
+_DISTRO_NAME = {
+    "ubuntu": "Ubuntu", "debian": "Debian", "linuxmint": "Linux Mint",
+    "opensuse": "openSUSE Leap", "sles": "SLES", "fedora": "Fedora",
+    "almalinux": "AlmaLinux", "rocky-linux": "Rocky Linux", "rhel": "RHEL",
+    "centos": "CentOS", "amazon-linux": "Amazon Linux", "alpine": "Alpine",
+}
+_OS_REL_CACHE = {}        # slug -> {"at": ts, "cycles": [str, ...] | None}
+_OS_REL_LOCK  = threading.Lock()
+
+def _fetch_eol_cycles(slug):
+    """Fetch the list of release cycles for one distro from endoflife.date.
+    Returns a list of cycle strings (e.g. ['15.6','15.5',...]) or None on error."""
+    try:
+        req = urllib.request.Request(
+            f"https://endoflife.date/api/{slug}.json",
+            headers={"Accept": "application/json",
+                     "User-Agent": f"homelab-monitor/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            payload = json.loads(r.read())
+        return [str(c.get("cycle")) for c in payload if c.get("cycle") is not None]
+    except Exception:
+        return None
+
+def collect_os_releases():
+    """Refresh the endoflife cache for every distro present in the fleet. Cheap:
+    only fetches slugs whose cache entry is stale, and only ones we actually have
+    a host for. Called from health_scan(); never raises out."""
+    if not CHECK_OS_UPDATES:
+        return
+    slugs = set()
+    for _name, host in _iter_fleet_hosts():
+        osid = ((host or {}).get("os") or {}).get("id")
+        slug = _EOL_SLUG.get((osid or "").lower())
+        if slug:
+            slugs.add(slug)
+    now = int(time.time())
+    for slug in slugs:
+        with _OS_REL_LOCK:
+            ent = _OS_REL_CACHE.get(slug)
+            if ent:
+                ttl = UPDATE_TTL_POSITIVE if ent.get("cycles") else UPDATE_TTL_NEGATIVE
+                if (now - ent["at"]) < ttl:
+                    continue
+        cycles = _fetch_eol_cycles(slug)
+        with _OS_REL_LOCK:
+            _OS_REL_CACHE[slug] = {"at": now, "cycles": cycles}
+
+def os_upgrade_for(os_id, version_id):
+    """Compare a host's distro version against the newest known cycle (cache only,
+    no network). Returns {"new_release": {current, candidate, label}} when a newer
+    release exists, else None.
+
+    endoflife.date returns cycles newest-first, so we locate the host's own cycle
+    in that list and flag it behind only when newer cycles sit before it. We rely
+    on list order rather than numeric comparison because some distros renumber
+    (openSUSE Leap went 42.x → 15.x), which would fool a plain version compare."""
+    if not CHECK_OS_UPDATES or not os_id or not version_id:
+        return None
+    slug = _EOL_SLUG.get(os_id.lower())
+    if not slug:
+        return None
+    with _OS_REL_LOCK:
+        ent = _OS_REL_CACHE.get(slug)
+    cycles = (ent or {}).get("cycles")
+    if not cycles:
+        return None
+    try:
+        idx = None
+        if version_id in cycles:
+            idx = cycles.index(version_id)
+        else:                                   # host "12.5" → match cycle "12"
+            major = version_id.split(".")[0]
+            if major in cycles:
+                idx = cycles.index(major)
+        if idx is not None and idx > 0:         # newer cycles listed before it
+            candidate = cycles[0]
+            name = _DISTRO_NAME.get(slug, slug)
+            return {"new_release": {"current": version_id, "candidate": candidate,
+                                    "label": f"{name} {candidate}"}}
+    except Exception:
+        return None
+    return None
+
+def enrich_os_upgrade(host):
+    """Attach (or clear) host['os_upgrade'] from the cached endoflife data. We
+    mutate the dict in place — and it's a shared cached snapshot — so we must also
+    drop a stale key once a host is no longer behind. Returns the same dict."""
+    if host is not None:
+        os_ = host.get("os") or {}
+        up = os_upgrade_for(os_.get("id"), os_.get("version_id"))
+        if up:
+            host["os_upgrade"] = up
+        else:
+            host.pop("os_upgrade", None)
+    return host
+
+def _iter_fleet_hosts():
+    """Yield (name, host_block) for the hub itself plus every remote with data.
+    Used by both the endoflife refresh and the /api/health fleet update summary."""
+    yield "local", _local_now_snapshot()
+    with HOST_DATA_LOCK:
+        items = list(HOST_DATA.items())
+    for name, entry in items:
+        host = (entry.get("data") or {}).get("host")
+        if host:
+            yield name, host
+
+def os_updates_summary():
+    """Fleet-wide roll-up that drives the header badge: how many hosts are behind,
+    total pending updates, security count, and which hosts have a newer release."""
+    hosts_behind = total = security = 0
+    new_release = []
+    for name, host in _iter_fleet_hosts():
+        upd = ((host or {}).get("sec") or {}).get("updates") or {}
+        cnt = upd.get("count") or 0
+        sec = upd.get("security") or 0
+        rel = (enrich_os_upgrade(host) or {}).get("os_upgrade", {}).get("new_release")
+        total += cnt
+        security += sec
+        if cnt > 0 or rel:
+            hosts_behind += 1
+        if rel:
+            new_release.append({"host": name, "label": rel.get("label")})
+    return {"hosts_behind": hosts_behind, "total_updates": total,
+            "security": security, "new_release": new_release}
+
 def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
+    collect_os_releases()
     HEALTH["at"]      = int(time.time())
 
 # ── Settings (UI-managed; persisted in SQLite, no env required) ───────────────
@@ -2582,7 +2762,7 @@ def api_health():
     now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
                    "mem_total": LATEST["mem_total"] or 24576, "power": LATEST["power"],
                    "temp": LATEST["temp"]},
-           "host": LATEST["host"]}
+           "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
     systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
@@ -2590,6 +2770,7 @@ def api_health():
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
+                    "os_updates": os_updates_summary(),
                     "overview": build_overview(now, docker, systemd)})
 
 @app.route("/metrics")
@@ -2698,7 +2879,7 @@ def api_host_data(name):
     """Per-host metric snapshot. `local` is the hub itself; remotes are served
     from the in-memory cache populated by host_poller()."""
     if name == "local":
-        return jsonify({"name": "local", "host": _local_now_snapshot(),
+        return jsonify({"name": "local", "host": enrich_os_upgrade(_local_now_snapshot()),
                         "at": int(time.time()), "online": True})
     with HOST_DATA_LOCK:
         entry = HOST_DATA.get(name)
@@ -2710,7 +2891,7 @@ def api_host_data(name):
                         "at": (entry or {}).get("at"),
                         "host": None})
     age = int(time.time()) - int(entry["at"])
-    return jsonify({"name": name, "host": entry["data"].get("host", {}),
+    return jsonify({"name": name, "host": enrich_os_upgrade(entry["data"].get("host", {})),
                     "at": entry["at"], "online": age < INTERVAL * 3,
                     "stale_for": age if age >= INTERVAL * 3 else 0,
                     "error": entry.get("error")})
@@ -2725,7 +2906,7 @@ def api_fleet():
 
     # Local row
     rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
-                 "ssh_target": None, "host": _local_now_snapshot(),
+                 "ssh_target": None, "host": enrich_os_upgrade(_local_now_snapshot()),
                  "at": int(time.time()), "online": True, "is_local": True,
                  "last_check": {"summary": {"overall": "ok"}}})
 
@@ -2739,7 +2920,7 @@ def api_fleet():
                 "name": h["name"],
                 "label": h["name"],
                 "ssh_target": h["ssh_target"],
-                "host": data.get("host") if data else None,
+                "host": enrich_os_upgrade(data.get("host")) if data else None,
                 "at": at,
                 "online": online,
                 "is_local": False,
