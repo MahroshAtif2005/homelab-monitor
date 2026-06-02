@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.11.0"
+VERSION      = "0.12.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -215,6 +215,63 @@ def probe_a1111(ip):
     m = (_http_json(ip, 7860, "/sdapi/v1/options") or {}).get("sd_model_checkpoint")
     return [(m, None)] if m else []
 
+def probe_whisper_asr(ip):
+    """ahmetoner/whisper-asr-webservice (Whisper / WhisperX / faster-whisper
+    engines). It has no model-list endpoint — just `/asr` — so we confirm it's up
+    via `/openapi.json` and show one Idle entry; its GPU VRAM (nvidia-smi)
+    attributes to it while it's transcribing. If something else answers here with
+    the OpenAI shape, fall back to listing its models so we don't hide it."""
+    for port in (9000, 8000):
+        info = (_http_json(ip, port, "/openapi.json") or {}).get("info") or {}
+        if "whisper" in (info.get("title", "") + " " + info.get("description", "")).lower():
+            return [("Whisper ASR webservice", None)]
+    return _openai_models(9000, 8000, 8080)(ip)
+
+def probe_triton(ip):
+    """NVIDIA Triton Inference Server: `GET /v2` returns server metadata. The live
+    model list is a POST (/v2/repository/index), so we show a single Idle entry
+    and let nvidia-smi VRAM attribute to it."""
+    d = _http_json(ip, 8000, "/v2")
+    if d and "triton" in (d.get("name", "") or "").lower():
+        return [("Triton Inference Server", None)]
+    return []
+
+def probe_wyoming(ip):
+    """Wyoming-protocol voice services (Home Assistant: wyoming-faster-whisper /
+    -whisper ASR, -piper TTS, -openwakeword). Plain TCP + JSONL, not HTTP: send a
+    `describe` event and read the `info` reply for the program/model names."""
+    for port in (10300, 10200, 10400, 10500, 10700):
+        try:
+            with socket.create_connection((ip, port), timeout=2) as sk:
+                sk.settimeout(2)
+                sk.sendall(b'{"type": "describe"}\n')
+                buf = b""
+                while b"\n" not in buf and len(buf) < 65536:
+                    chunk = sk.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                header, _, rest = buf.partition(b"\n")
+                evt = json.loads(header.decode("utf-8", "replace") or "{}")
+                if evt.get("type") != "info":
+                    continue
+                need = evt.get("data_length") or 0
+                while len(rest) < need:
+                    chunk = sk.recv(4096)
+                    if not chunk:
+                        break
+                    rest += chunk
+                data = json.loads(rest[:need].decode("utf-8", "replace")) if need else {}
+        except Exception:
+            continue
+        names = []
+        for grp in ("asr", "tts", "wake", "handle", "intent"):
+            for prog in (data.get(grp) or []):
+                got = [m.get("name") for m in (prog.get("models") or []) if m.get("name")]
+                names += got or ([prog["name"]] if prog.get("name") else [])
+        return [(n, None) for n in names] or [("Wyoming service", None)]
+    return []
+
 def probe_comfy(ip):
     """ComfyUI: list installed checkpoints from /object_info (real model names). It has no
     'currently loaded' concept, so checkpoints show Idle and the server's GPU VRAM
@@ -236,9 +293,18 @@ PROBES = [
     ("vllm",                       _openai_models(8000)),
     ("text-generation-inference",  probe_tgi),
     ("text-embeddings-inference",  probe_tgi),
+    ("lorax",                      probe_tgi),
+    # ASR / speech — keep the specific whisper-asr-webservice + WhisperX keys ahead
+    # of the generic "whisper" so they don't fall through to the OpenAI probe.
+    ("whisper-asr-webservice",     probe_whisper_asr),
+    ("asr-webservice",             probe_whisper_asr),
+    ("whisperx",                   probe_whisper_asr),
+    ("whisper-asr",                probe_whisper_asr),
     ("faster-whisper",             _openai_models(8000)),
     ("speaches",                   _openai_models(8000)),
     ("whisper",                    _openai_models(8000, 9000)),
+    ("wyoming",                    probe_wyoming),
+    ("openedai-speech",            _openai_models(8000)),
     ("localai",                    _openai_models(8080)),
     ("local-ai",                   _openai_models(8080)),
     ("llama.cpp",                  _openai_models(8080, 8000)),
@@ -256,6 +322,15 @@ PROBES = [
     ("xorbits",                    _openai_models(9997)),
     ("aphrodite",                  _openai_models(2242)),
     ("mistral-rs",                 _openai_models(1234, 8080)),
+    ("sglang",                     _openai_models(30000, 8000)),
+    ("ramalama",                   _openai_models(8080, 8000)),
+    ("nexa",                       _openai_models(8000)),
+    ("openllm",                    _openai_models(3000, 8000)),
+    ("litellm",                    _openai_models(4000)),
+    ("gpustack",                   _openai_models(80, 8080)),
+    ("cortex",                     _openai_models(39281, 1337)),
+    ("janhq",                      _openai_models(1337)),
+    ("triton",                     probe_triton),
     ("infinity",                   _openai_models(7997)),
     ("invokeai",                   probe_invokeai),
     ("invoke-ai",                  probe_invokeai),
@@ -801,10 +876,19 @@ _DOCKER_HEALTH = re.compile(r"\((healthy|unhealthy|health: starting)\)")
 # inspect calls just for StartedAt.
 _DOCKER_UP_DUR = re.compile(r"^Up\s+(.+?)(?:\s*\(.*\))?$", re.I)
 _DUR_UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
-# Heavy enrichment (per-container `stats` + Docker layer-size scan) is too costly
-# to hit on every 10 s health_scan, so we keep a separate 30 s cache for it.
+# Heavy enrichment (per-container `stats`) is too costly to hit on every 10 s
+# health_scan, so we keep a separate 30 s cache for it.
 _DOCKER_ENRICH_TTL = 30
 _docker_enrich = {"data": {}, "at": 0}
+# Real disk footprint (writable layer + volumes + bind mounts) needs a `du` over
+# host paths via HOST_ROOT — far heavier than the rest, and disk barely moves
+# minute-to-minute, so it gets a much longer TTL and runs in its own thread so it
+# never stalls the health-scan loop. A cold `du` of a huge media library on a
+# spinning disk can take minutes; once the kernel has cached the metadata the
+# same scan is seconds, so we allow a generous per-mount timeout and keep the
+# last known value when a scan overruns it.
+_DOCKER_DISK_TTL = 1800
+_docker_disk = {"data": {}, "at": 0, "busy": False}
 
 def _docker_status(state, status):
     """Map a Docker container's state/status string to a (level, label) pair."""
@@ -863,21 +947,120 @@ def _container_stats(cid):
     return max(0, (mem or 0) - cache) if mem is not None else None
 
 def _refresh_docker_enrich(running_ids):
-    """Pull SizeRw (one Docker call with size=1) + memory (per-container, in
-    parallel). Cached for _DOCKER_ENRICH_TTL seconds — heavy enough that we
-    don't want it on the 10 s health-scan path."""
+    """Per-running-container memory snapshot (parallel). Cached for
+    _DOCKER_ENRICH_TTL seconds. Disk is measured separately (see
+    _refresh_docker_disk) because a `du` over volumes is far heavier."""
     out = {}
-    try:
-        sized = json.loads(_docker("/containers/json?all=1&size=1"))
-        for ct in sized:
-            out[ct["Id"][:12]] = {"disk_bytes": ct.get("SizeRw") or 0}
-    except Exception:
-        pass
     if running_ids:
         with ThreadPoolExecutor(max_workers=min(8, len(running_ids))) as ex:
             for cid, mem in zip(running_ids, ex.map(_container_stats, running_ids)):
                 out.setdefault(cid, {})["mem_bytes"] = mem
     return out
+
+def _dir_size(host_path, timeout=120):
+    """Apparent size (bytes) of a host path, read through the read-only HOST_ROOT
+    bind mount — i.e. `du -sb` as the host would see it. Returns None when the
+    path is unreachable or `du` overruns `timeout` (a cold scan of a huge media
+    library on spinning rust can run for minutes; the caller keeps the previous
+    value on a None so the figure degrades to "stale" rather than "wrong")."""
+    base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    path = (base + host_path) if base else host_path
+    try:
+        r = subprocess.run(["du", "-sb", "--", path],
+                           capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    try:
+        return int((r.stdout or "").split("\t", 1)[0].strip())
+    except ValueError:
+        return None   # du errored (missing path / no access): stdout has no count
+
+def _container_disk(ct, prev=None, shared=frozenset()):
+    """A container's real on-disk footprint: writable layer (SizeRw) + every
+    read-write volume and bind mount it owns. Read-only mounts (configs, the
+    docker socket, our own /rootfs) aren't this container's data, so they're
+    skipped, and so are sources in `shared` — a bind/volume mounted by more than
+    one container (e.g. a common /srv/share) belongs to none of them, and counting
+    it under each both double-counts and makes unrelated rows show the same huge
+    number. Falls back toward SizeRw alone when host paths can't be measured —
+    e.g. HOST_ROOT not mounted — which is the old behaviour.
+
+    `prev` is this container's last computed total: if a mount's `du` overruns
+    its timeout we keep the larger of (partial new total, prev) so a transient
+    slow scan never makes the number shrink or blink to zero."""
+    total = ct.get("SizeRw") or 0
+    incomplete = False
+    for m in (ct.get("Mounts") or []):
+        if not m.get("RW") or m.get("Type") not in ("volume", "bind"):
+            continue
+        src = m.get("Source")
+        if not src or not src.startswith("/") or src in shared:
+            continue
+        sz = _dir_size(src)
+        if sz is None:
+            incomplete = True
+        else:
+            total += sz
+    if incomplete and prev is not None:
+        return max(total, prev)
+    return total
+
+def _shared_mount_sources(sized):
+    """Sources (volume/bind) mounted read-write by more than one container — i.e.
+    shared infrastructure that shouldn't be attributed to any single container."""
+    users = {}
+    for ct in sized:
+        seen = set()
+        for m in (ct.get("Mounts") or []):
+            if m.get("RW") and m.get("Type") in ("volume", "bind"):
+                src = m.get("Source")
+                if src and src not in seen:        # a container mounting it twice still counts once
+                    seen.add(src)
+                    users[src] = users.get(src, 0) + 1
+    return frozenset(src for src, n in users.items() if n > 1)
+
+def _refresh_docker_disk():
+    """Measure every container's footprint (running or stopped — stopped
+    containers' volumes still occupy disk) and publish results incrementally, so
+    fast volume scans (e.g. Ollama) appear right away instead of waiting on one
+    container's slow cold `du` (e.g. a 300 GB photo library). One `?size=1` call
+    yields SizeRw + the Mounts list per container; the `du`s run in parallel and
+    each writes into the live dict as it lands. Seeded from the previous results
+    so a periodic rescan never blanks the table."""
+    try:
+        sized = json.loads(_docker("/containers/json?all=1&size=1"))
+    except Exception:
+        return
+    prev = dict(_docker_disk.get("data") or {})
+    fresh = dict(prev)                 # readers keep seeing old values until each is refreshed
+    _docker_disk["data"] = fresh
+    if not sized:
+        fresh.clear()
+        return
+    shared = _shared_mount_sources(sized)
+    def measure(ct):
+        cid = ct["Id"][:12]
+        fresh[cid] = _container_disk(ct, prev.get(cid), shared)
+    with ThreadPoolExecutor(max_workers=min(8, len(sized))) as ex:
+        list(ex.map(measure, sized))
+    live = {ct["Id"][:12] for ct in sized}
+    for cid in [k for k in fresh if k not in live]:
+        del fresh[cid]                 # drop containers that no longer exist
+
+def _maybe_refresh_docker_disk():
+    """Kick a disk refresh in the background when the cache is stale. Never
+    blocks the caller (health_scan): a slow `du` would otherwise hold up Docker +
+    systemd + update collection for everyone."""
+    if _docker_disk["busy"] or time.time() - _docker_disk["at"] <= _DOCKER_DISK_TTL:
+        return
+    _docker_disk["busy"] = True
+    def run():
+        try:
+            _refresh_docker_disk()        # publishes into _docker_disk["data"] as it goes
+            _docker_disk["at"] = time.time()
+        finally:
+            _docker_disk["busy"] = False
+    threading.Thread(target=run, daemon=True).start()
 
 def collect_docker():
     try:
@@ -902,10 +1085,11 @@ def collect_docker():
         running_ids = [c["id"] for c in items if c["state"] == "running"]
         _docker_enrich["data"] = _refresh_docker_enrich(running_ids)
         _docker_enrich["at"] = time.time()
+    _maybe_refresh_docker_disk()   # background; first pass leaves disk_bytes None until it lands
     for c in items:
         e = _docker_enrich["data"].get(c["id"]) or {}
         c["mem_bytes"]  = e.get("mem_bytes")
-        c["disk_bytes"] = e.get("disk_bytes")
+        c["disk_bytes"] = _docker_disk["data"].get(c["id"])
     rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
     items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
     return {"available": True, "containers": items,
