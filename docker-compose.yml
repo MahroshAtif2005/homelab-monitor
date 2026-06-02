@@ -21,6 +21,14 @@ services:
     security_opt:
       - apparmor=unconfined
     environment:
+      # GPU is auto-detected, never required. These env vars let the NVIDIA
+      # container runtime inject nvidia-smi *when it's present*; on a host with no
+      # GPU (or no nvidia runtime) they're simply inert and the dashboard runs
+      # without the GPU panels. This is why there's no hard `deploy.devices`
+      # reservation below — that would refuse to start on a GPU-less host. If you
+      # have a GPU but the dashboard's Setup tab says it isn't detected, run:
+      #   sudo nvidia-ctk runtime configure --runtime=docker --set-as-default
+      #   sudo systemctl restart docker
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility   # injects nvidia-smi into the container
       PORT: "9800"                          # dashboard served on 0.0.0.0:9800 (LAN/VPN reachable)
@@ -39,10 +47,7 @@ services:
       # systemd service health (optional): expose the host's D-Bus system socket
       # read-only. Remove this line and the Services panel just shows "unavailable".
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # NOTE: intentionally no `deploy.resources.reservations.devices: nvidia` here.
+    # A hard GPU reservation makes `docker compose up` fail on any host without the
+    # NVIDIA runtime — the monitor is useful without a GPU, so we let it start
+    # everywhere and auto-use the GPU via the NVIDIA_* env vars above when present.

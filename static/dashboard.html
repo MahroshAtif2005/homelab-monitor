@@ -111,6 +111,14 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .oslist li{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:#0d1117;margin-top:6px;font-size:13px}
 .oslist .hn{font-weight:600;color:var(--tx)}
 .oslist .meta{color:var(--mut);text-align:right}
+/* Setup/requirements: degraded banner + per-check remedy command */
+.diagbanner{margin:0 0 12px;padding:9px 12px;border:1px solid var(--warn);background:#d2992218;color:var(--tx);border-radius:8px;font-size:13px;display:flex;align-items:center;gap:10px}
+.diagbanner a{color:var(--info);text-decoration:none;font-weight:600}
+.diagbanner .x{margin-left:auto;background:none;border:0;color:var(--mut);font-size:18px;cursor:pointer;line-height:1;padding:0 2px}
+.diagbanner .x:hover{color:var(--tx)}
+.diagrem{margin-top:6px}
+.diagrem .where{color:var(--mut);font-size:12px}
+.diagrem pre{background:#0d1117;border:1px solid var(--bd);border-radius:6px;padding:7px 9px;margin:4px 0 0;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx);font-family:ui-monospace,Menlo,Consolas,monospace}
 .umodal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:50;padding:18px}
 .umodal.show{display:flex}
 .umodal .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;max-width:640px;width:100%;max-height:84vh;display:flex;flex-direction:column}
@@ -374,8 +382,18 @@ a{color:var(--info)}
 <span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
 </div></div>
 
+<!-- Degraded-setup banner: shown on any tab when a requirement isn't met. -->
+<div class="diagbanner" id="diagbanner" hidden></div>
+
 <!-- ───────── Overview = All hosts (fleet table) ───────── -->
 <section data-tab="overview">
+  <div class="card" id="diagcard" hidden>
+    <h2>🩺 Setup &amp; requirements</h2>
+    <div class="fleet-meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
+    <div style="overflow-x:auto">
+      <table class="sectbl" style="margin-top:10px"><thead><tr><th>Requirement</th><th>Status</th><th>Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
+    </div>
+  </div>
   <div class="card">
     <h2>🛰️ All hosts</h2>
     <div class="fleet-meta" id="fleet_meta">Every registered host at a glance. Click a row to focus that host in the other tabs.</div>
@@ -636,6 +654,7 @@ let LAST_MONITOR_TAB = localStorage.getItem('hl_montab') || 'overview';
 if(!TABS.some(t=>t.id===LAST_MONITOR_TAB && !t.settings)) LAST_MONITOR_TAB='overview';
 let SETTINGS_OPEN = false;
 let charts = {}, D = null, HH = null;
+let DIAG_DISMISSED = false;   // user dismissed the degraded-setup banner this session
 
 // Multi-machine state. CURRENT_HOST is the active host context for per-host
 // tabs (GPU/Containers/Services/Host). The Overview tab is fleet-wide and
@@ -921,6 +940,43 @@ function renderHealth(){
       osb.classList.remove('show');
     }
   }
+
+  // Setup/requirements checklist + degraded banner. The dashboard runs even when
+  // pieces are missing; this is how the user finds out what's limited and how to fix it.
+  const diag = HH.diagnostics || {}, checks = diag.checks || [];
+  const dbody = document.getElementById('diagbody'), dcard = document.getElementById('diagcard');
+  if(dbody && checks.length){
+    dbody.innerHTML = checks.map(c=>{
+      const r = c.remedy;
+      const rem = r ? `<div class="diagrem">${r.where?`<div class="where">${esc(r.where)}</div>`:''}`
+                      + `<pre>${esc(r.cmd||'')}</pre></div>` : '';
+      return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.label)}</td>`
+        + `<td><span class="badge ${c.status}">${SEC_TAG[c.status]||esc(c.status)}</span></td>`
+        + `<td class="muted">${esc(c.detail||'')}${rem}</td></tr>`;
+    }).join('');
+    if(dcard) dcard.hidden = false;
+  }
+  const overall = (diag.summary||{}).overall;
+  const banner = document.getElementById('diagbanner');
+  if(banner){
+    const bad = checks.filter(c=>c.status==='warn'||c.status==='fail');
+    if((overall==='warn'||overall==='fail') && bad.length && !DIAG_DISMISSED){
+      banner.innerHTML = `⚠️ ${bad.length} setup item${bad.length>1?'s':''} need attention — some features are limited. `
+        + `<a href="#" id="diaggo">See Setup &amp; requirements</a><button class="x" id="diagx" title="Dismiss">×</button>`;
+      banner.hidden = false;
+      document.getElementById('diaggo').onclick = e=>{e.preventDefault(); showTab('overview');
+        const dc=document.getElementById('diagcard'); if(dc) dc.scrollIntoView({behavior:'smooth'});};
+      document.getElementById('diagx').onclick = ()=>{ DIAG_DISMISSED=true; banner.hidden=true; };
+    } else {
+      banner.hidden = true;
+    }
+  }
+
+  // Hide GPU-specific tabs when the hub has no GPU, so a GPU-less box doesn't show
+  // empty "0% VRAM" panels. (GPU is hub-local; remotes keep their own scope.)
+  const gpuPresent = !!(HH.now && HH.now.gpu && HH.now.gpu.available);
+  ['gpu','models'].forEach(id=>document.querySelectorAll(`[data-t="${id}"]`)
+    .forEach(el=>{ el.style.display = gpuPresent ? '' : 'none'; }));
 
   // Overview status cards used to live here too — same guard as #insights.
   const ovEl = document.getElementById('ovcards');

@@ -85,8 +85,20 @@ if _PROM_OK:
         "model_vram":        Gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
     }
 LOCK = threading.Lock()
-DB = sqlite3.connect(DB_PATH, check_same_thread=False)
-DB.execute("PRAGMA journal_mode=WAL")
+# Open the history DB, but never let a missing/unwritable /data mount kill the
+# whole container at import — a newbie who forgets the `./data:/data` mount should
+# still get a running dashboard (with a diagnostics warning), not a crash loop.
+# Fall back to an in-memory DB so the app boots; history just doesn't persist.
+DB_EPHEMERAL = False
+try:
+    DB = sqlite3.connect(DB_PATH, check_same_thread=False)
+    DB.execute("PRAGMA journal_mode=WAL")
+except sqlite3.OperationalError as e:
+    print(f"WARNING: cannot open DB at {DB_PATH} ({e}); "
+          f"falling back to in-memory (history will not persist). "
+          f"Mount a writable ./data:/data to keep history.", flush=True)
+    DB = sqlite3.connect(":memory:", check_same_thread=False)
+    DB_EPHEMERAL = True
 DB.executescript("""
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
@@ -115,7 +127,7 @@ for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp 
 DB.commit()
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
@@ -1303,12 +1315,15 @@ def build_overview(now, docker, systemd):
     """One status card per subsystem for the Overview tab. New monitors append here."""
     cards = []
     g = now.get("gpu") or {}
-    tot = g.get("mem_total") or 1
-    used, used_pct = g.get("mem_used", 0), round((g.get("mem_used", 0) / tot) * 100)
-    cards.append({"key": "gpu", "label": "GPU",
-                  "status": "crit" if (tot - used) < PRESSURE_MB else "warn" if used_pct >= 85 else "ok",
-                  "metric": f"{used_pct}% VRAM",
-                  "detail": f"{round(g.get('util', 0))}% util · {round(g.get('temp', 0))}°C"})
+    # Only show the GPU card when a GPU is actually present — otherwise a GPU-less
+    # host would show a misleading frozen "0% VRAM · 0°C" tile.
+    if g.get("available"):
+        tot = g.get("mem_total") or 1
+        used, used_pct = g.get("mem_used", 0), round((g.get("mem_used", 0) / tot) * 100)
+        cards.append({"key": "gpu", "label": "GPU",
+                      "status": "crit" if (tot - used) < PRESSURE_MB else "warn" if used_pct >= 85 else "ok",
+                      "metric": f"{used_pct}% VRAM",
+                      "detail": f"{round(g.get('util', 0))}% util · {round(g.get('temp', 0))}°C"})
     h = now.get("host") or {}
     ram_pct = round(h["ram_used"] / h["ram_total"] * 100) if h.get("ram_total") else 0
     worst_disk = (h.get("disks") or [{}])[0].get("pct", 0)
@@ -1569,6 +1584,76 @@ def os_updates_summary():
             new_release.append({"host": name, "label": rel.get("label")})
     return {"hosts_behind": hosts_behind, "total_updates": total,
             "security": security, "new_release": new_release}
+
+# ── Local capability diagnostics ──────────────────────────────────────────────
+# A "which requirements are met?" checklist for the hub's own host, in the SAME
+# {checks:[{id,label,status,detail,remedy?}], summary} shape the remote probe_host()
+# already produces — so the dashboard renders both with one code path. The point:
+# a deploy that's missing an optional mount (or has no GPU) should STILL run and
+# clearly say what's degraded and how to fix it, instead of failing cryptically.
+
+def _diag(checks, cid, label, status, detail, remedy=None):
+    item = {"id": cid, "label": label, "status": status, "detail": detail}
+    if remedy:
+        item["remedy"] = remedy
+    checks.append(item)
+
+def local_diagnostics():
+    checks = []
+    # GPU (optional) — info, not a failure: the monitor is useful without one.
+    if LATEST.get("gpu_avail"):
+        _diag(checks, "nvidia", "NVIDIA GPU", "ok",
+              f"nvidia-smi OK · {round(LATEST.get('mem_total') or 0)} MB VRAM")
+    else:
+        _diag(checks, "nvidia", "NVIDIA GPU", "info",
+              "no GPU detected — GPU panels are hidden (everything else works)",
+              {"where": "on the host — only if it actually has an NVIDIA GPU",
+               "cmd": "sudo nvidia-ctk runtime configure --runtime=docker --set-as-default\n"
+                      "sudo systemctl restart docker"})
+    # Docker socket — powers Containers + Services + model APIs.
+    try:
+        json.loads(_docker("/version"))
+        _diag(checks, "docker", "Docker socket", "ok", f"reachable at {DOCKER_SOCK}")
+    except Exception:
+        _diag(checks, "docker", "Docker socket", "warn",
+              "not reachable — Containers & model panels are limited",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /var/run/docker.sock:/var/run/docker.sock:ro"})
+    # Host root — disk usage for the real host rather than the container.
+    if os.path.isdir(HOST_ROOT):
+        _diag(checks, "host_root", "Host filesystem", "ok", f"mounted at {HOST_ROOT}")
+    else:
+        _diag(checks, "host_root", "Host filesystem", "warn",
+              "host root not mounted — disk stats show the container only",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /:/rootfs:ro"})
+    # systemd D-Bus — optional Services panel.
+    bus = (os.environ.get("DBUS_SYSTEM_BUS_ADDRESS", "").split("unix:path=")[-1]
+           or "/run/dbus/system_bus_socket")
+    if os.path.exists(bus):
+        _diag(checks, "dbus", "systemd D-Bus", "ok", "socket present — Services panel enabled")
+    else:
+        _diag(checks, "dbus", "systemd D-Bus", "info",
+              "socket not mounted — the Services (systemd) panel is unavailable",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"})
+    # History persistence — in-memory fallback when /data isn't writable.
+    if DB_EPHEMERAL:
+        _diag(checks, "data", "History storage", "warn",
+              "running in-memory — history resets on restart",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- ./data:/data"})
+    else:
+        _diag(checks, "data", "History storage", "ok", f"persisting to {DB_PATH}")
+    # Host metrics — /proc + thermal sensors (needs pid:host and the rootfs mount).
+    if os.path.exists("/proc/stat") and glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+        _diag(checks, "host_metrics", "Host metrics", "ok", "CPU / RAM / temperature readable")
+    elif os.path.exists("/proc/stat"):
+        _diag(checks, "host_metrics", "Host metrics", "info",
+              "CPU / RAM readable; no thermal sensors exposed on this host")
+    else:
+        _diag(checks, "host_metrics", "Host metrics", "warn", "/proc not readable — host metrics limited")
+    return {"checks": checks, "summary": _summarize(checks)}
 
 def health_scan():
     HEALTH["docker"]  = collect_docker()
@@ -2542,17 +2627,32 @@ def sample_callers(conts, ai_names):
     return edges
 
 def sample_once():
-    g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-             "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
-    util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
     conts = containers()
     nm = {c["id"]: c["name"] for c in conts}
+
+    # ── GPU half ──────────────────────────────────────────────────────────────
+    # Isolated in its own try/except so a flaky, missing or slow nvidia-smi can
+    # NEVER block the host metrics below. Before this, an exception here aborted
+    # the whole sample, freezing CPU/RAM/temperature on every poll (and forever on
+    # a GPU-less host). Now a GPU failure just degrades the GPU panel to "absent"
+    # while temperature & friends keep refreshing.
+    util = mem_used = mem_total = power = temp = 0.0
     procs = {}
-    for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-        if line.strip():
-            pid, mem = (p.strip() for p in line.split(","))
-            svc = service_for_pid(pid, nm)
-            procs[svc] = procs.get(svc, 0) + float(mem or 0)
+    gpu_avail = False
+    try:
+        g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                 "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
+        util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
+        for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+            if line.strip():
+                pid, mem = (p.strip() for p in line.split(","))
+                svc = service_for_pid(pid, nm)
+                procs[svc] = procs.get(svc, 0) + float(mem or 0)
+        gpu_avail = True
+    except Exception as e:
+        # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
+        if LATEST.get("gpu_avail"):
+            print("GPU sample failed (continuing without GPU):", e, flush=True)
 
     # Detect models from EVERY recognised AI server, not just the ones holding the GPU
     # right now — so a server that has unloaded its model (e.g. OLLAMA_KEEP_ALIVE
@@ -2581,9 +2681,13 @@ def sample_once():
     host = read_host()
     ts = int(time.time())
     with LOCK:
+        # When the GPU is absent/failed, store NULL for the GPU columns (not 0) so
+        # history charts skip the gap via AVG() instead of showing a fake 0 dip;
+        # the host columns are always real.
+        gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
         DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp)"
                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                   (ts, util, mem_used, mem_total, power, temp, host["cpu"], host["ram_used"],
+                   (ts, *gcols, host["cpu"], host["ram_used"],
                     host["ram_total"], host["load1"], host["ctemp"]))
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
@@ -2597,6 +2701,7 @@ def sample_once():
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
+                  gpu_avail=gpu_avail,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
@@ -2759,9 +2864,11 @@ def favicon():
 def api_health():
     """Current state of the status monitors (Docker + systemd) plus a light GPU/host
     snapshot. Cheap and DB-free, so the dashboard can poll it often."""
+    gpu_avail = LATEST.get("gpu_avail")
     now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
-                   "mem_total": LATEST["mem_total"] or 24576, "power": LATEST["power"],
-                   "temp": LATEST["temp"]},
+                   "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
+                   "power": LATEST["power"], "temp": LATEST["temp"],
+                   "available": bool(gpu_avail)},
            "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
@@ -2771,6 +2878,7 @@ def api_health():
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "os_updates": os_updates_summary(),
+                    "diagnostics": local_diagnostics(),
                     "overview": build_overview(now, docker, systemd)})
 
 @app.route("/metrics")

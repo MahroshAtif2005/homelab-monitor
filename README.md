@@ -156,9 +156,16 @@ capability check — per-host versions land in subsequent releases. See
 broader design and follow-up slices.
 
 ## Quick start
-Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-(No GPU? The container, service and host panels still work fine.)
+**Only requirement: Docker.** The container starts on any host — no GPU needed.
+A GPU is auto-detected and its panels light up when present; without one, the
+container, service and host panels (incl. temperature) all work fine. Open the
+dashboard's **Setup & requirements** panel (on Overview) to see exactly what's
+detected and how to enable anything missing — nothing fails silently, and the
+container never refuses to start because a piece is absent.
+
+For the GPU panels specifically you'll want an NVIDIA GPU with the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html);
+if the Setup panel says the GPU isn't detected, it shows the one-line command to enable it.
 
 **Option A — pre-built image (recommended).** No clone, no build:
 
