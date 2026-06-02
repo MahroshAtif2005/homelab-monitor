@@ -428,6 +428,78 @@ def read_disks():
             pass
     return sorted(out, key=lambda d: -d["pct"])[:6]
 
+# hwmon drivers / thermal-zone types that expose the real CPU die/core sensors.
+_CPU_HWMON = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal")
+_CPU_ZONE  = ("x86_pkg_temp", "cpu_thermal", "cpu-thermal")
+
+def _cpu_temp_c():
+    """CPU temperature in °C matching `sensors`' CPU cores. The old code took the
+    max of every thermal zone, which on many boards grabs a chipset/PCH/NVMe or a
+    mis-calibrated package sensor 10-20 °C above the cores (dashboard showed 51 °C
+    while `sensors` showed Core N at 37 °C). Prefer the coretemp/k10temp hwmon and
+    report the hottest *core*; then a CPU-typed thermal zone; then, as a last
+    resort, the old hottest-plausible-zone so exotic/ARM boards still report.
+    Mirrors probe.py's _cpu_temp_c so local and remote agree."""
+    best = None
+    try:
+        for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+            try:
+                name = open(hw + "/name").read().strip()
+            except Exception:
+                continue
+            if name not in _CPU_HWMON:
+                continue
+            cores, allt = [], []
+            for inp in glob.glob(hw + "/temp*_input"):
+                try:
+                    t = int(open(inp).read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if not (0 < t < 130):
+                    continue
+                allt.append(t)
+                try:
+                    lbl = open(inp[:-6] + "_label").read().strip().lower()
+                except Exception:
+                    lbl = ""
+                if lbl.startswith("core"):          # Intel "Core N" — exclude Package
+                    cores.append(t)
+            pick = max(cores) if cores else (max(allt) if allt else None)
+            if pick is not None and (best is None or pick > best):
+                best = pick
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                ztype = open(z + "/type").read().strip().lower()
+            except Exception:
+                continue
+            if ztype in _CPU_ZONE or "cpu" in ztype:
+                try:
+                    t = int(open(z + "/temp").read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if 0 < t < 130 and (best is None or t > best):
+                    best = t
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try:
+                t = int(open(z).read().strip()) / 1000.0
+                if 10 < t < 130 and (best is None or t > best):
+                    best = t
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return round(best, 1) if best is not None else None
+
 def read_host():
     h = {"cores": os.cpu_count() or 1}
     try: h["cpu"] = _cpu_pct()
@@ -444,11 +516,7 @@ def read_host():
     except Exception: h["load1"] = 0
     try: h["uptime"] = int(float(open("/proc/uptime").read().split()[0]))
     except Exception: h["uptime"] = 0
-    t = 0
-    for f in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
-        try: t = max(t, int(open(f).read().strip()) / 1000)
-        except Exception: pass
-    h["ctemp"] = round(t, 1)
+    h["ctemp"] = _cpu_temp_c()
     h["disks"] = read_disks()
     # Slow-changing context (OS / hardware / network / security) for the System,
     # Network and Security tabs. Cached so it isn't recomputed on every 10 s sample.
