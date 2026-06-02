@@ -350,6 +350,16 @@ def read_systemd():
     }}
 
 
+def _smi_int(v):
+    """Tolerant int for nvidia-smi fields: '[N/A]' / '[Not Supported]' / blank → 0
+    so one unreadable field (e.g. temperature on some cards) doesn't drop the
+    whole GPU from the remote's report."""
+    try:
+        return int(float((v or "").strip()))
+    except ValueError:
+        return 0
+
+
 def read_gpu():
     """First NVIDIA GPU's snapshot via nvidia-smi. Returns {} if no driver or
     no GPU. We treat the first GPU as the 'representative' for the table; the
@@ -372,10 +382,10 @@ def read_gpu():
         return {"gpu": {
             "count":     len(lines),
             "name":      parts[4],
-            "mem_used":  int(parts[0]),   # MB
-            "mem_total": int(parts[1]),   # MB
-            "util":      int(parts[2]),   # %
-            "temp":      int(parts[3]),   # °C
+            "mem_used":  _smi_int(parts[0]),   # MB
+            "mem_total": _smi_int(parts[1]),   # MB
+            "util":      _smi_int(parts[2]),   # %
+            "temp":      _smi_int(parts[3]),   # °C
         }}
     except Exception:
         return {}
@@ -397,9 +407,13 @@ def _which(name):
 
 
 def _run(args, timeout=3):
-    """subprocess.run → (rc, stdout_str) or (None, '') on any failure."""
+    """subprocess.run → (rc, stdout_str) or (None, '') on any failure. Forces
+    LC_ALL/LANG=C so package-manager output (zypper/apt/dnf sentinels like
+    'No updates found') and other parsed text stay in English regardless of the
+    SSH login shell's locale."""
     try:
-        r = subprocess.run(args, capture_output=True, timeout=timeout)
+        env = dict(os.environ, LC_ALL="C", LANG="C")
+        r = subprocess.run(args, capture_output=True, timeout=timeout, env=env)
         return r.returncode, r.stdout.decode("utf-8", "replace")
     except Exception:
         return None, ""
@@ -1013,15 +1027,17 @@ def _zypper_updates():
     # --no-refresh keeps it offline; status column 'v' marks an available update.
     rc, txt = _run(["zypper", "--non-interactive", "--no-refresh", "--quiet",
                     "list-updates"], timeout=8)
-    if rc is not None and txt:
+    # Gate on rc only (like dnf/pacman). With --quiet a zero-update host prints
+    # nothing and no "No updates found" banner, so the old `and txt` / banner
+    # check left count=None ("needs elevated read") for an up-to-date SUSE host.
+    if rc is not None:
         names = []
         for l in txt.splitlines():
             parts = [p.strip() for p in l.split("|")]
             if len(parts) >= 3 and parts[0] == "v":
                 names.append(parts[2])
-        if names or "No updates found" in txt:
-            out["count"] = len(names)
-            out["kernel"] = any(n.startswith("kernel-") for n in names)
+        out["count"] = len(names)
+        out["kernel"] = any(n.startswith("kernel-") for n in names)
     rc2, txt2 = _run(["zypper", "--non-interactive", "--no-refresh", "--quiet",
                       "list-patches", "--category", "security"], timeout=8)
     if rc2 is not None and txt2:
@@ -1033,22 +1049,46 @@ def _zypper_updates():
 def _dnf_updates():
     out = {"count": None, "security": None, "kernel": None, "source": "dnf"}
     bin_ = "dnf" if _which("dnf") else "yum"
-    # -C = cache-only (no network). rc 100 = updates available, 0 = none.
-    rc, txt = _run([bin_, "-C", "-q", "check-update"], timeout=10)
-    if rc in (0, 100):
-        names = []
-        for l in txt.splitlines():
-            l = l.strip()
-            if not l or l.startswith(("Obsoleting", "Last metadata", "Security:")):
-                continue
-            parts = l.split()
-            if len(parts) >= 3 and "." in parts[0]:   # name.arch  version  repo
-                names.append(parts[0])
-        out["count"] = len(names)
-        out["kernel"] = any(n.startswith("kernel") for n in names)
+    # -C = cache-only (no network).
+    if bin_ == "dnf":
+        # repoquery emits one clean package name per line — unlike `check-update`,
+        # which wraps a row across two lines when name.arch is wide (narrow,
+        # non-tty output), dropping those packages from the count.
+        rc, txt = _run(["dnf", "-C", "-q", "repoquery", "--upgrades", "--qf", "%{name}"],
+                       timeout=10)
+        if rc == 0:
+            names = [l.strip() for l in txt.splitlines() if l.strip()]
+            out["count"] = len(names)
+            out["kernel"] = any(n.startswith("kernel") for n in names)
+    else:
+        # yum (RHEL7) has no builtin repoquery --upgrades; parse check-update but
+        # reassemble wrapped rows (bare name.arch on one line, version/repo on the
+        # next, indented). rc 100 = updates available, 0 = none.
+        rc, txt = _run(["yum", "-C", "-q", "check-update"], timeout=10)
+        if rc in (0, 100):
+            names, pending = [], None
+            for raw in txt.splitlines():
+                if not raw.strip() or raw.startswith(("Obsoleting", "Last metadata", "Security:")):
+                    continue
+                parts = raw.split()
+                if raw[:1].isspace() and pending:           # continuation: version repo
+                    names.append(pending); pending = None
+                elif len(parts) == 1 and "." in parts[0]:   # wrapped: name.arch only
+                    pending = parts[0]
+                elif len(parts) >= 3 and "." in parts[0]:   # name.arch version repo
+                    names.append(parts[0]); pending = None
+            out["count"] = len(names)
+            out["kernel"] = any(n.startswith("kernel") for n in names)
     rc2, txt2 = _run([bin_, "-C", "-q", "updateinfo", "list", "security"], timeout=10)
     if rc2 == 0 and txt2:
-        out["security"] = sum(1 for l in txt2.splitlines() if l.strip())
+        # Count distinct advisory IDs (first column), not package-instances — one
+        # advisory fixing N packages would otherwise be counted N times.
+        adv = set()
+        for l in txt2.splitlines():
+            f = l.split()
+            if f and ("-" in f[0] or ":" in f[0]):   # FEDORA-2024-xxxx / RHSA-2024:xxxx
+                adv.add(f[0])
+        out["security"] = len(adv)
     return out
 
 

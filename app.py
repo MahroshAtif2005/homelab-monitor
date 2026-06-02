@@ -139,11 +139,17 @@ _cpu_prev = {"idle": 0, "total": 0}
 
 # ── Docker API over the unix socket ────────────────────────────────────────────
 def _docker(path):
+    # close() must run even when connect/request/read raise (dockerd slow,
+    # restarting, unreachable) — otherwise the manually-created AF_UNIX socket fd
+    # leaks on every failed call and the process eventually hits its fd limit.
     c = http.client.HTTPConnection("localhost", timeout=4)
     c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.sock.settimeout(4); c.sock.connect(DOCKER_SOCK)
-    c.request("GET", path); data = c.getresponse().read(); c.close()
-    return data
+    try:
+        c.sock.settimeout(4); c.sock.connect(DOCKER_SOCK)
+        c.request("GET", path)
+        return c.getresponse().read()
+    finally:
+        c.close()
 
 def containers():
     if time.time() - _ct_cache["at"] < 30 and _ct_cache["list"]:
@@ -181,9 +187,15 @@ def logs_since(cid, since):
 
 # ── Model-server probes (agnostic: append to PROBES to support a new server) ───
 def _http_json(ip, port, path, timeout=2):
+    # try/finally so a down/slow model server (common: idle servers, wrong port
+    # guesses) can't leak the TCP socket fd when request/read raises.
     c = http.client.HTTPConnection(ip, port, timeout=timeout)
-    c.request("GET", path); r = c.getresponse(); body = r.read(); c.close()
-    return json.loads(body) if r.status < 400 else None
+    try:
+        c.request("GET", path); r = c.getresponse(); body = r.read()
+        status = r.status
+    finally:
+        c.close()
+    return json.loads(body) if status < 400 else None
 
 def probe_ollama(ip):
     """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
@@ -412,9 +424,13 @@ def read_disks():
         if len(f) < 3:
             continue
         dev, mp, fs = f[0], f[1].replace("\\040", " "), f[2]
-        if not dev.startswith("/dev/") or fs not in REAL_FS or dev in seen:
+        # De-dupe by MOUNTPOINT (like probe.py), not device: btrfs subvolumes and
+        # ZFS datasets share one device (or a non-/dev/ pool name like `tank/data`),
+        # so de-duping by device hid every subvolume after the first and the old
+        # `/dev/` requirement dropped ZFS entirely. REAL_FS already gates the type.
+        if fs not in REAL_FS or mp in seen:
             continue
-        seen.add(dev)
+        seen.add(mp)
         path = (base.rstrip("/") + mp) if base != "/" else mp
         try:
             st = os.statvfs(path)
@@ -1533,12 +1549,15 @@ _DISTRO_NAME = {
     "almalinux": "AlmaLinux", "rocky-linux": "Rocky Linux", "rhel": "RHEL",
     "centos": "CentOS", "amazon-linux": "Amazon Linux", "alpine": "Alpine",
 }
-_OS_REL_CACHE = {}        # slug -> {"at": ts, "cycles": [str, ...] | None}
+_OS_REL_CACHE = {}        # slug -> {"at": ts, "cycles": [{cycle,lts,eol,releaseDate}, ...] | None}
 _OS_REL_LOCK  = threading.Lock()
 
 def _fetch_eol_cycles(slug):
-    """Fetch the list of release cycles for one distro from endoflife.date.
-    Returns a list of cycle strings (e.g. ['15.6','15.5',...]) or None on error."""
+    """Fetch release cycles for one distro from endoflife.date, newest-first.
+    Returns a list of dicts {cycle, lts, eol, releaseDate} (we keep lts/eol/
+    releaseDate so os_upgrade_for can avoid recommending an unreleased, EOL, or
+    interim release), or None on error. Tolerates the endoflife v1 {result:[...]}
+    envelope and error bodies so a future API shape change can't crash us."""
     try:
         req = urllib.request.Request(
             f"https://endoflife.date/api/{slug}.json",
@@ -1546,7 +1565,14 @@ def _fetch_eol_cycles(slug):
                      "User-Agent": f"homelab-monitor/{VERSION}"})
         with urllib.request.urlopen(req, timeout=8) as r:
             payload = json.loads(r.read())
-        return [str(c.get("cycle")) for c in payload if c.get("cycle") is not None]
+        if isinstance(payload, dict):
+            payload = payload.get("result") or []
+        if not isinstance(payload, list):
+            return None
+        out = [{"cycle": str(c.get("cycle")), "lts": c.get("lts"),
+                "eol": c.get("eol"), "releaseDate": c.get("releaseDate")}
+               for c in payload if isinstance(c, dict) and c.get("cycle") is not None]
+        return out or None
     except Exception:
         return None
 
@@ -1580,9 +1606,12 @@ def os_upgrade_for(os_id, version_id):
     release exists, else None.
 
     endoflife.date returns cycles newest-first, so we locate the host's own cycle
-    in that list and flag it behind only when newer cycles sit before it. We rely
-    on list order rather than numeric comparison because some distros renumber
-    (openSUSE Leap went 42.x → 15.x), which would fool a plain version compare."""
+    and flag it behind only when newer cycles sit before it (list order, not a
+    numeric compare — openSUSE Leap renumbered 42.x → 15.x). The candidate is the
+    newest *qualifying* newer cycle, NOT just cycles[0]: it must be already
+    released, still supported, and — if the host is on an LTS — itself LTS. That
+    stops us telling a 24.04-LTS host to 'upgrade' to a short-lived interim (or an
+    unreleased) release."""
     if not CHECK_OS_UPDATES or not os_id or not version_id:
         return None
     slug = _EOL_SLUG.get(os_id.lower())
@@ -1594,34 +1623,56 @@ def os_upgrade_for(os_id, version_id):
     if not cycles:
         return None
     try:
+        strs = [c["cycle"] for c in cycles]
         idx = None
-        if version_id in cycles:
-            idx = cycles.index(version_id)
+        if version_id in strs:
+            idx = strs.index(version_id)
         else:                                   # host "12.5" → match cycle "12"
             major = version_id.split(".")[0]
-            if major in cycles:
-                idx = cycles.index(major)
-        if idx is not None and idx > 0:         # newer cycles listed before it
-            candidate = cycles[0]
-            name = _DISTRO_NAME.get(slug, slug)
-            return {"new_release": {"current": version_id, "candidate": candidate,
-                                    "label": f"{name} {candidate}"}}
+            if major in strs:
+                idx = strs.index(major)
+        if idx is None or idx == 0:             # not found, or already newest
+            return None
+        host_is_lts = bool(cycles[idx].get("lts"))
+        today = time.strftime("%Y-%m-%d")       # ISO dates compare lexicographically
+        def released(c):
+            rd = c.get("releaseDate")
+            return (not rd) or str(rd) <= today
+        def supported(c):
+            eol = c.get("eol")
+            if eol is True:  return False
+            if eol in (False, None): return True
+            return str(eol) > today
+        candidate = None
+        for c in cycles[:idx]:                  # strictly-newer entries, newest-first
+            if released(c) and supported(c) and (not host_is_lts or c.get("lts")):
+                candidate = c["cycle"]
+                break
+        if not candidate:
+            return None
+        name = _DISTRO_NAME.get(slug, slug)
+        return {"new_release": {"current": version_id, "candidate": candidate,
+                                "label": f"{name} {candidate}"}}
     except Exception:
         return None
-    return None
 
 def enrich_os_upgrade(host):
-    """Attach (or clear) host['os_upgrade'] from the cached endoflife data. We
-    mutate the dict in place — and it's a shared cached snapshot — so we must also
-    drop a stale key once a host is no longer behind. Returns the same dict."""
-    if host is not None:
-        os_ = host.get("os") or {}
-        up = os_upgrade_for(os_.get("id"), os_.get("version_id"))
-        if up:
-            host["os_upgrade"] = up
-        else:
-            host.pop("os_upgrade", None)
-    return host
+    """Return a shallow copy of `host` with os_upgrade set/cleared from the cached
+    endoflife data. NON-mutating on purpose: callers hand us the live shared
+    HOST_DATA/LATEST host dicts from request threads, and mutating those in place
+    (while the poller swaps them and another request serializes them) risks a
+    'dictionary changed size during iteration' RuntimeError. Only the top-level
+    os_upgrade key differs, so a shallow copy is enough."""
+    if host is None:
+        return host
+    os_ = host.get("os") or {}
+    up = os_upgrade_for(os_.get("id"), os_.get("version_id"))
+    out = dict(host)
+    if up:
+        out["os_upgrade"] = up
+    else:
+        out.pop("os_upgrade", None)
+    return out
 
 def _iter_fleet_hosts():
     """Yield (name, host_block) for the hub itself plus every remote with data.
@@ -2033,11 +2084,14 @@ def _local_now_snapshot():
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.
-    gpu_total = (LATEST or {}).get("mem_total") or 0
-    if gpu_total > 0:
+    # Gate on gpu_avail (not mem_total) so the GPU block isn't emitted during
+    # warm-up — LATEST['mem_total'] defaults to 24576, which otherwise made the
+    # fleet row show a phantom "0% / 24 GB VRAM" before the first sample on a
+    # GPU-less hub. Mirrors api_health, which already keys off gpu_avail.
+    if (LATEST or {}).get("gpu_avail"):
         out["gpu"] = {
             "mem_used":  (LATEST or {}).get("mem_used", 0),
-            "mem_total": gpu_total,
+            "mem_total": (LATEST or {}).get("mem_total") or 0,
             "util":      (LATEST or {}).get("util", 0),
             "temp":      (LATEST or {}).get("temp", 0),
         }
@@ -2607,7 +2661,20 @@ def notify_scan():
 
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
-    return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=15).stdout.strip()
+    # 3 s timeout (matches probe.py and the local-hw nvidia-smi call). A wedged
+    # driver (GPU off the bus / Xid) makes nvidia-smi hang; the GPU half of
+    # sample_once is non-fatal, so a short timeout degrades the GPU panel quickly
+    # instead of stalling host metrics (CPU/RAM/temp) for the full window.
+    return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=3).stdout.strip()
+
+def _gpu_num(x):
+    """Tolerant float for nvidia-smi CSV fields: '[N/A]' / '[Not Supported]' /
+    blank → 0.0 instead of raising, so one unreadable field (power/temp) never
+    aborts the whole GPU sample and hides a present GPU."""
+    try:
+        return float((x or "").strip())
+    except ValueError:
+        return 0.0
 
 def service_for_pid(pid, nm):
     try:
@@ -2710,12 +2777,18 @@ def sample_once():
     try:
         g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
                  "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
-        util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
+        # Parse each field defensively: nvidia-smi emits the literal "[N/A]" /
+        # "[Not Supported]" for power.draw/temperature.gpu on many consumer/laptop
+        # GPUs and inside containers, even with `nounits`. The old all-or-nothing
+        # float() unpack raised ValueError on that, which the except below caught
+        # and reported the (present, working) GPU as ABSENT. Degrade just the bad
+        # field to 0 instead.
+        util, mem_used, mem_total, power, temp = (_gpu_num(x) for x in g)
         for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
             if line.strip():
                 pid, mem = (p.strip() for p in line.split(","))
                 svc = service_for_pid(pid, nm)
-                procs[svc] = procs.get(svc, 0) + float(mem or 0)
+                procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
         gpu_avail = True
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
