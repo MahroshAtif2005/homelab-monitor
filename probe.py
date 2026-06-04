@@ -88,11 +88,19 @@ def _cpu_temp_c():
     boards grabs a chipset/PCH/NVMe or an mis-calibrated package sensor reading
     10-20 °C hotter than the cores — so the dashboard showed e.g. 51 °C while
     `sensors` showed Core N at 37 °C. We now prefer the coretemp/k10temp hwmon and
-    report the hottest *core*; then a CPU-typed thermal zone; and only as a last
-    resort the old hottest-plausible-zone (so exotic/ARM boards still report)."""
+    report the *average core* temperature across every CPU package; then a
+    CPU-typed thermal zone; and only as a last resort the old hottest-plausible-
+    zone (so exotic/ARM boards still report).
+
+    Average, not max: on a many-core server (e.g. a 56-core dual-socket Xeon) a
+    single busy core spiking to 45 °C while the other 55 sit at 39 °C should still
+    read ~40, matching the bulk of what `sensors` shows — max-of-N-cores is noisy
+    and biased high the more cores you have."""
     best = None
-    # 1) hwmon coretemp/k10temp/zenpower — the real die/core sensors.
+    # 1) hwmon coretemp/k10temp/zenpower — the real die/core sensors. Pool the
+    #    per-core readings from *every* CPU package and report their average.
     try:
+        cores, allt = [], []
         for hw in glob.glob("/sys/class/hwmon/hwmon*"):
             try:
                 name = open(hw + "/name").read().strip()
@@ -100,7 +108,6 @@ def _cpu_temp_c():
                 continue
             if name not in _CPU_HWMON:
                 continue
-            cores, allt = [], []
             for inp in glob.glob(hw + "/temp*_input"):
                 try:
                     t = int(open(inp).read().strip()) / 1000.0
@@ -115,11 +122,9 @@ def _cpu_temp_c():
                     lbl = ""
                 if lbl.startswith("core"):          # Intel "Core N" — exclude Package
                     cores.append(t)
-            pick = max(cores) if cores else (max(allt) if allt else None)
-            if pick is not None and (best is None or pick > best):
-                best = pick
-        if best is not None:
-            return round(best, 1)
+        pool = cores or allt                        # cores if labelled, else whatever the die reports
+        if pool:
+            return round(sum(pool) / len(pool), 1)
     except Exception:
         pass
     # 2) thermal zones explicitly typed as the CPU.
