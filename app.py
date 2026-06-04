@@ -1687,22 +1687,30 @@ def _iter_fleet_hosts():
 
 def os_updates_summary():
     """Fleet-wide roll-up that drives the header badge: how many hosts are behind,
-    total pending updates, security count, and which hosts have a newer release."""
+    total pending updates, security count, and which hosts have a newer release.
+
+    `hosts` carries the per-host breakdown (package count, security count, kernel
+    flag, new-release label) so the modal can render a proper per-machine table
+    instead of pointing the user back at each host's Security tab."""
     hosts_behind = total = security = 0
-    new_release = []
+    new_release, hosts = [], []
     for name, host in _iter_fleet_hosts():
         upd = ((host or {}).get("sec") or {}).get("updates") or {}
         cnt = upd.get("count") or 0
         sec = upd.get("security") or 0
+        kernel = bool(upd.get("kernel"))
         rel = (enrich_os_upgrade(host) or {}).get("os_upgrade", {}).get("new_release")
         total += cnt
         security += sec
         if cnt > 0 or rel:
             hosts_behind += 1
+            hosts.append({"host": name, "count": cnt, "security": sec,
+                          "kernel": kernel,
+                          "release": rel.get("label") if rel else None})
         if rel:
             new_release.append({"host": name, "label": rel.get("label")})
     return {"hosts_behind": hosts_behind, "total_updates": total,
-            "security": security, "new_release": new_release}
+            "security": security, "new_release": new_release, "hosts": hosts}
 
 # ── Local capability diagnostics ──────────────────────────────────────────────
 # A "which requirements are met?" checklist for the hub's own host, in the SAME

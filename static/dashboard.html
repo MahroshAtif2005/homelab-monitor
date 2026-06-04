@@ -107,10 +107,26 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 /* OS/kernel-updates badge — amber to distinguish from the blue app-update one */
 .upd.osupd{color:var(--warn);border-color:#d2992255;background:#d2992211}
 .upd.osupd:hover{border-color:var(--warn)}
-.oslist{list-style:none;margin:8px 0 0;padding:0}
-.oslist li{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:#0d1117;margin-top:6px;font-size:13px}
-.oslist .hn{font-weight:600;color:var(--tx)}
-.oslist .meta{color:var(--mut);text-align:right}
+/* when any pending update is a security one, tint the badge red and the count */
+.upd.osupd.hassec{color:var(--crit);border-color:var(--crit);background:var(--critbg)}
+.upd.osupd.hassec:hover{border-color:var(--crit)}
+.upd.osupd .secn{font-weight:700}
+.oslist{list-style:none;margin:10px 0 0;padding:0}
+.oslist li{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:11px 13px;border:1px solid var(--bd);border-radius:10px;background:var(--inset);margin-top:8px;font-size:13px}
+.oslist .hn{display:flex;align-items:center;gap:8px;font-weight:600;color:var(--tx);font-size:13.5px}
+.oslist .hn .pdot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
+.oslist .hn .pdot.warn{background:var(--warn)}.oslist .hn .pdot.fail{background:var(--crit)}
+.oslist .meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.oslist .ok{color:var(--ok);font-weight:600}
+/* count chips for the OS-update summary + per-host rows */
+.uchip{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;line-height:1;padding:4px 9px;border-radius:20px;border:1px solid var(--bd);color:var(--mut);white-space:nowrap}
+.uchip b{font-weight:700}
+.uchip.sec{color:var(--crit);border-color:var(--crit);background:var(--critbg)}
+.uchip.pkg{color:var(--warn);border-color:#d2992255;background:var(--warnbg)}
+.uchip.rel{color:var(--info);border-color:#58a6ff55;background:#58a6ff14}
+.uchip.kernel{color:var(--mut)}
+.osu-sum{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+.osu-sum .lead{font-size:13.5px;color:var(--tx);font-weight:600;margin-right:2px}
 /* Setup/requirements: degraded banner + per-check remedy command */
 .diagbanner{margin:0 0 12px;padding:9px 12px;border:1px solid var(--warn);background:#d2992218;color:var(--tx);border-radius:8px;font-size:13px;display:flex;align-items:center;gap:10px}
 .diagbanner a{color:var(--info);text-decoration:none;font-weight:600}
@@ -624,9 +640,9 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
       <button class="x" type="button" id="osupdclose" aria-label="Close">×</button>
     </div>
     <div class="bd">
-      <div class="muted" id="osupdsummary"></div>
+      <div class="osu-sum" id="osupdsummary"></div>
       <ul class="oslist" id="osupdlist"></ul>
-      <div class="muted" style="margin-top:12px;font-size:12px">Counts are read from each host's package manager (cached, no refresh). Click a host row in the All-hosts table to see its full Security tab.</div>
+      <div class="muted" style="margin-top:14px;font-size:12px">Counts come from each host's own package manager (cached — no refresh is triggered). Click a host's row in the All-hosts table for its full Security tab.</div>
     </div>
   </div>
 </div>
@@ -931,9 +947,13 @@ function renderHealth(){
   const osb = document.getElementById('osupdbadge');
   if(osb){
     if(osu.hosts_behind > 0){
-      const sec = osu.security ? ` · ${osu.security} security` : '';
-      document.getElementById('osupdtext').textContent =
+      const sec = osu.security ? ` · <span class="secn">${osu.security} security</span>` : '';
+      document.getElementById('osupdtext').innerHTML =
         `${osu.hosts_behind} host${osu.hosts_behind===1?'':'s'} behind${sec}`;
+      osb.classList.toggle('hassec', !!osu.security);
+      osb.title = osu.security
+        ? `${osu.hosts_behind} machine(s) behind, including ${osu.security} security update(s) — click for the per-host breakdown`
+        : 'One or more machines have OS/package updates pending — click for the per-host breakdown';
       osb.classList.add('show');
       osb.onclick = () => openOsUpdateModal(osu);
     } else {
@@ -1095,24 +1115,40 @@ function openUpdateModal(up){
 function closeUpdateModal(){ document.getElementById('updmodal').classList.remove('show'); }
 
 // ── OS-updates modal ──────────────────────────────────────────────────────────
+// Severity chips reused by the summary line and each host row, so a glance shows
+// what matters most: security (red) → new OS release (blue) → packages (amber).
+function osuChip(kind, label){ return `<span class="uchip ${kind}">${label}</span>`; }
 function openOsUpdateModal(osu){
-  const parts = [];
-  if(osu.total_updates)  parts.push(`${osu.total_updates} package update${osu.total_updates===1?'':'s'} pending`);
-  if(osu.security)       parts.push(`${osu.security} security`);
-  if((osu.new_release||[]).length) parts.push(`${osu.new_release.length} new OS release${osu.new_release.length===1?'':'s'}`);
-  document.getElementById('osupdsummary').textContent =
-    `${osu.hosts_behind} machine${osu.hosts_behind===1?'':'s'} behind` + (parts.length ? ' — ' + parts.join(' · ') : '') + '.';
-  // The /api/health summary only carries the new-release labels per host; the
-  // per-package counts live on each host's Security tab, so we list the
-  // new-release machines here and point at the table for the rest.
-  const byHost = {};
-  (osu.new_release||[]).forEach(r => { byHost[r.host] = r.label; });
-  const names = Object.keys(byHost);
+  // Summary: a lead sentence + count chips (most-urgent first) instead of a
+  // run-on string, so security pops out from routine package counts.
+  const chips = [];
+  if(osu.security)       chips.push(osuChip('sec', `<b>${osu.security}</b> security`));
+  if((osu.new_release||[]).length) chips.push(osuChip('rel', `<b>${osu.new_release.length}</b> new OS release${osu.new_release.length===1?'':'s'}`));
+  if(osu.total_updates)  chips.push(osuChip('pkg', `<b>${osu.total_updates}</b> package${osu.total_updates===1?'':'s'}`));
+  document.getElementById('osupdsummary').innerHTML =
+    `<span class="lead">${osu.hosts_behind} machine${osu.hosts_behind===1?'':'s'} behind</span>` + chips.join('');
+
+  // Per-host rows: prefer the detailed `hosts` breakdown (count/security/kernel/
+  // release) the backend now sends; fall back to the new-release-only list so an
+  // older hub still renders something useful.
   const list = document.getElementById('osupdlist');
-  list.innerHTML = names.length
-    ? names.map(n => `<li><span class="hn">${esc(n==='local'?'this hub':n)}</span>`
-        + `<span class="meta">⬆ ${esc(byHost[n])} available</span></li>`).join('')
-    : '<li><span class="meta">Package updates pending — open a host\'s Security tab for the per-host counts.</span></li>';
+  let rows = osu.hosts;
+  if(!Array.isArray(rows) || !rows.length){
+    rows = (osu.new_release||[]).map(r => ({host:r.host, release:r.label}));
+  }
+  list.innerHTML = rows.length
+    ? rows.map(h => {
+        const c = [];
+        if(h.security)            c.push(osuChip('sec', `<b>${h.security}</b> security`));
+        if(h.release)             c.push(osuChip('rel', `⬆ ${esc(h.release)}`));
+        if(h.count)               c.push(osuChip('pkg', `<b>${h.count}</b> package${h.count===1?'':'s'}`));
+        if(h.kernel)              c.push(osuChip('kernel', '⚙ kernel'));
+        if(!c.length)             c.push('<span class="ok">✓ up to date</span>');
+        return `<li><span class="hn"><span class="pdot ${h.security?'fail':'warn'}"></span>`
+          + `${esc(h.host==='local'?'this hub':h.host)}</span>`
+          + `<span class="meta">${c.join('')}</span></li>`;
+      }).join('')
+    : '<li><span class="meta muted">Package updates pending — open a host\'s Security tab for the per-host counts.</span></li>';
   document.getElementById('osupdmodal').classList.add('show');
 }
 function closeOsUpdateModal(){ document.getElementById('osupdmodal').classList.remove('show'); }
