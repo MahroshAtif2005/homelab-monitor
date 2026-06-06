@@ -489,7 +489,7 @@ a{color:var(--info)}
       <th>Container</th><th>State</th>
       <th data-col="image">Image</th>
       <th>Ports</th><th>Uptime</th>
-      <th title="Resident system RAM (working set, excludes page cache — like docker stats). GPU memory is the separate VRAM column.">RAM</th>
+      <th title="Resident system RAM the container actually holds — anonymous + shared memory. Excludes reclaimable file cache (e.g. mmap'd model files), so rows sum sensibly against host RAM. GPU memory is the separate VRAM column.">RAM</th>
       <th title="GPU memory held by this container's processes (nvidia-smi compute-apps, attributed via /proc/<pid>/cgroup). Blank when the container isn't using the GPU.">VRAM</th>
       <th data-col="disk" title="Writable layer + the container's volumes &amp; read-write bind mounts (so model/data volumes are included, not just the thin writable layer). Mounts shared by several containers are excluded so they aren't counted against each one.">Disk</th>
       <th>Status</th>

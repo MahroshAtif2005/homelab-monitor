@@ -1071,19 +1071,23 @@ def _container_stats(cid):
     except Exception:
         return None
     ms = d.get("memory_stats") or {}
-    usage = ms.get("usage")
+    st = ms.get("stats") or {}
+    # Real resident RAM = anonymous memory (+ shared memory) the container holds.
+    # NOT `usage - inactive_file` (the docker-stats formula): that still includes
+    # ACTIVE file cache, which for AI containers that mmap multi-GB model files is
+    # enormous and fully reclaimable. It inflated every row and made the
+    # per-container sum exceed the host's *used* RAM — impossible for real RAM,
+    # since the host (MemTotal - MemAvailable) counts that cache as available.
+    # anon (+ shmem) is what the container actually occupies and sums sensibly.
+    if "anon" in st:                                   # cgroup v2
+        return (st.get("anon") or 0) + (st.get("shmem") or 0)
+    if "rss" in st:                                    # cgroup v1
+        return (st.get("rss") or 0) + (st.get("rss_huge") or 0)
+    usage = ms.get("usage")                            # last resort: docker-stats math
     if usage is None:
         return None
-    st = ms.get("stats") or {}
-    # Docker counts page cache against `usage`; subtract it like `docker stats`.
-    # cgroup v2 exposes the cache as `inactive_file`; cgroup v1 as `cache`. We
-    # used to read only `cache`, so on a cgroup-v2 host (most modern distros, incl.
-    # this one) the subtraction was a no-op and the figure silently included page
-    # cache — reading far higher than the container's real RAM.
-    cache = st.get("inactive_file")
-    if cache is None:
-        cache = st.get("cache", 0)
-    return max(0, usage - (cache or 0))
+    cache = st.get("inactive_file", st.get("cache", 0)) or 0
+    return max(0, usage - cache)
 
 def _refresh_docker_enrich(running_ids):
     """Per-running-container memory snapshot (parallel). Cached for
