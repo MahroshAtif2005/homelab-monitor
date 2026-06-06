@@ -474,7 +474,8 @@ a{color:var(--info)}
     <table style="margin-top:14px"><thead><tr>
       <th>Container</th><th>State</th>
       <th data-col="image">Image</th>
-      <th>Ports</th><th>Uptime</th><th>Memory</th>
+      <th>Ports</th><th>Uptime</th>
+      <th title="Resident RAM (working set, excludes page cache — like docker stats) used / the container's memory limit. When a container has no limit set, the total is the host's RAM.">Memory (RAM / total)</th>
       <th data-col="disk" title="Writable layer + the container's volumes &amp; read-write bind mounts (so model/data volumes are included, not just the thin writable layer). Mounts shared by several containers are excluded so they aren't counted against each one.">Disk</th>
       <th>Status</th>
     </tr></thead><tbody id="cttbl"></tbody></table>
@@ -1063,7 +1064,7 @@ function renderHealth(){
      <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
      <td class="muted">${c.state==='running'?fmtUpShort(c.uptime_s):'—'}</td>
-     <td class="muted">${fmtBytes(c.mem_bytes)}</td>
+     <td class="muted">${fmtBytes(c.mem_bytes)}${c.mem_limit!=null?` <span style="opacity:.55">/ ${fmtBytes(c.mem_limit)}</span>`:''}</td>
      <td data-col="disk" class="muted">${fmtBytes(c.disk_bytes)}</td>
      <td class="muted">${upStripped?esc(upStripped):'—'}</td></tr>`;
   }).join('')
