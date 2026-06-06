@@ -184,6 +184,10 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .hcheck .rem .lbl{color:var(--accent);font-size:11.5px;text-transform:uppercase;letter-spacing:.02em;font-weight:600}
 .hcheck .rem pre{margin:5px 0 0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx)}
 .hcheck .rem .cp{margin-top:5px}
+.hcheck .rem .osvars{display:flex;gap:5px;flex-wrap:wrap;margin:5px 0 2px}
+.hcheck .rem .osvar{background:#0d1117;border:1px solid var(--bd);color:var(--mut);border-radius:5px;padding:2px 9px;cursor:pointer;font:inherit;font-size:11.5px}
+.hcheck .rem .osvar:hover{border-color:var(--mut)}
+.hcheck .rem .osvar.on{color:var(--tx);border-color:var(--accent);background:#161b22}
 .btn-mini{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit;font-size:12px}
 .btn-mini:hover{border-color:var(--mut)}
 .btn-mini.danger{color:var(--crit);border-color:#f8514955}
@@ -1455,19 +1459,31 @@ function renderChecks(checks, hostName){
     const ic = HSTATUS_ICON[c.status] || '•';
     let rem = '';
     if(c.remedy){
-      const cmd  = c.remedy.cmd || '';
-      const isInfo = (c.remedy.where||'').toLowerCase().includes('note')
-                  || (c.remedy.where||'').toLowerCase().includes('macos');
+      const rem0 = c.remedy;
+      // Some remedies (shown before we can detect the remote OS) carry per-OS
+      // `variants` so the user can pick Linux vs Windows and copy the right one.
+      const variants = (Array.isArray(rem0.variants) && rem0.variants.length) ? rem0.variants : null;
+      const cmd  = rem0.cmd || (variants ? variants[0].cmd : '') || '';
+      const isInfo = (rem0.where||'').toLowerCase().includes('note')
+                  || (rem0.where||'').toLowerCase().includes('macos');
       // Show Run only when there's a real chance it will work (SSH up,
       // command isn't purely informational like macOS notes or DNS hints).
-      const canRun = sshOk && !isInfo && cmd.trim() && !cmd.trim().startsWith('#'+'')
+      const canRun = sshOk && !isInfo && cmd.trim() && !cmd.trim().startsWith('#')
                      && !cmd.includes('rm '+KNOWN_HOSTS_PATH); // hub-side hints
       const runBtn = canRun
         ? `<button class="btn-mini hbtn-run" type="button" data-h="${esc(hostName||'')}">▶ Run on remote</button>`
         : '';
+      let body;
+      if(variants){
+        const tabs = variants.map((v,i)=>`<button class="osvar${i===0?' on':''}" type="button" data-i="${i}">${esc(v.label||v.os||('Option '+(i+1)))}</button>`).join('');
+        const pres = variants.map((v,i)=>`<pre class="osvarcmd"${i===0?'':' hidden'}>${esc(v.cmd||'')}</pre>`).join('');
+        body = `<div class="osvars">${tabs}</div>${pres}`;
+      } else {
+        body = `<pre>${esc(cmd)}</pre>`;
+      }
       rem = `<div class="rem">
-        <div class="lbl">→ ${esc(c.remedy.where||'')}</div>
-        <pre>${esc(cmd)}</pre>
+        <div class="lbl">→ ${esc(rem0.where||'')}</div>
+        ${body}
         <div class="cp">
           <button class="btn-mini hbtn-copyrem" type="button">📋 Copy</button>
           ${runBtn}
@@ -1517,8 +1533,20 @@ async function testHost(name){
 
 function wireRemedyButtons(){
   // (Re-)attach handlers each time the host list is rendered.
+  // Per-OS variant switcher: clicking an OS tab shows its command block.
+  document.querySelectorAll('.rem .osvars').forEach(bar => {
+    const rem  = bar.closest('.rem');
+    const pres = rem.querySelectorAll('.osvarcmd');
+    bar.querySelectorAll('.osvar').forEach(btn => btn.onclick = () => {
+      const i = +btn.dataset.i;
+      bar.querySelectorAll('.osvar').forEach(b => b.classList.toggle('on', b===btn));
+      pres.forEach((p,j) => { p.hidden = (j!==i); });
+    });
+  });
   document.querySelectorAll('.hbtn-copyrem').forEach(b => b.onclick = async () => {
-    const pre = b.closest('.rem').querySelector('pre');
+    // Copy the currently-visible variant (or the only block).
+    const rem = b.closest('.rem');
+    const pre = rem.querySelector('pre.osvarcmd:not([hidden])') || rem.querySelector('pre');
     const ok = await copyText(pre.textContent);
     b.textContent = ok ? '✓ Copied' : '⚠️ Copy failed — select and Ctrl+C';
     setTimeout(()=>b.textContent='📋 Copy', 1800);
@@ -1530,7 +1558,7 @@ function openRunPanel(btn){
   const rem = btn.closest('.rem');
   if(rem.querySelector('.runpanel')){ rem.querySelector('.runpanel').scrollIntoView({block:'nearest'}); return; }
   const host = btn.dataset.h;
-  const cmd  = rem.querySelector('pre').textContent;
+  const cmd  = (rem.querySelector('pre.osvarcmd:not([hidden])') || rem.querySelector('pre')).textContent;
   const needsSudo = /(^|\s|;|&&|\|\|)sudo(\s|$)/.test(cmd);
   const panel = document.createElement('div');
   panel.className = 'runpanel';

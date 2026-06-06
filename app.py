@@ -2305,24 +2305,64 @@ def _remedy_docker_group(user, os_info):
                    f"sudo usermod -aG docker {user}"}
 
 def _remedy_pubkey(user):
+    # This fires at the "SSH reachable" step — BEFORE we can detect the remote OS
+    # (auth has to succeed first). So we can't pick the right command for the user;
+    # instead we offer per-OS variants and let them choose + copy. `cmd` stays the
+    # Linux form so the "Run on remote" button (only shown once SSH works) keeps
+    # working on a reachable Linux host.
     key = get_hub_pubkey()
-    return {"where": "on the remote",
-            "cmd": f"# Linux / macOS:\n"
-                   f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+    return {"where": "on the remote — pick your OS, then Copy",
+            "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
                    f"echo '{key}' >> ~/.ssh/authorized_keys\n"
-                   f"chmod 600 ~/.ssh/authorized_keys\n"
-                   f"\n# Windows (PowerShell) — for a normal account:\n"
-                   f"#   Add-Content $env:USERPROFILE\\.ssh\\authorized_keys '{key}'\n"
-                   f"# For an Administrator account, OpenSSH reads a shared file instead:\n"
-                   f"#   Add-Content $env:ProgramData\\ssh\\administrators_authorized_keys '{key}'"}
+                   f"chmod 600 ~/.ssh/authorized_keys",
+            "variants": [
+                {"os": "linux", "label": "Linux / macOS",
+                 "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                        f"echo '{key}' >> ~/.ssh/authorized_keys\n"
+                        f"chmod 600 ~/.ssh/authorized_keys"},
+                {"os": "windows", "label": "Windows (standard user)",
+                 "cmd": f"# PowerShell, for a non-admin account:\n"
+                        f"New-Item -ItemType Directory -Force $env:USERPROFILE\\.ssh | Out-Null\n"
+                        f"Add-Content $env:USERPROFILE\\.ssh\\authorized_keys '{key}'"},
+                {"os": "windows-admin", "label": "Windows (admin user)",
+                 "cmd": f"# PowerShell (elevated). Admin accounts use a shared keyfile with a\n"
+                        f"# strict ACL, or OpenSSH ignores it:\n"
+                        f"Add-Content $env:ProgramData\\ssh\\administrators_authorized_keys '{key}'\n"
+                        f"icacls $env:ProgramData\\ssh\\administrators_authorized_keys /inheritance:r /grant Administrators:F /grant SYSTEM:F"},
+            ]}
+
+def _remedy_sshd_check():
+    """Multi-OS 'is sshd up / port open' remedy. Shown on the connect-failure
+    paths, which happen BEFORE OS detection — so we offer Linux and Windows and
+    let the user pick + copy the one that matches their remote."""
+    return {"where": "on the remote — pick your OS",
+            "cmd": "# sshd may not be running, or the port is firewalled.\n"
+                   "sudo systemctl status sshd\n"
+                   "sudo ufw status                 # ufw\n"
+                   "sudo firewall-cmd --list-ports  # firewalld",
+            "variants": [
+                {"os": "linux", "label": "Linux",
+                 "cmd": "# Is sshd running, and is port 22 open?\n"
+                        "sudo systemctl status sshd\n"
+                        "sudo ufw status                 # ufw\n"
+                        "sudo firewall-cmd --list-ports  # firewalld"},
+                {"os": "windows", "label": "Windows",
+                 "cmd": "# PowerShell (elevated): is OpenSSH Server up and port 22 allowed?\n"
+                        "Get-Service sshd\n"
+                        "Get-NetFirewallRule -DisplayName '*OpenSSH*' | Format-Table Name,Enabled,Profile\n"
+                        "# Install + enable it if missing:\n"
+                        "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0\n"
+                        "Set-Service sshd -StartupType Automatic; Start-Service sshd"},
+            ]}
 
 def _remedy_sshd_down(os_info):
-    fam = (os_info or {}).get("family") or "linux"
+    fam = (os_info or {}).get("family") or ""
     if fam == "alpine":
         return {"where": "on the remote",
                 "cmd": "# Check that sshd is running:\nsudo rc-service sshd status"}
-    return {"where": "on the remote",
-            "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
+    # OS unknown (the usual case here — this fires on a connect timeout, before
+    # detection) → offer both Linux and Windows.
+    return _remedy_sshd_check()
 
 def _clean_ssh_err(err, out, rc):
     """Build a human summary of an SSH failure. Skips `Warning:` chatter (host
@@ -2389,10 +2429,7 @@ def probe_host(name):
         item = {"id": "connect", "label": "SSH reachable", "status": "fail",
                 "detail": f"port {port} not reachable: {tcp_err}",
                 "debug": tcp_err,
-                "remedy": {"where": "on the remote",
-                           "cmd": "# sshd may not be running, or the port is firewalled.\n"
-                                  "# On the remote:\nsudo systemctl status sshd\n"
-                                  "# Or check the firewall:\nsudo firewall-cmd --list-ports  # firewalld\nsudo ufw status                  # ufw"}}
+                "remedy": _remedy_sshd_check()}
         checks.append(item)
         result = {"checks": checks, "summary": _summarize(checks), "os": {}}
         _record_check(name, result)
