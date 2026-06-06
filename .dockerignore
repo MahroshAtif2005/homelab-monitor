@@ -7,3 +7,12 @@ data/
 data-dev/
 *.bak
 docker-compose*.yml
+# Not used by the image build (Dockerfile only copies app.py, probe.*, static/);
+# keep the ~16 MB of docs media + site/design out of the build context.
+docs/
+website/
+design/
+.github/
+scripts/
+*.md
+mkdocs.yml

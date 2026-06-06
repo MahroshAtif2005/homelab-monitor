@@ -6,13 +6,13 @@
 [![Unique cloners (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones-unique.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 
 [![website](https://img.shields.io/badge/docs-sikamikanikobg.github.io%2Fhomelab--monitor-d29922?logo=readthedocs&logoColor=white)](https://sikamikanikobg.github.io/homelab-monitor/)
-![version](https://img.shields.io/badge/version-0.10.0-blue)
+![version](https://img.shields.io/badge/version-0.13.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
 [![last commit](https://img.shields.io/github/last-commit/SikamikanikoBG/homelab-monitor?color=informational)](https://github.com/SikamikanikoBG/homelab-monitor/commits/main)
 
-> 🆕 **v0.12.0** — **Container disk that's actually right**: the Containers tab now counts each container's true footprint — writable layer **plus its volumes & bind mounts** (mounts shared between containers are excluded), so Ollama and Immich finally show their real GBs instead of a near-empty writable layer. Plus **AI Models** now recognises **WhisperX / whisper-asr-webservice** and a dozen more servers (SGLang, Triton, Wyoming voice, OpenLLM, LiteLLM, GPUStack, Cortex/Jan…), the **time-range picker shows on every tab**, and the sidebar brand no longer truncates. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
+> 🆕 **v0.13.0** — **Windows hosts, treemaps & a new Disks tab.** Monitor **Windows machines** over SSH (agentless, via a built-in PowerShell probe — no install), with a Linux/Windows **per-OS command chooser** in the redesigned Hosts onboarding. The **Containers** tab now splits **RAM vs VRAM** into separate columns (real resident RAM, not page cache) with a table total. The **System** tab gains an interactive **Memory map** treemap (RAM by container **and** service — handy on Docker-less boxes), and there's a brand-new **Disks** tab with **WizTree-style** nested folder treemaps to hunt down space hogs. Plus a cohesive UI refresh and a more prominent GitHub/version chrome. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
 >
 > 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
 
@@ -29,7 +29,11 @@ get started. If you're newer to home labs it should just work; if you're more
 advanced, everything is a handful of clearly-commented Python functions you can
 extend.
 
-![HomeLab Monitor — a quick tour of the tabs](docs/demo.gif)
+<a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4">
+  <img src="docs/demo.gif" alt="HomeLab Monitor — a 65-second tour of the dashboard" width="820">
+</a>
+
+<sub>▶ <a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4"><b>Watch the full HD demo (MP4, ~65s)</b></a> — the looping GIF above is a muted preview. The video tours GPU &amp; AI models, the RAM/VRAM container view, the Memory-map and Disk treemaps, and adding a Windows host over SSH.</sub>
 
 ## What it shows
 
@@ -48,15 +52,23 @@ active host:
   server's own API. Servers stay listed as **Idle** when their model unloads (nothing
   flickers away), and a **"Driven by"** breakdown shows *which services are calling each
   server* — so you can see what's actually driving Ollama.
-- **Containers** — health of **every** Docker container with uptime, memory,
-  disk footprint and **clickable port chips** that open `host:port` in a new tab.
+- **Containers** — health of **every** Docker container with uptime, **RAM and
+  GPU-VRAM in separate columns** (RAM is the real resident set — page cache
+  excluded — so the numbers add up), real on-disk footprint, a **table total**,
+  and **clickable port chips** that open `host:port` in a new tab.
 - **Services** — **systemd** service health for the active host (local *or*
   remote), with the units *you* deployed highlighted, any failed unit surfaced
   first, plus per-unit uptime, memory, and listen ports.
 - **System** — CPU, RAM, load, uptime, temperature and disk usage, **plus** a
   full inventory panel: OS + version, kernel, **architecture**, init system,
-  bare-metal/VM detection, machine model, CPU model & topology, and GPU.
-  History is local-only for now; live KPIs + inventory work for any host.
+  bare-metal/VM detection, machine model, CPU model & topology, and GPU. A
+  **Memory map** treemap shows *exactly* what's using RAM — grouped by
+  **container** and by **systemd service** — so it's useful even on a box with no
+  Docker. History is local-only for now; live KPIs + inventory work for any host.
+- **Disks** — a **WizTree-style treemap** per filesystem: scan a disk and see
+  what's eating the space as nested rectangles (top folders **and** their
+  sub-folders in one view), then click any folder to drill deeper. On-demand and
+  cached, so it never hammers your disks in the background.
 - **Network** — per-host interfaces (IPv4/IPv6, MAC, link state, speed, MTU,
   RX/TX), default gateway, DNS resolvers, and a listening-socket table that
   flags which ports are bound to **all interfaces** vs localhost.
@@ -64,10 +76,12 @@ active host:
   nftables), SSH hardening (root login / password auth), SELinux/AppArmor,
   fail2ban, reboot-pending and auto-updates — **issues surfaced first**, with
   anything that needs root to read marked clearly rather than guessed.
-- **Hosts** — a registry and onboarding wizard: paste the hub's public key,
-  add a host, run a per-capability **Test connection** (SSH / `/proc` / Docker
-  socket / systemd / `nvidia-smi`), and use **▶ Run on remote** to execute the
-  fix command on the remote without leaving the dashboard.
+- **Hosts** — a registry and clean three-step onboarding: authorize the hub's
+  key (with the exact command **for the remote's OS**), add a host — **Linux, a
+  Raspberry Pi, or Windows** — and run a per-capability **Test connection** (SSH
+  / `/proc` or WMI / Docker / systemd or Windows services / `nvidia-smi`). For
+  anything not yet working it shows the precise fix command for that machine's
+  OS, and **▶ Run on remote** applies it without leaving the dashboard.
 
 History is stored in SQLite and **downsampled on read**, so a six-month view loads
 as quickly and reads as cleanly as the last hour.
@@ -82,7 +96,7 @@ as quickly and reads as cleanly as the last hour.
 
 ![GPU tab](docs/gpu.png)
 
-**Containers** — health of every container at a glance:
+**Containers** — every container's health, with **RAM and VRAM in separate columns**, real disk footprint and a table total:
 
 ![Containers tab](docs/containers.png)
 
@@ -90,9 +104,17 @@ as quickly and reads as cleanly as the last hour.
 
 ![Services tab](docs/services.png)
 
-**System** — KPIs + disks, plus the OS / architecture / hardware inventory for any host:
+**System** — KPIs + disks + the OS / architecture / hardware inventory, **plus the Memory map**: what's using RAM, grouped by container and by service:
 
 ![System tab](docs/system.png)
+
+**Memory map** — an interactive treemap of RAM by container & service (works on Docker-less hosts too):
+
+![Memory-map RAM treemap](docs/ramtree.png)
+
+**Disks** — a WizTree-style treemap of what's eating each filesystem; nested folders, click to drill in:
+
+![Disks tab — folder treemap](docs/disks.png)
 
 **Network** — interfaces, DNS, and listening sockets with exposure flags:
 
