@@ -6,7 +6,7 @@
 [![Unique cloners (14d)](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSikamikanikoBG%2Fhomelab-monitor%2Fstats%2Fclones-unique.json&style=social&logo=git&cacheSeconds=300)](https://github.com/SikamikanikoBG/homelab-monitor)
 
 [![website](https://img.shields.io/badge/docs-sikamikanikobg.github.io%2Fhomelab--monitor-d29922?logo=readthedocs&logoColor=white)](https://sikamikanikobg.github.io/homelab-monitor/)
-![version](https://img.shields.io/badge/version-0.13.0-blue)
+[![version](https://img.shields.io/github/v/release/SikamikanikoBG/homelab-monitor?color=blue&label=version)](https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CHANGELOG.md)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
@@ -14,7 +14,7 @@
 
 > 🆕 **v0.13.0** — **Windows hosts, treemaps & a new Disks tab.** Monitor **Windows machines** over SSH (agentless, via a built-in PowerShell probe — no install), with a Linux/Windows **per-OS command chooser** in the redesigned Hosts onboarding. The **Containers** tab now splits **RAM vs VRAM** into separate columns (real resident RAM, not page cache) with a table total. The **System** tab gains an interactive **Memory map** treemap (RAM by container **and** service — handy on Docker-less boxes), and there's a brand-new **Disks** tab with **WizTree-style** nested folder treemaps to hunt down space hogs. Plus a cohesive UI refresh and a more prominent GitHub/version chrome. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
 >
-> 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
+> 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** See the [full changelog](CHANGELOG.md) for what changed in every release. If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
 
 A small, friendly dashboard for a self-hosted home lab. One container gives you a
 single page that answers the everyday questions: **is the GPU busy and which model
