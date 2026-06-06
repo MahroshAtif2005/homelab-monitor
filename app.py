@@ -594,6 +594,7 @@ def _os_family(osid, id_like="", uname=""):
     """Normalize an os-release ID into a family. Shared with _detect_os()."""
     osid, id_like, uname = (osid or "").lower(), (id_like or "").lower(), (uname or "").lower()
     if uname == "darwin":                                                         return "macos"
+    if uname == "windows" or osid == "windows":                                   return "windows"
     if osid == "alpine":                                                          return "alpine"
     if osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like: return "suse"
     if osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:   return "debian"
@@ -2047,19 +2048,46 @@ except Exception as e:
     print("probe.py missing:", e, flush=True)
     _PROBE_SCRIPT = b""
 
+# Windows hosts can't run probe.py (no /proc, no python3 by default). We pipe a
+# PowerShell probe instead — always present on Windows, nothing to install — that
+# emits the exact same `host` JSON contract. Loaded once at boot like probe.py.
+_PROBE_PS_PATH = os.path.join(os.path.dirname(__file__), "probe.ps1")
+try:
+    with open(_PROBE_PS_PATH, "rb") as _f:
+        _PROBE_PS_SCRIPT = _f.read()
+except Exception as e:
+    print("probe.ps1 missing:", e, flush=True)
+    _PROBE_PS_SCRIPT = b""
+
+# How we run a stdin-piped PowerShell script on a Windows remote, regardless of
+# whether its OpenSSH default shell is cmd.exe or PowerShell. `-Command -` reads
+# the whole script from stdin (an EncodedCommand would blow past cmd's 8 KB argv
+# limit for a probe this size), so we feed it the same way probe.py is fed.
+_WIN_PS_CMD = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"
+
 HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
 HOST_DATA_LOCK = threading.Lock()
 HOST_POLL_TIMEOUT = 15
 
-def probe_host_metrics(user, host, port):
-    """Run probe.py on the remote via SSH stdin, return (data, error)."""
-    if not _PROBE_SCRIPT:
-        return None, "probe.py not packaged in this image"
-    rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
-                                      _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+def probe_host_metrics(user, host, port, family="linux"):
+    """Run the right probe on the remote via SSH stdin, return (data, error).
+    Windows hosts get the PowerShell probe; everything else gets probe.py. Both
+    emit the same JSON shape, so the caller and the UI don't branch on OS."""
+    if family == "windows":
+        if not _PROBE_PS_SCRIPT:
+            return None, "probe.ps1 not packaged in this image"
+        rc, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                          _PROBE_PS_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+    else:
+        if not _PROBE_SCRIPT:
+            return None, "probe.py not packaged in this image"
+        rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
+                                          _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
     if rc != 0:
         return None, _clean_ssh_err(err, out, rc)
-    out = (out or "").strip()
+    # lstrip a UTF-8 BOM: PowerShell over SSH can prepend one, which str.strip()
+    # won't remove and which would otherwise make json.loads choke on char 0.
+    out = (out or "").lstrip("﻿").strip()
     if not out:
         return None, "empty response from probe"
     try:
@@ -2121,7 +2149,8 @@ def host_poller():
                 if not parsed:
                     continue
                 u, host, port = parsed
-                data, err = probe_host_metrics(u, host, port)
+                fam = ((check.get("os") or {}).get("family")) or "linux"
+                data, err = probe_host_metrics(u, host, port, fam)
                 with HOST_DATA_LOCK:
                     entry = HOST_DATA.get(h["name"], {})
                     if data:
@@ -2204,6 +2233,21 @@ _OS_DETECT_SCRIPT = (
           # discovery output above.
 )
 
+# Windows can't run the POSIX snippet above: a Windows OpenSSH host runs it under
+# cmd.exe (which never expands `$(…)`) or PowerShell (where `uname` doesn't
+# exist), so neither yields a usable UNAME/ID. When that happens we re-probe with
+# this tiny PowerShell script piped over stdin — it answers on any Windows shell —
+# and emit the same KEY=VALUE lines the parser already understands.
+_WIN_DETECT_PS = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "$o=Get-CimInstance Win32_OperatingSystem;"
+    "'UNAME=Windows';'ID=windows';"
+    "\"PRETTY_NAME=$($o.Caption)\";"
+    "\"VERSION_ID=$($o.Version)\";"
+    "\"ARCH=$($o.OSArchitecture)\";"
+    "'INIT=windows-services'"
+).encode("utf-8")
+
 def _detect_os(user, host, port):
     """Run a tiny discovery script via SSH. Returns a normalized dict. We
     ignore rc here — we only care about whatever lines did land on stdout."""
@@ -2213,18 +2257,30 @@ def _detect_os(user, host, port):
         if "=" in line:
             k, _, v = line.partition("=")
             info[k.strip()] = v.strip().strip('"').strip("'")
-    # Family normalization for branching remedies (shared with the local inventory).
     uname = (info.get("UNAME") or "").lower()
+    # Windows fallback: no usable POSIX marker came back → ask PowerShell directly.
+    if uname not in ("linux", "darwin") and not info.get("ID"):
+        _, wout, _, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                        _WIN_DETECT_PS, timeout=10)
+        winfo = {}
+        for line in (wout or "").splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                winfo[k.strip()] = v.strip().strip('"').strip("'")
+        if (winfo.get("UNAME") or "").lower() == "windows":
+            info, uname = winfo, "windows"
+    # Family normalization for branching remedies (shared with the local inventory).
     family = _os_family(info.get("ID"), info.get("ID_LIKE"), uname)
     # _os_family() collapses unknown to "linux"; preserve a non-linux uname (e.g.
     # an exotic kernel) the way the old logic did.
     if family == "linux" and uname not in ("linux", ""):
         family = uname
     info["family"] = family
-    # Pretty short label for the UI badge
+    # Pretty short label for the UI badge. The "· windows-services" init suffix
+    # is noise on Windows, so the label there is just the product name.
     pretty = info.get("PRETTY_NAME") or info.get("ID") or info.get("UNAME") or "unknown"
     init   = info.get("INIT")
-    info["label"] = f"{pretty}" + (f" · {init}" if init else "")
+    info["label"] = pretty if family == "windows" else (f"{pretty}" + (f" · {init}" if init else ""))
     return info
 
 def _remedy_docker_group(user, os_info):
@@ -2249,10 +2305,16 @@ def _remedy_docker_group(user, os_info):
                    f"sudo usermod -aG docker {user}"}
 
 def _remedy_pubkey(user):
+    key = get_hub_pubkey()
     return {"where": "on the remote",
-            "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
-                   f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
-                   f"chmod 600 ~/.ssh/authorized_keys"}
+            "cmd": f"# Linux / macOS:\n"
+                   f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                   f"echo '{key}' >> ~/.ssh/authorized_keys\n"
+                   f"chmod 600 ~/.ssh/authorized_keys\n"
+                   f"\n# Windows (PowerShell) — for a normal account:\n"
+                   f"#   Add-Content $env:USERPROFILE\\.ssh\\authorized_keys '{key}'\n"
+                   f"# For an Administrator account, OpenSSH reads a shared file instead:\n"
+                   f"#   Add-Content $env:ProgramData\\ssh\\administrators_authorized_keys '{key}'"}
 
 def _remedy_sshd_down(os_info):
     fam = (os_info or {}).get("family") or "linux"
@@ -2380,6 +2442,49 @@ def probe_host(name):
                        "detail": "macOS uses launchd, not systemd"})
         checks.append({"id": "nvidia", "label": "nvidia-smi",       "status": "info",
                        "detail": "no NVIDIA driver path on macOS"})
+        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
+        _record_check(name, result)
+        return result
+
+    if (os_info.get("family") or "") == "windows":
+        # Windows host: same checklist, Windows-native checks. All run through
+        # PowerShell-over-stdin so cmd.exe quoting can't bite us. The probe is the
+        # PowerShell one (probe.ps1); these checks just gate it and drive the UI.
+        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
+                       "detail": os_info.get("label") or "Windows"})
+        # /proc analogue: can we read host state via WMI/CIM?
+        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"\"up=$([int]((Get-Date)-(Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)\"",
+            timeout=10)
+        if out and "up=" in out:
+            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "ok",
+                           "detail": f"uptime {out.strip().split('up=')[-1][:12]}s"})
+        else:
+            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "warn",
+                           "detail": (err or "no reply from PowerShell")[:160]})
+        # Docker on Windows: only if the CLI is on PATH (Docker Desktop, or a WSL
+        # engine exposed to Windows). Honest "info" otherwise.
+        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"try{(docker version --format '{{.Server.Version}}')}catch{''}", timeout=12)
+        dv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+        if dv and "." in dv and "error" not in dv.lower() and "cannot" not in dv.lower():
+            checks.append({"id": "docker", "label": "Docker", "status": "ok", "detail": f"server v{dv}"})
+        else:
+            checks.append({"id": "docker", "label": "Docker", "status": "info",
+                           "detail": "Docker CLI not on PATH — container panel hidden for this host"})
+        # systemd D-Bus analogue: Windows services are always queryable.
+        checks.append({"id": "dbus", "label": "Windows services", "status": "ok",
+                       "detail": "Get-Service available"})
+        # nvidia-smi works on Windows too when the driver is installed.
+        _, out, _, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"if(Get-Command nvidia-smi -EA SilentlyContinue){(nvidia-smi --query-gpu=name --format=csv,noheader -i 0)}else{'missing'}",
+            timeout=10)
+        nv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+        if nv and nv != "missing":
+            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": nv[:120]})
+        else:
+            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
+                           "detail": "not found — GPU panel will be hidden for this host"})
         result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
         _record_check(name, result)
         return result

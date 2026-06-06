@@ -468,7 +468,7 @@ a{color:var(--info)}
 
 <!-- ───────── Services ───────── -->
 <section data-tab="services" hidden>
-  <div class="card"><h2>🧩 systemd services</h2>
+  <div class="card"><h2 id="svctitle">🧩 systemd services</h2>
     <div id="svcbody"></div>
   </div>
 </section>
@@ -1048,8 +1048,15 @@ function renderServicesBlock(sd){
   const ss = sd.summary || {};
   const svc = document.getElementById('svcbody');
   if(!svc) return;
+  // Relabel for Windows hosts: the data is Windows services, not systemd units.
+  const fam = (CURRENT_HOST==='local'
+      ? (HH&&HH.os&&HH.os.family)
+      : (HOST_DATA&&HOST_DATA.host&&HOST_DATA.host.os&&HOST_DATA.host.os.family)) || '';
+  const win = fam==='windows';
+  const title = document.getElementById('svctitle');
+  if(title) title.textContent = win ? '🧩 Windows services' : '🧩 systemd services';
   if(!sd.available){
-    svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">systemd monitoring is off</div><div class="d">${esc(sd.reason||'No D-Bus / systemd detected.')}</div></div></div>`;
+    svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">${win?'service monitoring is off':'systemd monitoring is off'}</div><div class="d">${esc(sd.reason||(win?'No services returned.':'No D-Bus / systemd detected.'))}</div></div></div>`;
     return;
   }
   // Port pills link to <host>:<port> — locally that's this page's host; per-host
@@ -1076,7 +1083,9 @@ function renderServicesBlock(sd){
     <table style="margin-top:14px"><thead><tr>
       <th>Unit</th><th>State</th><th>Ports</th><th>Uptime</th><th>Memory</th><th>Description</th>
     </tr></thead><tbody>${rows}</tbody></table>
-    <p class="cap">Showing the units you deployed (under <code>/etc/systemd/system</code>) plus any failed unit. Vendor services are hidden by default to keep the table readable.</p>`;
+    <p class="cap">${win
+      ? 'Showing this host\'s <b>Automatic</b>-start Windows services (green = running, amber = stopped). Manual and disabled services are hidden to keep the table readable.'
+      : 'Showing the units you deployed (under <code>/etc/systemd/system</code>) plus any failed unit. Vendor services are hidden by default to keep the table readable.'}</p>`;
 }
 
 async function renderServicesTab(){

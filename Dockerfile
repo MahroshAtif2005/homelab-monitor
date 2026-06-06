@@ -16,6 +16,9 @@ RUN mkdir -p /app/static \
 
 COPY app.py /app/app.py
 COPY probe.py /app/probe.py
+# probe.ps1 is the Windows-host probe: the hub pipes it over SSH to Windows
+# remotes (PowerShell, no install) and gets back the same JSON probe.py emits.
+COPY probe.ps1 /app/probe.ps1
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
 

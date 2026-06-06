@@ -142,6 +142,20 @@ and i686. The image installs
 `openssh-client` and `ssh-keygen` for this — the SSH key lives under
 `./data/.ssh/` so it survives rebuilds.
 
+**Windows hosts.** A registered host can be **Windows**, not just Linux. When the
+hub detects a Windows remote it pipes a PowerShell probe (`probe.ps1`) instead of
+`probe.py` — over the same SSH key, with nothing to install: PowerShell and WMI
+are already on every Windows 10/11 / Server box, the way Python 3 is on Linux.
+You get the same fleet row plus the **System** (CPU/RAM/disk/hardware),
+**Network** (NICs, listening ports, DNS, gateway) and **Services** (Windows
+services) tabs, and the **GPU** tab too when `nvidia-smi` is on the host. To add
+one: enable the built-in OpenSSH Server on the Windows box
+(`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, then
+`Start-Service sshd`), drop the hub's key into the user's
+`~/.ssh/authorized_keys` (admins use `%ProgramData%\ssh\administrators_authorized_keys`),
+and add it on the **Hosts** tab as `user@windows-host`. SELinux/AppArmor,
+load-average and systemd rows are simply omitted — they have no Windows analogue.
+
 **Security.** Pubkey auth only (passwords disabled). Per-host SSH timeouts so
 a slow remote can never block the loop. The "Run on remote" sudo password is
 piped via stdin to the remote `sudo -S` — never appears in argv on either side
@@ -188,6 +202,45 @@ docker compose up -d --build
 ```
 
 Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
+
+### Running on Windows (WSL2 — no Docker Desktop required)
+
+The dashboard is a Linux container, but it runs happily on **Windows 10/11**
+through **WSL2** — and you don't need the heavyweight Docker Desktop. Install
+the Docker Engine straight into a WSL distro instead:
+
+```powershell
+# In PowerShell — install WSL2 if you don't have it yet (one-time, reboot if asked):
+wsl --install
+```
+
+```bash
+# Then, inside your WSL (Ubuntu) shell — install Docker Engine + Compose:
+curl -fsSL https://get.docker.com | sh
+
+# Enable systemd so dockerd runs as a service (one-time):
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf   # then: wsl --shutdown, reopen
+
+git clone https://github.com/SikamikanikoBG/homelab-monitor.git
+cd homelab-monitor
+docker build -t homelab-monitor .
+docker run -d --name homelab-monitor --restart unless-stopped \
+  -p 9800:9800 -e PORT=9800 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  homelab-monitor
+```
+
+WSL2 forwards the port to Windows automatically, so the dashboard is reachable
+at **http://localhost:9800** in your Windows browser. The GPU, systemd-Services
+and host-temperature panels are Linux-host features and report **"unavailable"**
+on Windows — the Setup panel says so explicitly and the container still starts;
+containers, disk, networking and the multi-host SSH registry all work. To keep
+every byte of Docker data off your `C:` drive, give the distro its own home on
+another drive with `wsl --export` / `wsl --import D:\wsl\Ubuntu-Docker …`.
+
+> Tested live on Windows 11 (WSL2 · Ubuntu 24.04 · Docker Engine 29) — the same
+> hub then monitors this Windows box from a Linux host over SSH, alongside the
+> Linux machines.
 
 ## Supported model servers
 
