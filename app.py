@@ -52,7 +52,7 @@ UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
 # sooner — otherwise a release published right after deploy stays invisible for
 # the full 6h, and a transient GitHub blip sticks for the same window.
 UPDATE_TTL_POSITIVE = 6 * 3600
-UPDATE_TTL_NEGATIVE = 30 * 60
+UPDATE_TTL_NEGATIVE = 10 * 60   # re-check for a new release every 10 min (was 30)
 MAX_POINTS   = 360
 # Multi-machine monitoring (Issue #35, slice 1: registry + probe). The hub's own
 # SSH key lives under SSH_DIR — it's inside /data so it persists across rebuilds
@@ -3364,7 +3364,7 @@ def _disk_scan_worker(path, real):
             if p == root:
                 continue
             by_parent.setdefault(os.path.dirname(p), []).append((p, b))
-        TOP_N, KID_N = 28, 18
+        TOP_N, KID_N = 32, 26
         def build(p, b, depth):
             node = {"name": os.path.basename(p) or hostp(p), "path": hostp(p), "bytes": b}
             kids = sorted(by_parent.get(p, []), key=lambda x: -x[1])

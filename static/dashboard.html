@@ -296,7 +296,7 @@ body{background:var(--canvas)}
 .side{background:var(--sb);border-right:1px solid var(--bd);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;z-index:7}
 .sbrand{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;padding:14px 15px 12px;border-bottom:1px solid var(--bd)}
 .sbrand .logo{font-size:17px;flex:none}.sbrand .nm{font-size:13.5px;font-weight:600;white-space:nowrap}
-.sbrand .ver{margin-left:auto;font-family:var(--mono)}
+.sbrand .ver{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:2px 8px;line-height:1.4}
 .navlist{flex:1 1 auto;overflow:auto;padding:8px}
 .navgroup{color:var(--mut);font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;padding:12px 9px 5px;font-weight:600}
 .nrow{display:flex;align-items:center;gap:9px;width:100%;border:0;background:none;color:var(--mut);font:inherit;font-size:13px;text-align:left;padding:8px 10px;border-radius:6px;cursor:pointer}
@@ -332,7 +332,10 @@ body{background:var(--canvas)}
 #controls .spacer{display:none}#controls .tg{margin-left:8px;font-size:12px}
 .live{margin-left:auto;font-family:var(--mono);font-size:12px}
 .pulse{width:8px;height:8px;border-radius:2px;animation:none}
-.upd{border-radius:5px;background:var(--inset);border-color:var(--bd);color:var(--accent)}
+.upd{border-radius:8px;background:var(--inset);border-color:var(--bd);color:var(--accent)}
+/* app-update badge: same amber CTA look as the Star button, so the chrome is cohesive */
+#updbadge.upd{background:linear-gradient(180deg,#e6b948,#d29922);border:1px solid var(--accent);color:#1a1100;font-weight:600;box-shadow:0 1px 1px #0000001f}
+#updbadge.upd:hover{filter:brightness(1.07)}
 /* enterprise flat surfaces */
 .card{background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:14px 15px;margin:0 0 12px}
 h2{font-size:12px}
@@ -1983,16 +1986,19 @@ function _tmLayout(el,nodes,rect,depth,hue,fmt){
     if(w<3||h<3) return;
     const myHue = depth===0 ? TM_HUES[idx%TM_HUES.length] : hue;
     const kids=(n.children||[]).filter(k=>k.value>0);
-    if(kids.length && w>50 && h>50){
-      const headH=Math.min(20,Math.max(15,h*0.16));
+    if(kids.length && w>34 && h>34){
+      // Show the parent's header only when there's room; otherwise give the whole
+      // tile to the sub-folders so smaller folders still reveal their contents.
+      const headH = (h>=42 && w>=58) ? Math.min(19,Math.max(15,h*0.15)) : 0;
       const cont=document.createElement('div');
       cont.className='tm-group'+(n.click?' clickable':'');
       cont.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${_hsl(myHue,26,12)}`;
       cont.title=`${n.title||n.label} — ${fmt(n.value)}`;
-      cont.innerHTML=`<div class="tm-ghd" style="height:${headH}px;background:${_hsl(myHue,40,28)}"><span class="tm-l">${esc(n.label)}</span><span class="tm-v">${fmt(n.value)}</span></div>`;
+      if(headH>0) cont.innerHTML=`<div class="tm-ghd" style="height:${headH}px;background:${_hsl(myHue,40,28)}"><span class="tm-l">${esc(n.label)}</span><span class="tm-v">${fmt(n.value)}</span></div>`;
       if(n.click) cont.onclick=e=>{e.stopPropagation();n.click(n);};
       el.appendChild(cont);
-      _tmLayout(el,kids,{x:x+2,y:y+headH+2,w:w-4,h:h-headH-4},depth+1,myHue,fmt);
+      const pad = headH>0 ? 2 : 1.5;
+      _tmLayout(el,kids,{x:x+pad,y:y+headH+pad,w:w-2*pad,h:h-headH-2*pad},depth+1,myHue,fmt);
     }else{
       let bg;
       if(n.color) bg=n.color;
