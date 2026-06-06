@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.12.0"
+VERSION      = "0.13.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -41,13 +41,18 @@ HOST_ROOT    = os.environ.get("HOST_ROOT", "/rootfs")          # host / mounted 
 PORT         = int(os.environ.get("PORT", "9800"))
 PRESSURE_MB  = int(os.environ.get("PRESSURE_FREE_MB", "2048"))
 CHECK_UPDATES = os.environ.get("CHECK_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
+# Per-host "a newer OS release exists" check. The probe reads pending *package*
+# updates offline; detecting a whole new distro release needs the network, so the
+# hub does it centrally (endoflife.date). Air-gapped users can switch off just
+# this network lookup and keep the offline package counts.
+CHECK_OS_UPDATES = os.environ.get("CHECK_OS_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
 UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
 # Split cache: once we know there's an update, the answer won't change for hours
 # so we can cache it long. But "no update found" / network errors should expire
 # sooner — otherwise a release published right after deploy stays invisible for
 # the full 6h, and a transient GitHub blip sticks for the same window.
 UPDATE_TTL_POSITIVE = 6 * 3600
-UPDATE_TTL_NEGATIVE = 30 * 60
+UPDATE_TTL_NEGATIVE = 10 * 60   # re-check for a new release every 10 min (was 30)
 MAX_POINTS   = 360
 # Multi-machine monitoring (Issue #35, slice 1: registry + probe). The hub's own
 # SSH key lives under SSH_DIR — it's inside /data so it persists across rebuilds
@@ -80,8 +85,20 @@ if _PROM_OK:
         "model_vram":        Gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
     }
 LOCK = threading.Lock()
-DB = sqlite3.connect(DB_PATH, check_same_thread=False)
-DB.execute("PRAGMA journal_mode=WAL")
+# Open the history DB, but never let a missing/unwritable /data mount kill the
+# whole container at import — a newbie who forgets the `./data:/data` mount should
+# still get a running dashboard (with a diagnostics warning), not a crash loop.
+# Fall back to an in-memory DB so the app boots; history just doesn't persist.
+DB_EPHEMERAL = False
+try:
+    DB = sqlite3.connect(DB_PATH, check_same_thread=False)
+    DB.execute("PRAGMA journal_mode=WAL")
+except sqlite3.OperationalError as e:
+    print(f"WARNING: cannot open DB at {DB_PATH} ({e}); "
+          f"falling back to in-memory (history will not persist). "
+          f"Mount a writable ./data:/data to keep history.", flush=True)
+    DB = sqlite3.connect(":memory:", check_same_thread=False)
+    DB_EPHEMERAL = True
 DB.executescript("""
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
@@ -110,7 +127,7 @@ for col in ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp 
 DB.commit()
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
@@ -122,11 +139,17 @@ _cpu_prev = {"idle": 0, "total": 0}
 
 # ── Docker API over the unix socket ────────────────────────────────────────────
 def _docker(path):
+    # close() must run even when connect/request/read raise (dockerd slow,
+    # restarting, unreachable) — otherwise the manually-created AF_UNIX socket fd
+    # leaks on every failed call and the process eventually hits its fd limit.
     c = http.client.HTTPConnection("localhost", timeout=4)
     c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.sock.settimeout(4); c.sock.connect(DOCKER_SOCK)
-    c.request("GET", path); data = c.getresponse().read(); c.close()
-    return data
+    try:
+        c.sock.settimeout(4); c.sock.connect(DOCKER_SOCK)
+        c.request("GET", path)
+        return c.getresponse().read()
+    finally:
+        c.close()
 
 def containers():
     if time.time() - _ct_cache["at"] < 30 and _ct_cache["list"]:
@@ -164,9 +187,15 @@ def logs_since(cid, since):
 
 # ── Model-server probes (agnostic: append to PROBES to support a new server) ───
 def _http_json(ip, port, path, timeout=2):
+    # try/finally so a down/slow model server (common: idle servers, wrong port
+    # guesses) can't leak the TCP socket fd when request/read raises.
     c = http.client.HTTPConnection(ip, port, timeout=timeout)
-    c.request("GET", path); r = c.getresponse(); body = r.read(); c.close()
-    return json.loads(body) if r.status < 400 else None
+    try:
+        c.request("GET", path); r = c.getresponse(); body = r.read()
+        status = r.status
+    finally:
+        c.close()
+    return json.loads(body) if status < 400 else None
 
 def probe_ollama(ip):
     """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
@@ -395,9 +424,13 @@ def read_disks():
         if len(f) < 3:
             continue
         dev, mp, fs = f[0], f[1].replace("\\040", " "), f[2]
-        if not dev.startswith("/dev/") or fs not in REAL_FS or dev in seen:
+        # De-dupe by MOUNTPOINT (like probe.py), not device: btrfs subvolumes and
+        # ZFS datasets share one device (or a non-/dev/ pool name like `tank/data`),
+        # so de-duping by device hid every subvolume after the first and the old
+        # `/dev/` requirement dropped ZFS entirely. REAL_FS already gates the type.
+        if fs not in REAL_FS or mp in seen:
             continue
-        seen.add(dev)
+        seen.add(mp)
         path = (base.rstrip("/") + mp) if base != "/" else mp
         try:
             st = os.statvfs(path)
@@ -410,6 +443,78 @@ def read_disks():
         except Exception:
             pass
     return sorted(out, key=lambda d: -d["pct"])[:6]
+
+# hwmon drivers / thermal-zone types that expose the real CPU die/core sensors.
+_CPU_HWMON = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal")
+_CPU_ZONE  = ("x86_pkg_temp", "cpu_thermal", "cpu-thermal")
+
+def _cpu_temp_c():
+    """CPU temperature in °C matching `sensors`' CPU cores. The old code took the
+    max of every thermal zone, which on many boards grabs a chipset/PCH/NVMe or a
+    mis-calibrated package sensor 10-20 °C above the cores (dashboard showed 51 °C
+    while `sensors` showed Core N at 37 °C). Prefer the coretemp/k10temp hwmon and
+    report the hottest *core*; then a CPU-typed thermal zone; then, as a last
+    resort, the old hottest-plausible-zone so exotic/ARM boards still report.
+    Mirrors probe.py's _cpu_temp_c so local and remote agree."""
+    best = None
+    try:
+        for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+            try:
+                name = open(hw + "/name").read().strip()
+            except Exception:
+                continue
+            if name not in _CPU_HWMON:
+                continue
+            cores, allt = [], []
+            for inp in glob.glob(hw + "/temp*_input"):
+                try:
+                    t = int(open(inp).read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if not (0 < t < 130):
+                    continue
+                allt.append(t)
+                try:
+                    lbl = open(inp[:-6] + "_label").read().strip().lower()
+                except Exception:
+                    lbl = ""
+                if lbl.startswith("core"):          # Intel "Core N" — exclude Package
+                    cores.append(t)
+            pick = max(cores) if cores else (max(allt) if allt else None)
+            if pick is not None and (best is None or pick > best):
+                best = pick
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                ztype = open(z + "/type").read().strip().lower()
+            except Exception:
+                continue
+            if ztype in _CPU_ZONE or "cpu" in ztype:
+                try:
+                    t = int(open(z + "/temp").read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if 0 < t < 130 and (best is None or t > best):
+                    best = t
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try:
+                t = int(open(z).read().strip()) / 1000.0
+                if 10 < t < 130 and (best is None or t > best):
+                    best = t
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return round(best, 1) if best is not None else None
 
 def read_host():
     h = {"cores": os.cpu_count() or 1}
@@ -427,11 +532,7 @@ def read_host():
     except Exception: h["load1"] = 0
     try: h["uptime"] = int(float(open("/proc/uptime").read().split()[0]))
     except Exception: h["uptime"] = 0
-    t = 0
-    for f in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
-        try: t = max(t, int(open(f).read().strip()) / 1000)
-        except Exception: pass
-    h["ctemp"] = round(t, 1)
+    h["ctemp"] = _cpu_temp_c()
     h["disks"] = read_disks()
     # Slow-changing context (OS / hardware / network / security) for the System,
     # Network and Security tabs. Cached so it isn't recomputed on every 10 s sample.
@@ -493,6 +594,7 @@ def _os_family(osid, id_like="", uname=""):
     """Normalize an os-release ID into a family. Shared with _detect_os()."""
     osid, id_like, uname = (osid or "").lower(), (id_like or "").lower(), (uname or "").lower()
     if uname == "darwin":                                                         return "macos"
+    if uname == "windows" or osid == "windows":                                   return "windows"
     if osid == "alpine":                                                          return "alpine"
     if osid in ("opensuse-leap", "opensuse-tumbleweed", "sles", "sled") or "suse" in id_like: return "suse"
     if osid in ("debian", "ubuntu", "raspbian", "pop", "linuxmint") or "debian" in id_like:   return "debian"
@@ -856,6 +958,30 @@ def _auto_updates_local():
             return m.group(1) != "0"
     return None
 
+def _updates_local():
+    """Pending updates for the hub's own host. We only trust the pre-rendered
+    update-notifier file (read through HOST_ROOT) — running a package manager
+    here would query the *container*, not the host, so on non-apt hosts (or
+    without the file) we return None and the UI shows 'needs elevated read'. The
+    hub's network-side new-release check still works from os.version_id."""
+    txt = _rt(_hp("/var/lib/update-notifier/updates-available"))
+    if not txt:
+        return None
+    out = {"count": None, "security": None, "kernel": None,
+           "source": "apt", "checked": "cached"}
+    # Same line-by-line parse as the probe: the security line gives the security
+    # count, the first other count-bearing line gives the total (wording varies).
+    for line in txt.splitlines():
+        m = re.search(r"(\d+)", line)
+        if not m:
+            continue
+        n, low = int(m.group(1)), line.lower()
+        if "securit" in low:
+            out["security"] = n
+        elif out["count"] is None and ("update" in low or "package" in low or "can be" in low):
+            out["count"] = n
+    return out
+
 def _local_sec():
     return {
         "firewall":        _local_firewall(),
@@ -865,6 +991,7 @@ def _local_sec():
         "fail2ban":        _fail2ban_local(),
         "reboot_required": _reboot_local(),
         "auto_updates":    _auto_updates_local(),
+        "updates":         _updates_local(),
     }
 
 # ── Health monitors: Docker containers + systemd services ──────────────────────
@@ -936,15 +1063,31 @@ def _container_published_ports(ct):
     return sorted(seen)
 
 def _container_stats(cid):
-    """One-shot memory snapshot for a running container. Returns bytes or None."""
+    """One-shot resident-RAM snapshot for a running container: the working set,
+    excluding page cache, exactly like `docker stats`. This is system RAM only —
+    GPU VRAM is attributed separately (nvidia-smi compute-apps). Bytes or None."""
     try:
         d = json.loads(_docker(f"/containers/{cid}/stats?stream=false&one-shot=true"))
     except Exception:
         return None
-    mem = (d.get("memory_stats") or {}).get("usage")
-    # Docker counts page cache against `usage`; subtract it like `docker stats` does.
-    cache = ((d.get("memory_stats") or {}).get("stats") or {}).get("cache", 0)
-    return max(0, (mem or 0) - cache) if mem is not None else None
+    ms = d.get("memory_stats") or {}
+    st = ms.get("stats") or {}
+    # Real resident RAM = anonymous memory (+ shared memory) the container holds.
+    # NOT `usage - inactive_file` (the docker-stats formula): that still includes
+    # ACTIVE file cache, which for AI containers that mmap multi-GB model files is
+    # enormous and fully reclaimable. It inflated every row and made the
+    # per-container sum exceed the host's *used* RAM — impossible for real RAM,
+    # since the host (MemTotal - MemAvailable) counts that cache as available.
+    # anon (+ shmem) is what the container actually occupies and sums sensibly.
+    if "anon" in st:                                   # cgroup v2
+        return (st.get("anon") or 0) + (st.get("shmem") or 0)
+    if "rss" in st:                                    # cgroup v1
+        return (st.get("rss") or 0) + (st.get("rss_huge") or 0)
+    usage = ms.get("usage")                            # last resort: docker-stats math
+    if usage is None:
+        return None
+    cache = st.get("inactive_file", st.get("cache", 0)) or 0
+    return max(0, usage - cache)
 
 def _refresh_docker_enrich(running_ids):
     """Per-running-container memory snapshot (parallel). Cached for
@@ -1086,9 +1229,16 @@ def collect_docker():
         _docker_enrich["data"] = _refresh_docker_enrich(running_ids)
         _docker_enrich["at"] = time.time()
     _maybe_refresh_docker_disk()   # background; first pass leaves disk_bytes None until it lands
+    # Per-container GPU VRAM, attributed by the GPU sampler (nvidia-smi
+    # compute-apps → /proc/<pid>/cgroup → container name). procs is in MB and
+    # keyed by service name (== container name for container-owned PIDs); host /
+    # unattributed PIDs use "host:"/"pid:" keys that never match a container.
+    vram_mb = {p.get("service"): p.get("mem") for p in (LATEST.get("procs") or [])}
     for c in items:
         e = _docker_enrich["data"].get(c["id"]) or {}
         c["mem_bytes"]  = e.get("mem_bytes")
+        vmb = vram_mb.get(c["name"])
+        c["vram_bytes"] = round(vmb * 1048576) if vmb else None
         c["disk_bytes"] = _docker_disk["data"].get(c["id"])
     rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
     items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
@@ -1273,12 +1423,15 @@ def build_overview(now, docker, systemd):
     """One status card per subsystem for the Overview tab. New monitors append here."""
     cards = []
     g = now.get("gpu") or {}
-    tot = g.get("mem_total") or 1
-    used, used_pct = g.get("mem_used", 0), round((g.get("mem_used", 0) / tot) * 100)
-    cards.append({"key": "gpu", "label": "GPU",
-                  "status": "crit" if (tot - used) < PRESSURE_MB else "warn" if used_pct >= 85 else "ok",
-                  "metric": f"{used_pct}% VRAM",
-                  "detail": f"{round(g.get('util', 0))}% util · {round(g.get('temp', 0))}°C"})
+    # Only show the GPU card when a GPU is actually present — otherwise a GPU-less
+    # host would show a misleading frozen "0% VRAM · 0°C" tile.
+    if g.get("available"):
+        tot = g.get("mem_total") or 1
+        used, used_pct = g.get("mem_used", 0), round((g.get("mem_used", 0) / tot) * 100)
+        cards.append({"key": "gpu", "label": "GPU",
+                      "status": "crit" if (tot - used) < PRESSURE_MB else "warn" if used_pct >= 85 else "ok",
+                      "metric": f"{used_pct}% VRAM",
+                      "detail": f"{round(g.get('util', 0))}% util · {round(g.get('temp', 0))}°C"})
     h = now.get("host") or {}
     ram_pct = round(h["ram_used"] / h["ram_total"] * 100) if h.get("ram_total") else 0
     worst_disk = (h.get("disks") or [{}])[0].get("pct", 0)
@@ -1391,10 +1544,273 @@ def collect_update():
         _UPDATE_CACHE.update({"at": now, "data": data})
     return data
 
+# ── Newer-OS-release check (endoflife.date) ───────────────────────────────────
+# The probe reports each host's pending *package* updates offline. Detecting that
+# a whole new distro release exists needs to know the latest upstream version, so
+# the hub fetches it once per distro from endoflife.date and caches it (same split
+# TTL as the app-update check). os_upgrade_for() then compares a host's
+# version_id against the newest cycle — pure cache read, no network at serve time.
+# Degrades silently on any error so an offline hub never lights up the UI red.
+
+# os-release ID → endoflife.date product slug. Rolling distros (arch, gentoo,
+# nixos, tumbleweed, void) have no fixed release to be "behind" → intentionally
+# absent so they're skipped.
+# Verified against endoflife.date's /api/<slug>.json (slugs are not always the
+# obvious os-release ID — Leap is "opensuse", Rocky is "rocky-linux").
+_EOL_SLUG = {
+    "ubuntu": "ubuntu", "pop": "ubuntu", "neon": "ubuntu", "elementary": "ubuntu",
+    "debian": "debian", "raspbian": "debian",
+    "linuxmint": "linuxmint",
+    "opensuse-leap": "opensuse", "opensuse": "opensuse", "sles": "sles",
+    "fedora": "fedora",
+    "almalinux": "almalinux", "rocky": "rocky-linux", "rhel": "rhel",
+    "centos": "centos",
+    "amzn": "amazon-linux", "alpine": "alpine",
+}
+_DISTRO_NAME = {
+    "ubuntu": "Ubuntu", "debian": "Debian", "linuxmint": "Linux Mint",
+    "opensuse": "openSUSE Leap", "sles": "SLES", "fedora": "Fedora",
+    "almalinux": "AlmaLinux", "rocky-linux": "Rocky Linux", "rhel": "RHEL",
+    "centos": "CentOS", "amazon-linux": "Amazon Linux", "alpine": "Alpine",
+}
+_OS_REL_CACHE = {}        # slug -> {"at": ts, "cycles": [{cycle,lts,eol,releaseDate}, ...] | None}
+_OS_REL_LOCK  = threading.Lock()
+
+def _fetch_eol_cycles(slug):
+    """Fetch release cycles for one distro from endoflife.date, newest-first.
+    Returns a list of dicts {cycle, lts, eol, releaseDate} (we keep lts/eol/
+    releaseDate so os_upgrade_for can avoid recommending an unreleased, EOL, or
+    interim release), or None on error. Tolerates the endoflife v1 {result:[...]}
+    envelope and error bodies so a future API shape change can't crash us."""
+    try:
+        req = urllib.request.Request(
+            f"https://endoflife.date/api/{slug}.json",
+            headers={"Accept": "application/json",
+                     "User-Agent": f"homelab-monitor/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            payload = json.loads(r.read())
+        if isinstance(payload, dict):
+            payload = payload.get("result") or []
+        if not isinstance(payload, list):
+            return None
+        out = [{"cycle": str(c.get("cycle")), "lts": c.get("lts"),
+                "eol": c.get("eol"), "releaseDate": c.get("releaseDate")}
+               for c in payload if isinstance(c, dict) and c.get("cycle") is not None]
+        return out or None
+    except Exception:
+        return None
+
+def collect_os_releases():
+    """Refresh the endoflife cache for every distro present in the fleet. Cheap:
+    only fetches slugs whose cache entry is stale, and only ones we actually have
+    a host for. Called from health_scan(); never raises out."""
+    if not CHECK_OS_UPDATES:
+        return
+    slugs = set()
+    for _name, host in _iter_fleet_hosts():
+        osid = ((host or {}).get("os") or {}).get("id")
+        slug = _EOL_SLUG.get((osid or "").lower())
+        if slug:
+            slugs.add(slug)
+    now = int(time.time())
+    for slug in slugs:
+        with _OS_REL_LOCK:
+            ent = _OS_REL_CACHE.get(slug)
+            if ent:
+                ttl = UPDATE_TTL_POSITIVE if ent.get("cycles") else UPDATE_TTL_NEGATIVE
+                if (now - ent["at"]) < ttl:
+                    continue
+        cycles = _fetch_eol_cycles(slug)
+        with _OS_REL_LOCK:
+            _OS_REL_CACHE[slug] = {"at": now, "cycles": cycles}
+
+def os_upgrade_for(os_id, version_id):
+    """Compare a host's distro version against the newest known cycle (cache only,
+    no network). Returns {"new_release": {current, candidate, label}} when a newer
+    release exists, else None.
+
+    endoflife.date returns cycles newest-first, so we locate the host's own cycle
+    and flag it behind only when newer cycles sit before it (list order, not a
+    numeric compare — openSUSE Leap renumbered 42.x → 15.x). The candidate is the
+    newest *qualifying* newer cycle, NOT just cycles[0]: it must be already
+    released, still supported, and — if the host is on an LTS — itself LTS. That
+    stops us telling a 24.04-LTS host to 'upgrade' to a short-lived interim (or an
+    unreleased) release."""
+    if not CHECK_OS_UPDATES or not os_id or not version_id:
+        return None
+    slug = _EOL_SLUG.get(os_id.lower())
+    if not slug:
+        return None
+    with _OS_REL_LOCK:
+        ent = _OS_REL_CACHE.get(slug)
+    cycles = (ent or {}).get("cycles")
+    if not cycles:
+        return None
+    try:
+        strs = [c["cycle"] for c in cycles]
+        idx = None
+        if version_id in strs:
+            idx = strs.index(version_id)
+        else:                                   # host "12.5" → match cycle "12"
+            major = version_id.split(".")[0]
+            if major in strs:
+                idx = strs.index(major)
+        if idx is None or idx == 0:             # not found, or already newest
+            return None
+        host_is_lts = bool(cycles[idx].get("lts"))
+        today = time.strftime("%Y-%m-%d")       # ISO dates compare lexicographically
+        def released(c):
+            rd = c.get("releaseDate")
+            return (not rd) or str(rd) <= today
+        def supported(c):
+            eol = c.get("eol")
+            if eol is True:  return False
+            if eol in (False, None): return True
+            return str(eol) > today
+        candidate = None
+        for c in cycles[:idx]:                  # strictly-newer entries, newest-first
+            if released(c) and supported(c) and (not host_is_lts or c.get("lts")):
+                candidate = c["cycle"]
+                break
+        if not candidate:
+            return None
+        name = _DISTRO_NAME.get(slug, slug)
+        return {"new_release": {"current": version_id, "candidate": candidate,
+                                "label": f"{name} {candidate}"}}
+    except Exception:
+        return None
+
+def enrich_os_upgrade(host):
+    """Return a shallow copy of `host` with os_upgrade set/cleared from the cached
+    endoflife data. NON-mutating on purpose: callers hand us the live shared
+    HOST_DATA/LATEST host dicts from request threads, and mutating those in place
+    (while the poller swaps them and another request serializes them) risks a
+    'dictionary changed size during iteration' RuntimeError. Only the top-level
+    os_upgrade key differs, so a shallow copy is enough."""
+    if host is None:
+        return host
+    os_ = host.get("os") or {}
+    up = os_upgrade_for(os_.get("id"), os_.get("version_id"))
+    out = dict(host)
+    if up:
+        out["os_upgrade"] = up
+    else:
+        out.pop("os_upgrade", None)
+    return out
+
+def _iter_fleet_hosts():
+    """Yield (name, host_block) for the hub itself plus every remote with data.
+    Used by both the endoflife refresh and the /api/health fleet update summary."""
+    yield "local", _local_now_snapshot()
+    with HOST_DATA_LOCK:
+        items = list(HOST_DATA.items())
+    for name, entry in items:
+        host = (entry.get("data") or {}).get("host")
+        if host:
+            yield name, host
+
+def os_updates_summary():
+    """Fleet-wide roll-up that drives the header badge: how many hosts are behind,
+    total pending updates, security count, and which hosts have a newer release.
+
+    `hosts` carries the per-host breakdown (package count, security count, kernel
+    flag, new-release label) so the modal can render a proper per-machine table
+    instead of pointing the user back at each host's Security tab."""
+    hosts_behind = total = security = 0
+    new_release, hosts = [], []
+    for name, host in _iter_fleet_hosts():
+        upd = ((host or {}).get("sec") or {}).get("updates") or {}
+        cnt = upd.get("count") or 0
+        sec = upd.get("security") or 0
+        kernel = bool(upd.get("kernel"))
+        rel = (enrich_os_upgrade(host) or {}).get("os_upgrade", {}).get("new_release")
+        total += cnt
+        security += sec
+        if cnt > 0 or rel:
+            hosts_behind += 1
+            hosts.append({"host": name, "count": cnt, "security": sec,
+                          "kernel": kernel,
+                          "release": rel.get("label") if rel else None})
+        if rel:
+            new_release.append({"host": name, "label": rel.get("label")})
+    return {"hosts_behind": hosts_behind, "total_updates": total,
+            "security": security, "new_release": new_release, "hosts": hosts}
+
+# ── Local capability diagnostics ──────────────────────────────────────────────
+# A "which requirements are met?" checklist for the hub's own host, in the SAME
+# {checks:[{id,label,status,detail,remedy?}], summary} shape the remote probe_host()
+# already produces — so the dashboard renders both with one code path. The point:
+# a deploy that's missing an optional mount (or has no GPU) should STILL run and
+# clearly say what's degraded and how to fix it, instead of failing cryptically.
+
+def _diag(checks, cid, label, status, detail, remedy=None):
+    item = {"id": cid, "label": label, "status": status, "detail": detail}
+    if remedy:
+        item["remedy"] = remedy
+    checks.append(item)
+
+def local_diagnostics():
+    checks = []
+    # GPU (optional) — info, not a failure: the monitor is useful without one.
+    if LATEST.get("gpu_avail"):
+        _diag(checks, "nvidia", "NVIDIA GPU", "ok",
+              f"nvidia-smi OK · {round(LATEST.get('mem_total') or 0)} MB VRAM")
+    else:
+        _diag(checks, "nvidia", "NVIDIA GPU", "info",
+              "no GPU detected — GPU panels are hidden (everything else works)",
+              {"where": "on the host — only if it actually has an NVIDIA GPU",
+               "cmd": "sudo nvidia-ctk runtime configure --runtime=docker --set-as-default\n"
+                      "sudo systemctl restart docker"})
+    # Docker socket — powers Containers + Services + model APIs.
+    try:
+        json.loads(_docker("/version"))
+        _diag(checks, "docker", "Docker socket", "ok", f"reachable at {DOCKER_SOCK}")
+    except Exception:
+        _diag(checks, "docker", "Docker socket", "warn",
+              "not reachable — Containers & model panels are limited",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /var/run/docker.sock:/var/run/docker.sock:ro"})
+    # Host root — disk usage for the real host rather than the container.
+    if os.path.isdir(HOST_ROOT):
+        _diag(checks, "host_root", "Host filesystem", "ok", f"mounted at {HOST_ROOT}")
+    else:
+        _diag(checks, "host_root", "Host filesystem", "warn",
+              "host root not mounted — disk stats show the container only",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /:/rootfs:ro"})
+    # systemd D-Bus — optional Services panel.
+    bus = (os.environ.get("DBUS_SYSTEM_BUS_ADDRESS", "").split("unix:path=")[-1]
+           or "/run/dbus/system_bus_socket")
+    if os.path.exists(bus):
+        _diag(checks, "dbus", "systemd D-Bus", "ok", "socket present — Services panel enabled")
+    else:
+        _diag(checks, "dbus", "systemd D-Bus", "info",
+              "socket not mounted — the Services (systemd) panel is unavailable",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"})
+    # History persistence — in-memory fallback when /data isn't writable.
+    if DB_EPHEMERAL:
+        _diag(checks, "data", "History storage", "warn",
+              "running in-memory — history resets on restart",
+              {"where": "in docker-compose.yml volumes:",
+               "cmd": "- ./data:/data"})
+    else:
+        _diag(checks, "data", "History storage", "ok", f"persisting to {DB_PATH}")
+    # Host metrics — /proc + thermal sensors (needs pid:host and the rootfs mount).
+    if os.path.exists("/proc/stat") and glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+        _diag(checks, "host_metrics", "Host metrics", "ok", "CPU / RAM / temperature readable")
+    elif os.path.exists("/proc/stat"):
+        _diag(checks, "host_metrics", "Host metrics", "info",
+              "CPU / RAM readable; no thermal sensors exposed on this host")
+    else:
+        _diag(checks, "host_metrics", "Host metrics", "warn", "/proc not readable — host metrics limited")
+    return {"checks": checks, "summary": _summarize(checks)}
+
 def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
+    collect_os_releases()
     HEALTH["at"]      = int(time.time())
 
 # ── Settings (UI-managed; persisted in SQLite, no env required) ───────────────
@@ -1655,19 +2071,46 @@ except Exception as e:
     print("probe.py missing:", e, flush=True)
     _PROBE_SCRIPT = b""
 
+# Windows hosts can't run probe.py (no /proc, no python3 by default). We pipe a
+# PowerShell probe instead — always present on Windows, nothing to install — that
+# emits the exact same `host` JSON contract. Loaded once at boot like probe.py.
+_PROBE_PS_PATH = os.path.join(os.path.dirname(__file__), "probe.ps1")
+try:
+    with open(_PROBE_PS_PATH, "rb") as _f:
+        _PROBE_PS_SCRIPT = _f.read()
+except Exception as e:
+    print("probe.ps1 missing:", e, flush=True)
+    _PROBE_PS_SCRIPT = b""
+
+# How we run a stdin-piped PowerShell script on a Windows remote, regardless of
+# whether its OpenSSH default shell is cmd.exe or PowerShell. `-Command -` reads
+# the whole script from stdin (an EncodedCommand would blow past cmd's 8 KB argv
+# limit for a probe this size), so we feed it the same way probe.py is fed.
+_WIN_PS_CMD = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"
+
 HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
 HOST_DATA_LOCK = threading.Lock()
 HOST_POLL_TIMEOUT = 15
 
-def probe_host_metrics(user, host, port):
-    """Run probe.py on the remote via SSH stdin, return (data, error)."""
-    if not _PROBE_SCRIPT:
-        return None, "probe.py not packaged in this image"
-    rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
-                                      _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+def probe_host_metrics(user, host, port, family="linux"):
+    """Run the right probe on the remote via SSH stdin, return (data, error).
+    Windows hosts get the PowerShell probe; everything else gets probe.py. Both
+    emit the same JSON shape, so the caller and the UI don't branch on OS."""
+    if family == "windows":
+        if not _PROBE_PS_SCRIPT:
+            return None, "probe.ps1 not packaged in this image"
+        rc, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                          _PROBE_PS_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+    else:
+        if not _PROBE_SCRIPT:
+            return None, "probe.py not packaged in this image"
+        rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
+                                          _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
     if rc != 0:
         return None, _clean_ssh_err(err, out, rc)
-    out = (out or "").strip()
+    # lstrip a UTF-8 BOM: PowerShell over SSH can prepend one, which str.strip()
+    # won't remove and which would otherwise make json.loads choke on char 0.
+    out = (out or "").lstrip("﻿").strip()
     if not out:
         return None, "empty response from probe"
     try:
@@ -1700,11 +2143,14 @@ def _local_now_snapshot():
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.
-    gpu_total = (LATEST or {}).get("mem_total") or 0
-    if gpu_total > 0:
+    # Gate on gpu_avail (not mem_total) so the GPU block isn't emitted during
+    # warm-up — LATEST['mem_total'] defaults to 24576, which otherwise made the
+    # fleet row show a phantom "0% / 24 GB VRAM" before the first sample on a
+    # GPU-less hub. Mirrors api_health, which already keys off gpu_avail.
+    if (LATEST or {}).get("gpu_avail"):
         out["gpu"] = {
             "mem_used":  (LATEST or {}).get("mem_used", 0),
-            "mem_total": gpu_total,
+            "mem_total": (LATEST or {}).get("mem_total") or 0,
             "util":      (LATEST or {}).get("util", 0),
             "temp":      (LATEST or {}).get("temp", 0),
         }
@@ -1726,7 +2172,8 @@ def host_poller():
                 if not parsed:
                     continue
                 u, host, port = parsed
-                data, err = probe_host_metrics(u, host, port)
+                fam = ((check.get("os") or {}).get("family")) or "linux"
+                data, err = probe_host_metrics(u, host, port, fam)
                 with HOST_DATA_LOCK:
                     entry = HOST_DATA.get(h["name"], {})
                     if data:
@@ -1809,6 +2256,21 @@ _OS_DETECT_SCRIPT = (
           # discovery output above.
 )
 
+# Windows can't run the POSIX snippet above: a Windows OpenSSH host runs it under
+# cmd.exe (which never expands `$(…)`) or PowerShell (where `uname` doesn't
+# exist), so neither yields a usable UNAME/ID. When that happens we re-probe with
+# this tiny PowerShell script piped over stdin — it answers on any Windows shell —
+# and emit the same KEY=VALUE lines the parser already understands.
+_WIN_DETECT_PS = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "$o=Get-CimInstance Win32_OperatingSystem;"
+    "'UNAME=Windows';'ID=windows';"
+    "\"PRETTY_NAME=$($o.Caption)\";"
+    "\"VERSION_ID=$($o.Version)\";"
+    "\"ARCH=$($o.OSArchitecture)\";"
+    "'INIT=windows-services'"
+).encode("utf-8")
+
 def _detect_os(user, host, port):
     """Run a tiny discovery script via SSH. Returns a normalized dict. We
     ignore rc here — we only care about whatever lines did land on stdout."""
@@ -1818,18 +2280,30 @@ def _detect_os(user, host, port):
         if "=" in line:
             k, _, v = line.partition("=")
             info[k.strip()] = v.strip().strip('"').strip("'")
-    # Family normalization for branching remedies (shared with the local inventory).
     uname = (info.get("UNAME") or "").lower()
+    # Windows fallback: no usable POSIX marker came back → ask PowerShell directly.
+    if uname not in ("linux", "darwin") and not info.get("ID"):
+        _, wout, _, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                        _WIN_DETECT_PS, timeout=10)
+        winfo = {}
+        for line in (wout or "").splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                winfo[k.strip()] = v.strip().strip('"').strip("'")
+        if (winfo.get("UNAME") or "").lower() == "windows":
+            info, uname = winfo, "windows"
+    # Family normalization for branching remedies (shared with the local inventory).
     family = _os_family(info.get("ID"), info.get("ID_LIKE"), uname)
     # _os_family() collapses unknown to "linux"; preserve a non-linux uname (e.g.
     # an exotic kernel) the way the old logic did.
     if family == "linux" and uname not in ("linux", ""):
         family = uname
     info["family"] = family
-    # Pretty short label for the UI badge
+    # Pretty short label for the UI badge. The "· windows-services" init suffix
+    # is noise on Windows, so the label there is just the product name.
     pretty = info.get("PRETTY_NAME") or info.get("ID") or info.get("UNAME") or "unknown"
     init   = info.get("INIT")
-    info["label"] = f"{pretty}" + (f" · {init}" if init else "")
+    info["label"] = pretty if family == "windows" else (f"{pretty}" + (f" · {init}" if init else ""))
     return info
 
 def _remedy_docker_group(user, os_info):
@@ -1854,18 +2328,64 @@ def _remedy_docker_group(user, os_info):
                    f"sudo usermod -aG docker {user}"}
 
 def _remedy_pubkey(user):
-    return {"where": "on the remote",
+    # This fires at the "SSH reachable" step — BEFORE we can detect the remote OS
+    # (auth has to succeed first). So we can't pick the right command for the user;
+    # instead we offer per-OS variants and let them choose + copy. `cmd` stays the
+    # Linux form so the "Run on remote" button (only shown once SSH works) keeps
+    # working on a reachable Linux host.
+    key = get_hub_pubkey()
+    return {"where": "on the remote — pick your OS, then Copy",
             "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
-                   f"echo '{get_hub_pubkey()}' >> ~/.ssh/authorized_keys\n"
-                   f"chmod 600 ~/.ssh/authorized_keys"}
+                   f"echo '{key}' >> ~/.ssh/authorized_keys\n"
+                   f"chmod 600 ~/.ssh/authorized_keys",
+            "variants": [
+                {"os": "linux", "label": "Linux / macOS",
+                 "cmd": f"mkdir -p ~/.ssh && chmod 700 ~/.ssh\n"
+                        f"echo '{key}' >> ~/.ssh/authorized_keys\n"
+                        f"chmod 600 ~/.ssh/authorized_keys"},
+                {"os": "windows", "label": "Windows (standard user)",
+                 "cmd": f"# PowerShell, for a non-admin account:\n"
+                        f"New-Item -ItemType Directory -Force $env:USERPROFILE\\.ssh | Out-Null\n"
+                        f"Add-Content $env:USERPROFILE\\.ssh\\authorized_keys '{key}'"},
+                {"os": "windows-admin", "label": "Windows (admin user)",
+                 "cmd": f"# PowerShell (elevated). Admin accounts use a shared keyfile with a\n"
+                        f"# strict ACL, or OpenSSH ignores it:\n"
+                        f"Add-Content $env:ProgramData\\ssh\\administrators_authorized_keys '{key}'\n"
+                        f"icacls $env:ProgramData\\ssh\\administrators_authorized_keys /inheritance:r /grant Administrators:F /grant SYSTEM:F"},
+            ]}
+
+def _remedy_sshd_check():
+    """Multi-OS 'is sshd up / port open' remedy. Shown on the connect-failure
+    paths, which happen BEFORE OS detection — so we offer Linux and Windows and
+    let the user pick + copy the one that matches their remote."""
+    return {"where": "on the remote — pick your OS",
+            "cmd": "# sshd may not be running, or the port is firewalled.\n"
+                   "sudo systemctl status sshd\n"
+                   "sudo ufw status                 # ufw\n"
+                   "sudo firewall-cmd --list-ports  # firewalld",
+            "variants": [
+                {"os": "linux", "label": "Linux",
+                 "cmd": "# Is sshd running, and is port 22 open?\n"
+                        "sudo systemctl status sshd\n"
+                        "sudo ufw status                 # ufw\n"
+                        "sudo firewall-cmd --list-ports  # firewalld"},
+                {"os": "windows", "label": "Windows",
+                 "cmd": "# PowerShell (elevated): is OpenSSH Server up and port 22 allowed?\n"
+                        "Get-Service sshd\n"
+                        "Get-NetFirewallRule -DisplayName '*OpenSSH*' | Format-Table Name,Enabled,Profile\n"
+                        "# Install + enable it if missing:\n"
+                        "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0\n"
+                        "Set-Service sshd -StartupType Automatic; Start-Service sshd"},
+            ]}
 
 def _remedy_sshd_down(os_info):
-    fam = (os_info or {}).get("family") or "linux"
+    fam = (os_info or {}).get("family") or ""
     if fam == "alpine":
         return {"where": "on the remote",
                 "cmd": "# Check that sshd is running:\nsudo rc-service sshd status"}
-    return {"where": "on the remote",
-            "cmd": "# Check that sshd is running and the port is reachable:\nsudo systemctl status sshd"}
+    # OS unknown (the usual case here — this fires on a connect timeout, before
+    # detection) → offer both Linux and Windows.
+    return _remedy_sshd_check()
 
 def _clean_ssh_err(err, out, rc):
     """Build a human summary of an SSH failure. Skips `Warning:` chatter (host
@@ -1932,10 +2452,7 @@ def probe_host(name):
         item = {"id": "connect", "label": "SSH reachable", "status": "fail",
                 "detail": f"port {port} not reachable: {tcp_err}",
                 "debug": tcp_err,
-                "remedy": {"where": "on the remote",
-                           "cmd": "# sshd may not be running, or the port is firewalled.\n"
-                                  "# On the remote:\nsudo systemctl status sshd\n"
-                                  "# Or check the firewall:\nsudo firewall-cmd --list-ports  # firewalld\nsudo ufw status                  # ufw"}}
+                "remedy": _remedy_sshd_check()}
         checks.append(item)
         result = {"checks": checks, "summary": _summarize(checks), "os": {}}
         _record_check(name, result)
@@ -1985,6 +2502,49 @@ def probe_host(name):
                        "detail": "macOS uses launchd, not systemd"})
         checks.append({"id": "nvidia", "label": "nvidia-smi",       "status": "info",
                        "detail": "no NVIDIA driver path on macOS"})
+        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
+        _record_check(name, result)
+        return result
+
+    if (os_info.get("family") or "") == "windows":
+        # Windows host: same checklist, Windows-native checks. All run through
+        # PowerShell-over-stdin so cmd.exe quoting can't bite us. The probe is the
+        # PowerShell one (probe.ps1); these checks just gate it and drive the UI.
+        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
+                       "detail": os_info.get("label") or "Windows"})
+        # /proc analogue: can we read host state via WMI/CIM?
+        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"\"up=$([int]((Get-Date)-(Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)\"",
+            timeout=10)
+        if out and "up=" in out:
+            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "ok",
+                           "detail": f"uptime {out.strip().split('up=')[-1][:12]}s"})
+        else:
+            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "warn",
+                           "detail": (err or "no reply from PowerShell")[:160]})
+        # Docker on Windows: only if the CLI is on PATH (Docker Desktop, or a WSL
+        # engine exposed to Windows). Honest "info" otherwise.
+        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"try{(docker version --format '{{.Server.Version}}')}catch{''}", timeout=12)
+        dv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+        if dv and "." in dv and "error" not in dv.lower() and "cannot" not in dv.lower():
+            checks.append({"id": "docker", "label": "Docker", "status": "ok", "detail": f"server v{dv}"})
+        else:
+            checks.append({"id": "docker", "label": "Docker", "status": "info",
+                           "detail": "Docker CLI not on PATH — container panel hidden for this host"})
+        # systemd D-Bus analogue: Windows services are always queryable.
+        checks.append({"id": "dbus", "label": "Windows services", "status": "ok",
+                       "detail": "Get-Service available"})
+        # nvidia-smi works on Windows too when the driver is installed.
+        _, out, _, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+            b"if(Get-Command nvidia-smi -EA SilentlyContinue){(nvidia-smi --query-gpu=name --format=csv,noheader -i 0)}else{'missing'}",
+            timeout=10)
+        nv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+        if nv and nv != "missing":
+            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": nv[:120]})
+        else:
+            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
+                           "detail": "not found — GPU panel will be hidden for this host"})
         result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
         _record_check(name, result)
         return result
@@ -2274,7 +2834,20 @@ def notify_scan():
 
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
-    return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=15).stdout.strip()
+    # 3 s timeout (matches probe.py and the local-hw nvidia-smi call). A wedged
+    # driver (GPU off the bus / Xid) makes nvidia-smi hang; the GPU half of
+    # sample_once is non-fatal, so a short timeout degrades the GPU panel quickly
+    # instead of stalling host metrics (CPU/RAM/temp) for the full window.
+    return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=3).stdout.strip()
+
+def _gpu_num(x):
+    """Tolerant float for nvidia-smi CSV fields: '[N/A]' / '[Not Supported]' /
+    blank → 0.0 instead of raising, so one unreadable field (power/temp) never
+    aborts the whole GPU sample and hides a present GPU."""
+    try:
+        return float((x or "").strip())
+    except ValueError:
+        return 0.0
 
 def service_for_pid(pid, nm):
     try:
@@ -2362,17 +2935,38 @@ def sample_callers(conts, ai_names):
     return edges
 
 def sample_once():
-    g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-             "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
-    util, mem_used, mem_total, power, temp = (float(x.strip() or 0) for x in g)
     conts = containers()
     nm = {c["id"]: c["name"] for c in conts}
+
+    # ── GPU half ──────────────────────────────────────────────────────────────
+    # Isolated in its own try/except so a flaky, missing or slow nvidia-smi can
+    # NEVER block the host metrics below. Before this, an exception here aborted
+    # the whole sample, freezing CPU/RAM/temperature on every poll (and forever on
+    # a GPU-less host). Now a GPU failure just degrades the GPU panel to "absent"
+    # while temperature & friends keep refreshing.
+    util = mem_used = mem_total = power = temp = 0.0
     procs = {}
-    for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-        if line.strip():
-            pid, mem = (p.strip() for p in line.split(","))
-            svc = service_for_pid(pid, nm)
-            procs[svc] = procs.get(svc, 0) + float(mem or 0)
+    gpu_avail = False
+    try:
+        g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                 "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
+        # Parse each field defensively: nvidia-smi emits the literal "[N/A]" /
+        # "[Not Supported]" for power.draw/temperature.gpu on many consumer/laptop
+        # GPUs and inside containers, even with `nounits`. The old all-or-nothing
+        # float() unpack raised ValueError on that, which the except below caught
+        # and reported the (present, working) GPU as ABSENT. Degrade just the bad
+        # field to 0 instead.
+        util, mem_used, mem_total, power, temp = (_gpu_num(x) for x in g)
+        for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+            if line.strip():
+                pid, mem = (p.strip() for p in line.split(","))
+                svc = service_for_pid(pid, nm)
+                procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
+        gpu_avail = True
+    except Exception as e:
+        # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
+        if LATEST.get("gpu_avail"):
+            print("GPU sample failed (continuing without GPU):", e, flush=True)
 
     # Detect models from EVERY recognised AI server, not just the ones holding the GPU
     # right now — so a server that has unloaded its model (e.g. OLLAMA_KEEP_ALIVE
@@ -2401,9 +2995,13 @@ def sample_once():
     host = read_host()
     ts = int(time.time())
     with LOCK:
+        # When the GPU is absent/failed, store NULL for the GPU columns (not 0) so
+        # history charts skip the gap via AVG() instead of showing a fake 0 dip;
+        # the host columns are always real.
+        gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
         DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp)"
                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                   (ts, util, mem_used, mem_total, power, temp, host["cpu"], host["ram_used"],
+                   (ts, *gcols, host["cpu"], host["ram_used"],
                     host["ram_total"], host["load1"], host["ctemp"]))
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
@@ -2417,6 +3015,7 @@ def sample_once():
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
+                  gpu_avail=gpu_avail,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
@@ -2579,10 +3178,12 @@ def favicon():
 def api_health():
     """Current state of the status monitors (Docker + systemd) plus a light GPU/host
     snapshot. Cheap and DB-free, so the dashboard can poll it often."""
+    gpu_avail = LATEST.get("gpu_avail")
     now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
-                   "mem_total": LATEST["mem_total"] or 24576, "power": LATEST["power"],
-                   "temp": LATEST["temp"]},
-           "host": LATEST["host"]}
+                   "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
+                   "power": LATEST["power"], "temp": LATEST["temp"],
+                   "available": bool(gpu_avail)},
+           "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
     systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
@@ -2590,6 +3191,8 @@ def api_health():
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
+                    "os_updates": os_updates_summary(),
+                    "diagnostics": local_diagnostics(),
                     "overview": build_overview(now, docker, systemd)})
 
 @app.route("/metrics")
@@ -2698,7 +3301,7 @@ def api_host_data(name):
     """Per-host metric snapshot. `local` is the hub itself; remotes are served
     from the in-memory cache populated by host_poller()."""
     if name == "local":
-        return jsonify({"name": "local", "host": _local_now_snapshot(),
+        return jsonify({"name": "local", "host": enrich_os_upgrade(_local_now_snapshot()),
                         "at": int(time.time()), "online": True})
     with HOST_DATA_LOCK:
         entry = HOST_DATA.get(name)
@@ -2710,10 +3313,106 @@ def api_host_data(name):
                         "at": (entry or {}).get("at"),
                         "host": None})
     age = int(time.time()) - int(entry["at"])
-    return jsonify({"name": name, "host": entry["data"].get("host", {}),
+    return jsonify({"name": name, "host": enrich_os_upgrade(entry["data"].get("host", {})),
                     "at": entry["at"], "online": age < INTERVAL * 3,
                     "stale_for": age if age >= INTERVAL * 3 else 0,
                     "error": entry.get("error")})
+
+# ── On-demand disk-usage scan (WizTree-style folder treemap) ──────────────────
+# `du --max-depth=1` of a host path (read through the read-only HOST_ROOT mount),
+# run in a background thread so a slow scan of a big disk never blocks a request.
+# The UI polls until state=="done". Results cached per path; one filesystem only
+# (--one-file-system) so scanning "/" doesn't wander into other mounted disks.
+_DISK_SCAN, _DISK_SCAN_LOCK = {}, threading.Lock()
+_DISK_SCAN_TTL = 900   # reuse a completed scan for 15 min
+
+def _safe_host_dir(path):
+    """Map a requested absolute HOST path to its location under HOST_ROOT, only
+    if it's a real directory. Blocks '..' traversal."""
+    if not path or not path.startswith("/"):
+        return None
+    norm = os.path.normpath(path)
+    if ".." in norm.split("/"):
+        return None
+    base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    real = (base + norm) if base else norm
+    return real if os.path.isdir(real) else None
+
+def _disk_scan_worker(path, real):
+    base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    def hostp(p):
+        return (p[len(base):] or "/") if base and p.startswith(base) else p
+    try:
+        # --max-depth=2 gives two levels at once (folder + its sub-folders) for a
+        # nested treemap. du recurses fully regardless of --max-depth, so this is
+        # no costlier than depth 1 — it only prints more.
+        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", real],
+                           capture_output=True, text=True, timeout=600)
+        sizes = {}
+        for ln in (r.stdout or "").splitlines():
+            parts = ln.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                sizes[os.path.normpath(parts[1])] = int(parts[0])
+            except ValueError:
+                continue
+        root = os.path.normpath(real)
+        total = sizes.get(root, 0)
+        by_parent = {}
+        for p, b in sizes.items():
+            if p == root:
+                continue
+            by_parent.setdefault(os.path.dirname(p), []).append((p, b))
+        TOP_N, KID_N = 32, 26
+        def build(p, b, depth):
+            node = {"name": os.path.basename(p) or hostp(p), "path": hostp(p), "bytes": b}
+            kids = sorted(by_parent.get(p, []), key=lambda x: -x[1])
+            if kids and depth < 2:
+                shown = kids[:KID_N]
+                cnodes = [build(cp, cb, depth + 1) for cp, cb in shown]
+                rest = b - sum(cb for _, cb in shown)
+                if rest > max(10 * 1024 * 1024, int(b * 0.02)):
+                    cnodes.append({"name": "(other)", "path": None, "bytes": rest})
+                node["children"] = cnodes
+            return node
+        tops = sorted(by_parent.get(root, []), key=lambda x: -x[1])[:TOP_N]
+        entries = [build(p, b, 1) for p, b in tops]
+        free = None
+        try:
+            s = os.statvfs(real); free = s.f_bavail * s.f_frsize
+        except Exception:
+            pass
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "done", "at": int(time.time()),
+                                "total": total, "entries": entries, "free": free, "error": None}
+    except subprocess.TimeoutExpired:
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()),
+                                "error": "scan timed out — folder too large"}
+    except Exception as e:
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()), "error": str(e)[:200]}
+
+@app.route("/api/disk_scan")
+def api_disk_scan():
+    path = os.path.normpath(request.args.get("path") or "/")
+    rescan = request.args.get("rescan") == "1"
+    real = _safe_host_dir(path)
+    if not real:
+        return jsonify({"path": path, "state": "error", "error": f"not a readable directory: {path}"})
+    with _DISK_SCAN_LOCK:
+        ent = _DISK_SCAN.get(path)
+        if ent and not rescan:
+            if ent["state"] == "scanning":
+                return jsonify({"path": path, "state": "scanning"})
+            if ent["state"] == "done" and time.time() - ent["at"] < _DISK_SCAN_TTL:
+                return jsonify({"path": path, **ent})
+            if ent["state"] == "error" and time.time() - ent["at"] < 20:
+                return jsonify({"path": path, **ent})
+        _DISK_SCAN[path] = {"state": "scanning", "at": int(time.time())}
+    threading.Thread(target=_disk_scan_worker, args=(path, real), daemon=True).start()
+    return jsonify({"path": path, "state": "scanning"})
 
 @app.route("/api/fleet")
 def api_fleet():
@@ -2725,7 +3424,7 @@ def api_fleet():
 
     # Local row
     rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
-                 "ssh_target": None, "host": _local_now_snapshot(),
+                 "ssh_target": None, "host": enrich_os_upgrade(_local_now_snapshot()),
                  "at": int(time.time()), "online": True, "is_local": True,
                  "last_check": {"summary": {"overall": "ok"}}})
 
@@ -2739,7 +3438,7 @@ def api_fleet():
                 "name": h["name"],
                 "label": h["name"],
                 "ssh_target": h["ssh_target"],
-                "host": data.get("host") if data else None,
+                "host": enrich_os_upgrade(data.get("host")) if data else None,
                 "at": at,
                 "online": online,
                 "is_local": False,

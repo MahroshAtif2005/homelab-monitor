@@ -1,0 +1,18 @@
+# Keep the build context tiny and avoid stat-ing runtime/data dirs that may be
+# root-owned (e.g. a dev bind-mount's ./data-dev), which breaks `docker build`.
+.git
+__pycache__/
+*.pyc
+data/
+data-dev/
+*.bak
+docker-compose*.yml
+# Not used by the image build (Dockerfile only copies app.py, probe.*, static/);
+# keep the ~16 MB of docs media + site/design out of the build context.
+docs/
+website/
+design/
+.github/
+scripts/
+*.md
+mkdocs.yml

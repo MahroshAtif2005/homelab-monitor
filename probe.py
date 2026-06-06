@@ -76,16 +76,77 @@ def read_cpu():
         return {}
 
 
-def read_temp():
-    """Hottest plausible CPU temp from /sys/class/thermal. Coarse, but matches
-    what the hub itself reports for its own box (app.py takes the max zone too).
+# hwmon drivers that expose the actual CPU die/core sensors (Intel/AMD/ARM).
+_CPU_HWMON = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal")
+# thermal_zone *types* that are the CPU (never acpitz/pch/nvme/wifi).
+_CPU_ZONE  = ("x86_pkg_temp", "cpu_thermal", "cpu-thermal")
 
-    Taking the *max* — not the first zone — matters on boxes that expose an
-    `acpitz` board/ambient sensor alongside the real `x86_pkg_temp`/`coretemp`
-    die sensor. `acpitz` sorts first (thermal_zone0) and reads ~ambient, so the
-    old first-match logic under-reported the CPU by 20-30 °C (e.g. a Celeron
-    reading 28 °C off acpitz while its package sat at 59 °C)."""
+def _cpu_temp_c():
+    """CPU temperature in °C that matches what `sensors` shows for the CPU cores.
+
+    The old logic took the max of *every* /sys/class/thermal zone, which on many
+    boards grabs a chipset/PCH/NVMe or an mis-calibrated package sensor reading
+    10-20 °C hotter than the cores — so the dashboard showed e.g. 51 °C while
+    `sensors` showed Core N at 37 °C. We now prefer the coretemp/k10temp hwmon and
+    report the *average core* temperature across every CPU package; then a
+    CPU-typed thermal zone; and only as a last resort the old hottest-plausible-
+    zone (so exotic/ARM boards still report).
+
+    Average, not max: on a many-core server (e.g. a 56-core dual-socket Xeon) a
+    single busy core spiking to 45 °C while the other 55 sit at 39 °C should still
+    read ~40, matching the bulk of what `sensors` shows — max-of-N-cores is noisy
+    and biased high the more cores you have."""
     best = None
+    # 1) hwmon coretemp/k10temp/zenpower — the real die/core sensors. Pool the
+    #    per-core readings from *every* CPU package and report their average.
+    try:
+        cores, allt = [], []
+        for hw in glob.glob("/sys/class/hwmon/hwmon*"):
+            try:
+                name = open(hw + "/name").read().strip()
+            except Exception:
+                continue
+            if name not in _CPU_HWMON:
+                continue
+            for inp in glob.glob(hw + "/temp*_input"):
+                try:
+                    t = int(open(inp).read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if not (0 < t < 130):
+                    continue
+                allt.append(t)
+                try:
+                    lbl = open(inp[:-6] + "_label").read().strip().lower()
+                except Exception:
+                    lbl = ""
+                if lbl.startswith("core"):          # Intel "Core N" — exclude Package
+                    cores.append(t)
+        pool = cores or allt                        # cores if labelled, else whatever the die reports
+        if pool:
+            return round(sum(pool) / len(pool), 1)
+    except Exception:
+        pass
+    # 2) thermal zones explicitly typed as the CPU.
+    try:
+        for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                ztype = open(z + "/type").read().strip().lower()
+            except Exception:
+                continue
+            if ztype in _CPU_ZONE or "cpu" in ztype:
+                try:
+                    t = int(open(z + "/temp").read().strip()) / 1000.0
+                except Exception:
+                    continue
+                if 0 < t < 130 and (best is None or t > best):
+                    best = t
+        if best is not None:
+            return round(best, 1)
+    except Exception:
+        pass
+    # 3) last resort: hottest plausible zone (original behaviour) so we still
+    #    report *something* on boards without coretemp or a CPU-typed zone.
     try:
         for z in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
             try:
@@ -96,7 +157,12 @@ def read_temp():
                 continue
     except Exception:
         pass
-    return {"ctemp": round(best, 1)} if best is not None else {}
+    return round(best, 1) if best is not None else None
+
+
+def read_temp():
+    t = _cpu_temp_c()
+    return {"ctemp": t} if t is not None else {}
 
 
 def read_disks():
@@ -289,6 +355,16 @@ def read_systemd():
     }}
 
 
+def _smi_int(v):
+    """Tolerant int for nvidia-smi fields: '[N/A]' / '[Not Supported]' / blank → 0
+    so one unreadable field (e.g. temperature on some cards) doesn't drop the
+    whole GPU from the remote's report."""
+    try:
+        return int(float((v or "").strip()))
+    except ValueError:
+        return 0
+
+
 def read_gpu():
     """First NVIDIA GPU's snapshot via nvidia-smi. Returns {} if no driver or
     no GPU. We treat the first GPU as the 'representative' for the table; the
@@ -311,10 +387,10 @@ def read_gpu():
         return {"gpu": {
             "count":     len(lines),
             "name":      parts[4],
-            "mem_used":  int(parts[0]),   # MB
-            "mem_total": int(parts[1]),   # MB
-            "util":      int(parts[2]),   # %
-            "temp":      int(parts[3]),   # °C
+            "mem_used":  _smi_int(parts[0]),   # MB
+            "mem_total": _smi_int(parts[1]),   # MB
+            "util":      _smi_int(parts[2]),   # %
+            "temp":      _smi_int(parts[3]),   # °C
         }}
     except Exception:
         return {}
@@ -336,9 +412,13 @@ def _which(name):
 
 
 def _run(args, timeout=3):
-    """subprocess.run → (rc, stdout_str) or (None, '') on any failure."""
+    """subprocess.run → (rc, stdout_str) or (None, '') on any failure. Forces
+    LC_ALL/LANG=C so package-manager output (zypper/apt/dnf sentinels like
+    'No updates found') and other parsed text stay in English regardless of the
+    SSH login shell's locale."""
     try:
-        r = subprocess.run(args, capture_output=True, timeout=timeout)
+        env = dict(os.environ, LC_ALL="C", LANG="C")
+        r = subprocess.run(args, capture_output=True, timeout=timeout, env=env)
         return r.returncode, r.stdout.decode("utf-8", "replace")
     except Exception:
         return None, ""
@@ -896,6 +976,175 @@ def _auto_updates():
     return None
 
 
+# ── Pending package updates ───────────────────────────────────────────────────
+# Strictly cached / offline: we read what the host's package manager already
+# computed (its daily timer), never triggering a network refresh and never
+# assuming root. Each reader returns {count, security, kernel, source}; any field
+# we can't determine stays None so the UI shows a neutral "needs elevated read"
+# instead of a misleading zero. The hub adds the "newer OS release available"
+# signal separately (it needs the network, which the probe deliberately avoids).
+
+def _parse_updates_file(txt):
+    """Parse update-notifier's pre-rendered text. Its wording varies across
+    releases ('N updates can be applied immediately.' / 'M of these updates are
+    standard security updates.'), so we go line-by-line: the line that mentions
+    security gives the security count, the first other count-bearing line gives
+    the total. Returns (count, security), either possibly None."""
+    count = security = None
+    for line in txt.splitlines():
+        m = re.search(r"(\d+)", line)
+        if not m:
+            continue
+        n, low = int(m.group(1)), line.lower()
+        if "securit" in low:
+            security = n
+        elif count is None and ("update" in low or "package" in low or "can be" in low):
+            count = n
+    return count, security
+
+
+def _apt_updates():
+    out = {"count": None, "security": None, "kernel": None, "source": "apt"}
+    # update-notifier pre-renders the counts (with the security split) into a file
+    # any user can read — no apt invocation, no lock, no refresh.
+    txt = _read_text("/var/lib/update-notifier/updates-available")
+    if txt:
+        out["count"], out["security"] = _parse_updates_file(txt)
+    # If the file was missing (no update-notifier) or we still need the kernel
+    # signal it can't give, fall back to the cached upgradable list. `apt list
+    # --upgradable` reads only the on-disk lists — it does not hit the network.
+    if out["count"] is None or out["kernel"] is None:
+        rc, txt2 = _run(["apt", "list", "--upgradable"], timeout=6)
+        if rc is not None and txt2:
+            pkgs = [l for l in txt2.splitlines()
+                    if "/" in l.split(" ", 1)[0] and "]" in l]
+            if out["count"] is None:
+                out["count"] = len(pkgs)
+            if out["security"] is None:
+                out["security"] = sum(1 for l in pkgs if "-security" in l.lower())
+            out["kernel"] = any(l.split("/", 1)[0].startswith(("linux-image", "linux-generic"))
+                                for l in pkgs)
+    return out
+
+
+def _zypper_updates():
+    out = {"count": None, "security": None, "kernel": None, "source": "zypper"}
+    # --no-refresh keeps it offline; status column 'v' marks an available update.
+    rc, txt = _run(["zypper", "--non-interactive", "--no-refresh", "--quiet",
+                    "list-updates"], timeout=8)
+    # Gate on rc only (like dnf/pacman). With --quiet a zero-update host prints
+    # nothing and no "No updates found" banner, so the old `and txt` / banner
+    # check left count=None ("needs elevated read") for an up-to-date SUSE host.
+    if rc is not None:
+        names = []
+        for l in txt.splitlines():
+            parts = [p.strip() for p in l.split("|")]
+            if len(parts) >= 3 and parts[0] == "v":
+                names.append(parts[2])
+        out["count"] = len(names)
+        out["kernel"] = any(n.startswith("kernel-") for n in names)
+    rc2, txt2 = _run(["zypper", "--non-interactive", "--no-refresh", "--quiet",
+                      "list-patches", "--category", "security"], timeout=8)
+    if rc2 is not None and txt2:
+        out["security"] = sum(1 for l in txt2.splitlines()
+                              if "security" in l.lower() and "|" in l)
+    return out
+
+
+def _dnf_updates():
+    out = {"count": None, "security": None, "kernel": None, "source": "dnf"}
+    bin_ = "dnf" if _which("dnf") else "yum"
+    # -C = cache-only (no network).
+    if bin_ == "dnf":
+        # repoquery emits one clean package name per line — unlike `check-update`,
+        # which wraps a row across two lines when name.arch is wide (narrow,
+        # non-tty output), dropping those packages from the count.
+        rc, txt = _run(["dnf", "-C", "-q", "repoquery", "--upgrades", "--qf", "%{name}"],
+                       timeout=10)
+        if rc == 0:
+            names = [l.strip() for l in txt.splitlines() if l.strip()]
+            out["count"] = len(names)
+            out["kernel"] = any(n.startswith("kernel") for n in names)
+    else:
+        # yum (RHEL7) has no builtin repoquery --upgrades; parse check-update but
+        # reassemble wrapped rows (bare name.arch on one line, version/repo on the
+        # next, indented). rc 100 = updates available, 0 = none.
+        rc, txt = _run(["yum", "-C", "-q", "check-update"], timeout=10)
+        if rc in (0, 100):
+            names, pending = [], None
+            for raw in txt.splitlines():
+                if not raw.strip() or raw.startswith(("Obsoleting", "Last metadata", "Security:")):
+                    continue
+                parts = raw.split()
+                if raw[:1].isspace() and pending:           # continuation: version repo
+                    names.append(pending); pending = None
+                elif len(parts) == 1 and "." in parts[0]:   # wrapped: name.arch only
+                    pending = parts[0]
+                elif len(parts) >= 3 and "." in parts[0]:   # name.arch version repo
+                    names.append(parts[0]); pending = None
+            out["count"] = len(names)
+            out["kernel"] = any(n.startswith("kernel") for n in names)
+    rc2, txt2 = _run([bin_, "-C", "-q", "updateinfo", "list", "security"], timeout=10)
+    if rc2 == 0 and txt2:
+        # Count distinct advisory IDs (first column), not package-instances — one
+        # advisory fixing N packages would otherwise be counted N times.
+        adv = set()
+        for l in txt2.splitlines():
+            f = l.split()
+            if f and ("-" in f[0] or ":" in f[0]):   # FEDORA-2024-xxxx / RHSA-2024:xxxx
+                adv.add(f[0])
+        out["security"] = len(adv)
+    return out
+
+
+def _pacman_updates():
+    out = {"count": None, "security": None, "kernel": None, "source": "pacman"}
+    # `pacman -Qu` compares against the cached sync DB — no refresh. Arch has no
+    # security categorisation, so `security` stays None by design.
+    rc, txt = _run(["pacman", "-Qu"], timeout=6)
+    if rc is not None:
+        names = [l.split()[0] for l in txt.splitlines() if l.strip()]
+        out["count"] = len(names)
+        out["kernel"] = any(n.startswith("linux") for n in names)
+    return out
+
+
+def _apk_updates():
+    out = {"count": None, "security": None, "kernel": None, "source": "apk"}
+    rc, txt = _run(["apk", "version", "-l", "<"], timeout=6)
+    if rc is not None and txt:
+        names = []
+        for l in txt.splitlines():
+            l = l.strip()
+            if not l or l.startswith(("Installed", "WARNING")):
+                continue
+            names.append(l.split()[0])
+        out["count"] = len(names)
+        out["kernel"] = any(n.startswith("linux-") for n in names)
+    return out
+
+
+def read_updates():
+    try:
+        if _which("apt") or _which("apt-get"):
+            res = _apt_updates()
+        elif _which("zypper"):
+            res = _zypper_updates()
+        elif _which("dnf") or _which("yum"):
+            res = _dnf_updates()
+        elif _which("pacman"):
+            res = _pacman_updates()
+        elif _which("apk"):
+            res = _apk_updates()
+        else:
+            return None
+    except Exception:
+        return None
+    if res is not None:
+        res["checked"] = "cached"
+    return res
+
+
 def read_sec():
     return {"sec": {
         "firewall":        _firewall(),
@@ -905,6 +1154,7 @@ def read_sec():
         "fail2ban":        _fail2ban(),
         "reboot_required": _reboot_required(),
         "auto_updates":    _auto_updates(),
+        "updates":         read_updates(),
     }}
 
 
@@ -926,7 +1176,7 @@ def main():
             "hostname": socket.gethostname(),
         },
         "at": int(time.time()),
-        "probe_version": "0.6",
+        "probe_version": "0.7",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

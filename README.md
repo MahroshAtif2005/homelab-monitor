@@ -12,7 +12,7 @@
 ![gpu](https://img.shields.io/badge/GPU-NVIDIA-76B900?logo=nvidia&logoColor=white)
 [![last commit](https://img.shields.io/github/last-commit/SikamikanikoBG/homelab-monitor?color=informational)](https://github.com/SikamikanikoBG/homelab-monitor/commits/main)
 
-> 🆕 **v0.12.0** — **Container disk that's actually right**: the Containers tab now counts each container's true footprint — writable layer **plus its volumes & bind mounts** (mounts shared between containers are excluded), so Ollama and Immich finally show their real GBs instead of a near-empty writable layer. Plus **AI Models** now recognises **WhisperX / whisper-asr-webservice** and a dozen more servers (SGLang, Triton, Wyoming voice, OpenLLM, LiteLLM, GPUStack, Cortex/Jan…), the **time-range picker shows on every tab**, and the sidebar brand no longer truncates. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
+> 🆕 **v0.13.0** — **Windows hosts, treemaps & a new Disks tab.** Monitor **Windows machines** over SSH (agentless, via a built-in PowerShell probe — no install), with a Linux/Windows **per-OS command chooser** in the redesigned Hosts onboarding. The **Containers** tab now splits **RAM vs VRAM** into separate columns (real resident RAM, not page cache) with a table total. The **System** tab gains an interactive **Memory map** treemap (RAM by container **and** service — handy on Docker-less boxes), and there's a brand-new **Disks** tab with **WizTree-style** nested folder treemaps to hunt down space hogs. Plus a cohesive UI refresh and a more prominent GitHub/version chrome. [Release notes →](https://github.com/SikamikanikoBG/homelab-monitor/releases)
 >
 > 🛰️ **Source, issues and roadmap live on [GitHub](https://github.com/SikamikanikoBG/homelab-monitor).** See the [full changelog](CHANGELOG.md) for what changed in every release. If HomeLab Monitor saves you a browser tab, a ⭐ there genuinely helps other home-labbers find it.
 
@@ -29,9 +29,11 @@ get started. If you're newer to home labs it should just work; if you're more
 advanced, everything is a handful of clearly-commented Python functions you can
 extend.
 
-![HomeLab Monitor — a quick tour of the tabs](docs/demo.gif)
+<a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4">
+  <img src="docs/demo.gif" alt="HomeLab Monitor — a 65-second tour of the dashboard" width="820">
+</a>
 
-*A 10-second tour: see the GPU and **which model holds the VRAM**, container and service health, and per-host system vitals — all on one page, readable from your phone over the VPN.*
+<sub>▶ <a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4"><b>Watch the full HD demo (MP4, ~65s)</b></a> — the looping GIF above is a muted preview. The video tours GPU &amp; AI models, the RAM/VRAM container view, the Memory-map and Disk treemaps, and adding a Windows host over SSH.</sub>
 
 ## What it shows
 
@@ -50,15 +52,23 @@ active host:
   server's own API. Servers stay listed as **Idle** when their model unloads (nothing
   flickers away), and a **"Driven by"** breakdown shows *which services are calling each
   server* — so you can see what's actually driving Ollama.
-- **Containers** — health of **every** Docker container with uptime, memory,
-  disk footprint and **clickable port chips** that open `host:port` in a new tab.
+- **Containers** — health of **every** Docker container with uptime, **RAM and
+  GPU-VRAM in separate columns** (RAM is the real resident set — page cache
+  excluded — so the numbers add up), real on-disk footprint, a **table total**,
+  and **clickable port chips** that open `host:port` in a new tab.
 - **Services** — **systemd** service health for the active host (local *or*
   remote), with the units *you* deployed highlighted, any failed unit surfaced
   first, plus per-unit uptime, memory, and listen ports.
 - **System** — CPU, RAM, load, uptime, temperature and disk usage, **plus** a
   full inventory panel: OS + version, kernel, **architecture**, init system,
-  bare-metal/VM detection, machine model, CPU model & topology, and GPU.
-  History is local-only for now; live KPIs + inventory work for any host.
+  bare-metal/VM detection, machine model, CPU model & topology, and GPU. A
+  **Memory map** treemap shows *exactly* what's using RAM — grouped by
+  **container** and by **systemd service** — so it's useful even on a box with no
+  Docker. History is local-only for now; live KPIs + inventory work for any host.
+- **Disks** — a **WizTree-style treemap** per filesystem: scan a disk and see
+  what's eating the space as nested rectangles (top folders **and** their
+  sub-folders in one view), then click any folder to drill deeper. On-demand and
+  cached, so it never hammers your disks in the background.
 - **Network** — per-host interfaces (IPv4/IPv6, MAC, link state, speed, MTU,
   RX/TX), default gateway, DNS resolvers, and a listening-socket table that
   flags which ports are bound to **all interfaces** vs localhost.
@@ -66,10 +76,12 @@ active host:
   nftables), SSH hardening (root login / password auth), SELinux/AppArmor,
   fail2ban, reboot-pending and auto-updates — **issues surfaced first**, with
   anything that needs root to read marked clearly rather than guessed.
-- **Hosts** — a registry and onboarding wizard: paste the hub's public key,
-  add a host, run a per-capability **Test connection** (SSH / `/proc` / Docker
-  socket / systemd / `nvidia-smi`), and use **▶ Run on remote** to execute the
-  fix command on the remote without leaving the dashboard.
+- **Hosts** — a registry and clean three-step onboarding: authorize the hub's
+  key (with the exact command **for the remote's OS**), add a host — **Linux, a
+  Raspberry Pi, or Windows** — and run a per-capability **Test connection** (SSH
+  / `/proc` or WMI / Docker / systemd or Windows services / `nvidia-smi`). For
+  anything not yet working it shows the precise fix command for that machine's
+  OS, and **▶ Run on remote** applies it without leaving the dashboard.
 
 History is stored in SQLite and **downsampled on read**, so a six-month view loads
 as quickly and reads as cleanly as the last hour.
@@ -84,7 +96,7 @@ as quickly and reads as cleanly as the last hour.
 
 ![GPU tab](docs/gpu.png)
 
-**Containers** — health of every container at a glance:
+**Containers** — every container's health, with **RAM and VRAM in separate columns**, real disk footprint and a table total:
 
 ![Containers tab](docs/containers.png)
 
@@ -92,9 +104,17 @@ as quickly and reads as cleanly as the last hour.
 
 ![Services tab](docs/services.png)
 
-**System** — KPIs + disks, plus the OS / architecture / hardware inventory for any host:
+**System** — KPIs + disks + the OS / architecture / hardware inventory, **plus the Memory map**: what's using RAM, grouped by container and by service:
 
 ![System tab](docs/system.png)
+
+**Memory map** — an interactive treemap of RAM by container & service (works on Docker-less hosts too):
+
+![Memory-map RAM treemap](docs/ramtree.png)
+
+**Disks** — a WizTree-style treemap of what's eating each filesystem; nested folders, click to drill in:
+
+![Disks tab — folder treemap](docs/disks.png)
 
 **Network** — interfaces, DNS, and listening sockets with exposure flags:
 
@@ -144,6 +164,20 @@ and i686. The image installs
 `openssh-client` and `ssh-keygen` for this — the SSH key lives under
 `./data/.ssh/` so it survives rebuilds.
 
+**Windows hosts.** A registered host can be **Windows**, not just Linux. When the
+hub detects a Windows remote it pipes a PowerShell probe (`probe.ps1`) instead of
+`probe.py` — over the same SSH key, with nothing to install: PowerShell and WMI
+are already on every Windows 10/11 / Server box, the way Python 3 is on Linux.
+You get the same fleet row plus the **System** (CPU/RAM/disk/hardware),
+**Network** (NICs, listening ports, DNS, gateway) and **Services** (Windows
+services) tabs, and the **GPU** tab too when `nvidia-smi` is on the host. To add
+one: enable the built-in OpenSSH Server on the Windows box
+(`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, then
+`Start-Service sshd`), drop the hub's key into the user's
+`~/.ssh/authorized_keys` (admins use `%ProgramData%\ssh\administrators_authorized_keys`),
+and add it on the **Hosts** tab as `user@windows-host`. SELinux/AppArmor,
+load-average and systemd rows are simply omitted — they have no Windows analogue.
+
 **Security.** Pubkey auth only (passwords disabled). Per-host SSH timeouts so
 a slow remote can never block the loop. The "Run on remote" sudo password is
 piped via stdin to the remote `sudo -S` — never appears in argv on either side
@@ -158,9 +192,16 @@ capability check — per-host versions land in subsequent releases. See
 broader design and follow-up slices.
 
 ## Quick start
-Requirements: Docker, and — for the GPU panels — an NVIDIA GPU with the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-(No GPU? The container, service and host panels still work fine.)
+**Only requirement: Docker.** The container starts on any host — no GPU needed.
+A GPU is auto-detected and its panels light up when present; without one, the
+container, service and host panels (incl. temperature) all work fine. Open the
+dashboard's **Setup & requirements** panel (on Overview) to see exactly what's
+detected and how to enable anything missing — nothing fails silently, and the
+container never refuses to start because a piece is absent.
+
+For the GPU panels specifically you'll want an NVIDIA GPU with the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html);
+if the Setup panel says the GPU isn't detected, it shows the one-line command to enable it.
 
 **Option A — pre-built image (recommended).** No clone, no build:
 
@@ -184,9 +225,44 @@ docker compose up -d --build
 
 Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
 
----
+### Running on Windows (WSL2 — no Docker Desktop required)
 
-> **Up and running?** If this one container saved you from standing up a Prometheus + Grafana stack, **[give it a star](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)** — it takes two seconds and is the single biggest thing that helps other home-labbers find it.
+The dashboard is a Linux container, but it runs happily on **Windows 10/11**
+through **WSL2** — and you don't need the heavyweight Docker Desktop. Install
+the Docker Engine straight into a WSL distro instead:
+
+```powershell
+# In PowerShell — install WSL2 if you don't have it yet (one-time, reboot if asked):
+wsl --install
+```
+
+```bash
+# Then, inside your WSL (Ubuntu) shell — install Docker Engine + Compose:
+curl -fsSL https://get.docker.com | sh
+
+# Enable systemd so dockerd runs as a service (one-time):
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf   # then: wsl --shutdown, reopen
+
+git clone https://github.com/SikamikanikoBG/homelab-monitor.git
+cd homelab-monitor
+docker build -t homelab-monitor .
+docker run -d --name homelab-monitor --restart unless-stopped \
+  -p 9800:9800 -e PORT=9800 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  homelab-monitor
+```
+
+WSL2 forwards the port to Windows automatically, so the dashboard is reachable
+at **http://localhost:9800** in your Windows browser. The GPU, systemd-Services
+and host-temperature panels are Linux-host features and report **"unavailable"**
+on Windows — the Setup panel says so explicitly and the container still starts;
+containers, disk, networking and the multi-host SSH registry all work. To keep
+every byte of Docker data off your `C:` drive, give the distro its own home on
+another drive with `wsl --export` / `wsl --import D:\wsl\Ubuntu-Docker …`.
+
+> Tested live on Windows 11 (WSL2 · Ubuntu 24.04 · Docker Engine 29) — the same
+> hub then monitors this Windows box from a Linux host over SSH, alongside the
+> Linux machines.
 
 ## Supported model servers
 
@@ -365,7 +441,6 @@ disk usage, and model VRAM in a single view.
 
 A few things that would be nice to add next (PRs very welcome):
 
-- [Light/dark theme toggle](https://github.com/SikamikanikoBG/homelab-monitor/issues/10) (good first issue)
 - Per-model VRAM history timeline
 - Multi-GPU layouts
 - Telegram alerting (Discord + ntfy already supported — see **Alerts** tab)

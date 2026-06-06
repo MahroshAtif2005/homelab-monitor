@@ -5,6 +5,21 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.13.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.13.0) — 2026-06-06
+- **Windows host monitoring** — register and monitor a **Windows** machine over
+  SSH, agentless, via a built-in **PowerShell probe** (no install). Same fleet
+  row + System / Network / Services tabs; per-service RAM; GPU via `nvidia-smi`.
+- **Hosts onboarding redesigned** — clear three-step flow, theme-safe in light &
+  dark, with a **per-OS command chooser** (Linux / Windows user / Windows admin).
+- **Containers: RAM vs VRAM** in separate columns, with RAM as the real resident
+  set (page cache excluded) and a **table total**.
+- **Memory map** (System tab) — interactive treemap of RAM by **container** and
+  **systemd service**; works on Docker-less hosts too.
+- **New Disks tab** — **WizTree-style** nested folder treemaps; scan a disk,
+  drill into folders. On-demand and cached.
+- UI refresh — prominent GitHub star/repo/issue cluster, cohesive version &
+  update chrome, faster new-release checks.
+
 ## [0.12.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.12.0) — 2026-06-02
 - **Container disk that's actually right** — the Containers tab now counts each
   container's true footprint (writable layer **plus** its volumes & bind mounts;
