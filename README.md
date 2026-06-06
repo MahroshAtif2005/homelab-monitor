@@ -88,45 +88,44 @@ as quickly and reads as cleanly as the last hour.
 
 ## Screenshots
 
+> The 65-second [demo video](https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4) above tours all of this — here are a few stills.
+
 **Overview** — every registered host at a glance, polling every 10 s:
 
 ![Overview / All hosts](docs/overview.png)
 
-**GPU — VRAM by service over time** (who held the card, and when):
-
-![GPU tab](docs/gpu.png)
-
-**Containers** — every container's health, with **RAM and VRAM in separate columns**, real disk footprint and a table total:
-
-![Containers tab](docs/containers.png)
-
-**Services** — systemd health for any registered host, your own units highlighted and failures first:
-
-![Services tab](docs/services.png)
-
-**System** — KPIs + disks + the OS / architecture / hardware inventory, **plus the Memory map**: what's using RAM, grouped by container and by service:
-
-![System tab](docs/system.png)
-
-**Memory map** — an interactive treemap of RAM by container & service (works on Docker-less hosts too):
+**Memory map & Disks** — interactive treemaps of what's using your RAM (by container *and* service) and your disk space (WizTree-style, click to drill in):
 
 ![Memory-map RAM treemap](docs/ramtree.png)
+![Disks folder treemap](docs/disks.png)
 
-**Disks** — a WizTree-style treemap of what's eating each filesystem; nested folders, click to drill in:
+<details>
+<summary><b>📸 More screenshots</b> — GPU · Containers (RAM/VRAM) · Services · System · Network · Security · Hosts</summary>
 
-![Disks tab — folder treemap](docs/disks.png)
+<br>
+
+**GPU** — VRAM by service over time (who held the card, and when):
+![GPU tab](docs/gpu.png)
+
+**Containers** — health, **RAM and VRAM in separate columns**, real disk footprint and a table total:
+![Containers tab](docs/containers.png)
+
+**Services** — systemd health for any host, your own units highlighted and failures first:
+![Services tab](docs/services.png)
+
+**System** — KPIs + disks + the OS / architecture / hardware inventory:
+![System tab](docs/system.png)
 
 **Network** — interfaces, DNS, and listening sockets with exposure flags:
-
 ![Network tab](docs/network.png)
 
-**Security** — firewall, SSH hardening, MAC, fail2ban, reboot & updates — issues first:
-
+**Security** — firewall, SSH hardening, fail2ban, reboot & updates — issues first:
 ![Security tab](docs/security.png)
 
-**Hosts** — registry + onboarding wizard with the per-capability checklist:
-
+**Hosts** — registry + three-step onboarding with the per-capability checklist:
 ![Hosts tab](docs/hosts.png)
+
+</details>
 
 ## Multi-machine monitoring
 
@@ -225,7 +224,10 @@ docker compose up -d --build
 
 Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
 
-### Running on Windows (WSL2 — no Docker Desktop required)
+<details>
+<summary><b>Running on Windows</b> (WSL2 — no Docker Desktop required)</summary>
+
+<br>
 
 The dashboard is a Linux container, but it runs happily on **Windows 10/11**
 through **WSL2** — and you don't need the heavyweight Docker Desktop. Install
@@ -264,9 +266,16 @@ another drive with `wsl --export` / `wsl --import D:\wsl\Ubuntu-Docker …`.
 > hub then monitors this Windows box from a Linux host over SSH, alongside the
 > Linux machines.
 
+</details>
+
 ## Supported model servers
 
 Recognised even while **Idle**, so the server stays on the dashboard when its model is unloaded. Per-model VRAM comes from the server's API where available, otherwise it's attributed from `nvidia-smi`.
+
+<details>
+<summary><b>Full list — 30+ recognised servers</b></summary>
+
+<br>
 
 | Server | Model name | Per-model VRAM |
 |---|---|---|
@@ -287,6 +296,8 @@ Recognised even while **Idle**, so the server stays on the dashboard when its mo
 | **Stable Diffusion (A1111 / Forge / SD.Next)** | ✅ via `/sdapi/v1/options` | attributed |
 | **InvokeAI** | ✅ via `/api/v2/models/` | attributed |
 | **ComfyUI** | ✅ checkpoints via `/object_info` | attributed |
+
+</details>
 
 Don't see yours? Adding a probe is a one-liner — append to `PROBES` in `app.py`. Most servers speak the OpenAI `/v1/models` shape and differ only by port.
 
@@ -395,6 +406,11 @@ Homelab Monitor exposes a standard Prometheus scrape endpoint at `/metrics` (por
 9800 by default). It reads exclusively from the in-memory snapshot that the background
 collector keeps fresh — **no extra polling, no double-sampling**.
 
+<details>
+<summary><b>Metrics reference · scrape config · Grafana dashboard</b></summary>
+
+<br>
+
 ### Metrics exposed
 
 | Metric | Labels | Description |
@@ -436,6 +452,8 @@ In Grafana: **Dashboards → Import → Upload JSON file**, then select your Pro
 datasource. The dashboard covers GPU VRAM, utilisation, temperature, host CPU/RAM,
 disk usage, and model VRAM in a single view.
 
+</details>
+
 ## Roadmap
 
 
@@ -451,6 +469,8 @@ A few things that would be nice to add next (PRs very welcome):
 
 If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps
 other home-labbers find it. Thank you!
+
+[![Star History Chart](https://api.star-history.com/svg?repos=SikamikanikoBG/homelab-monitor&type=Date)](https://star-history.com/#SikamikanikoBG/homelab-monitor&Date)
 
 ## Contributing
 
