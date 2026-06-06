@@ -3340,25 +3340,44 @@ def _safe_host_dir(path):
 
 def _disk_scan_worker(path, real):
     base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    def hostp(p):
+        return (p[len(base):] or "/") if base and p.startswith(base) else p
     try:
-        r = subprocess.run(["du", "-b", "--max-depth=1", "--one-file-system", real],
+        # --max-depth=2 gives two levels at once (folder + its sub-folders) for a
+        # nested treemap. du recurses fully regardless of --max-depth, so this is
+        # no costlier than depth 1 — it only prints more.
+        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", real],
                            capture_output=True, text=True, timeout=600)
-        total, subs = 0, []
+        sizes = {}
         for ln in (r.stdout or "").splitlines():
             parts = ln.split("\t", 1)
             if len(parts) != 2:
                 continue
             try:
-                b = int(parts[0])
+                sizes[os.path.normpath(parts[1])] = int(parts[0])
             except ValueError:
                 continue
-            p = os.path.normpath(parts[1])
-            if p == os.path.normpath(real):
-                total = b
-            else:
-                hostp = p[len(base):] if base and p.startswith(base) else p
-                subs.append({"name": os.path.basename(p) or hostp, "path": hostp or "/", "bytes": b})
-        subs.sort(key=lambda x: -x["bytes"])
+        root = os.path.normpath(real)
+        total = sizes.get(root, 0)
+        by_parent = {}
+        for p, b in sizes.items():
+            if p == root:
+                continue
+            by_parent.setdefault(os.path.dirname(p), []).append((p, b))
+        TOP_N, KID_N = 28, 18
+        def build(p, b, depth):
+            node = {"name": os.path.basename(p) or hostp(p), "path": hostp(p), "bytes": b}
+            kids = sorted(by_parent.get(p, []), key=lambda x: -x[1])
+            if kids and depth < 2:
+                shown = kids[:KID_N]
+                cnodes = [build(cp, cb, depth + 1) for cp, cb in shown]
+                rest = b - sum(cb for _, cb in shown)
+                if rest > max(10 * 1024 * 1024, int(b * 0.02)):
+                    cnodes.append({"name": "(other)", "path": None, "bytes": rest})
+                node["children"] = cnodes
+            return node
+        tops = sorted(by_parent.get(root, []), key=lambda x: -x[1])[:TOP_N]
+        entries = [build(p, b, 1) for p, b in tops]
         free = None
         try:
             s = os.statvfs(real); free = s.f_bavail * s.f_frsize
@@ -3366,7 +3385,7 @@ def _disk_scan_worker(path, real):
             pass
         with _DISK_SCAN_LOCK:
             _DISK_SCAN[path] = {"state": "done", "at": int(time.time()),
-                                "total": total, "entries": subs, "free": free, "error": None}
+                                "total": total, "entries": entries, "free": free, "error": None}
     except subprocess.TimeoutExpired:
         with _DISK_SCAN_LOCK:
             _DISK_SCAN[path] = {"state": "error", "at": int(time.time()),

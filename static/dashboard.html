@@ -202,13 +202,20 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .osvar.on{background:var(--accent);border-color:var(--accent);color:#1a1100}
 /* Containers table totals row */
 tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-variant-numeric:tabular-nums}
-/* Treemaps (WizTree-style: rectangles sized by usage) */
-.treemap{position:relative;width:100%;border-radius:9px;overflow:hidden;background:var(--inset);border:1px solid var(--bd)}
-.tm-cell{position:absolute;overflow:hidden;border-radius:3px;box-sizing:border-box;padding:4px 7px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.55);font-size:11px;line-height:1.18;display:flex;flex-direction:column;gap:1px;transition:filter .1s;outline:1px solid rgba(0,0,0,.18);outline-offset:-1px}
-.tm-cell:hover{filter:brightness(1.12);outline:2px solid #fff;outline-offset:-2px;z-index:3}
+/* Treemaps (WizTree-style: nested rectangles sized by usage) */
+.treemap{position:relative;width:100%;border-radius:11px;overflow:hidden;background:var(--inset);border:1px solid var(--bd);box-shadow:inset 0 1px 3px rgba(0,0,0,.18)}
+.tm-cell{position:absolute;overflow:hidden;border-radius:4px;box-sizing:border-box;padding:4px 7px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6);font-size:11px;line-height:1.18;display:flex;flex-direction:column;gap:1px;transition:filter .12s,box-shadow .12s;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07), inset 0 -8px 14px rgba(0,0,0,.16);background-image:linear-gradient(160deg,rgba(255,255,255,.10),rgba(0,0,0,.06))}
+.tm-cell:hover{filter:brightness(1.14) saturate(1.05);box-shadow:inset 0 0 0 2px #fff;z-index:4}
 .tm-cell.clickable{cursor:pointer}
+/* a group = a parent folder/category holding its children */
+.tm-group{position:absolute;overflow:hidden;border-radius:5px;box-sizing:border-box;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);transition:box-shadow .12s}
+.tm-group.clickable{cursor:pointer}
+.tm-group>.tm-ghd{display:flex;align-items:center;gap:7px;padding:0 8px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6);font-size:11px;overflow:hidden;white-space:nowrap}
+.tm-group>.tm-ghd .tm-l{font-size:11.5px;letter-spacing:.01em}
+.tm-group:hover{box-shadow:inset 0 0 0 2px rgba(255,255,255,.5)}
 .tm-l{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tm-v{font-variant-numeric:tabular-nums;opacity:.88;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-v{font-variant-numeric:tabular-nums;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-group>.tm-ghd .tm-v{margin-left:auto;font-weight:600}
 .tm-empty{display:flex;align-items:center;justify-content:center;height:100%;padding:18px;text-align:center}
 .tm-legend{display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:9px;font-size:11.5px;color:var(--mut)}
 .tm-legend .lg{display:inline-flex;align-items:center;gap:6px}
@@ -651,7 +658,7 @@ a{color:var(--info)}
     <div id="disks" style="margin-top:14px"></div>
     <div id="sysinfo" style="margin-top:16px"></div>
   </div>
-  <div class="card"><h2>🧠 RAM by container</h2>
+  <div class="card"><h2>🧠 Memory map — containers &amp; services</h2>
     <div id="ramtree" class="treemap"></div>
     <p class="cap" id="ramtree_cap"></p>
   </div>
@@ -1923,8 +1930,11 @@ async function loadHostData(name){
   catch(e){ HOST_DATA = null; }
 }
 
-// ── Treemap (WizTree-style: rectangles sized by usage) ────────────────────────
-const TM_COLORS=['#4c9aff','#d29922','#3fb950','#bc8cff','#f778ba','#56d4dd','#e3883a','#a371f7','#6cb6ff','#7ee787','#ffab70','#ec6cb9','#79c0ff','#d2a8ff'];
+// ── Treemap (WizTree-style: nested rectangles sized by usage) ─────────────────
+// Colour by hue: each top-level item gets its own hue; nested children are shades
+// of their parent's hue, so a folder and its sub-folders read as one colour family.
+const TM_HUES=[208,32,150,268,338,188,14,288,108,318,52,238,128,358,86];
+function _hsl(h,s,l){return `hsl(${h} ${s}% ${l}%)`;}
 function _tmWorst(row,side){let s=0,mx=0,mn=Infinity;for(const c of row){s+=c.area;if(c.area>mx)mx=c.area;if(c.area<mn)mn=c.area;}const s2=s*s,d2=side*side;return Math.max(d2*mx/s2,s2/(d2*mn));}
 // Squarified treemap layout (Bruls et al.): fills `rect` with nicely-proportioned
 // rectangles, one per item, area ∝ value. Pushes {d,x,y,w,h} into `out`.
@@ -1949,44 +1959,90 @@ function _squarify(children,rect,out){
     children=children.slice(row.length);
   }
 }
-function renderTreemap(el,leaves,opt){
+function _tmLeaf(el,n,x,y,w,h,bg,fmt){
+  const div=document.createElement('div');
+  div.className='tm-cell'+(n.click?' clickable':'');
+  div.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${bg}`;
+  div.title=`${n.title||n.label} — ${fmt(n.value)}`;
+  if(w>46&&h>22) div.innerHTML=`<span class="tm-l">${esc(n.label)}</span><span class="tm-v">${fmt(n.value)}</span>`;
+  if(n.click) div.onclick=e=>{e.stopPropagation();n.click(n);};
+  el.appendChild(div);
+}
+// Recursive nested layout: depth-0 items each get a hue; groups (items with
+// children) draw a header + their children squarified inside, in shades of the hue.
+function _tmLayout(el,nodes,rect,depth,hue,fmt){
+  const data=nodes.filter(n=>n&&n.value>0).sort((a,b)=>b.value-a.value);
+  if(!data.length) return;
+  const total=data.reduce((s,n)=>s+n.value,0);
+  const scale=(rect.w*rect.h)/total, boxes=[];
+  _squarify(data.map(n=>({d:n,area:Math.max(1,n.value*scale)})),{x:rect.x,y:rect.y,w:rect.w,h:rect.h},boxes);
+  const gap=depth===0?3:1.5;
+  boxes.forEach(b=>{
+    const n=b.d, idx=data.indexOf(n);
+    const x=b.x+gap/2, y=b.y+gap/2, w=b.w-gap, h=b.h-gap;
+    if(w<3||h<3) return;
+    const myHue = depth===0 ? TM_HUES[idx%TM_HUES.length] : hue;
+    const kids=(n.children||[]).filter(k=>k.value>0);
+    if(kids.length && w>50 && h>50){
+      const headH=Math.min(20,Math.max(15,h*0.16));
+      const cont=document.createElement('div');
+      cont.className='tm-group'+(n.click?' clickable':'');
+      cont.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${_hsl(myHue,26,12)}`;
+      cont.title=`${n.title||n.label} — ${fmt(n.value)}`;
+      cont.innerHTML=`<div class="tm-ghd" style="height:${headH}px;background:${_hsl(myHue,40,28)}"><span class="tm-l">${esc(n.label)}</span><span class="tm-v">${fmt(n.value)}</span></div>`;
+      if(n.click) cont.onclick=e=>{e.stopPropagation();n.click(n);};
+      el.appendChild(cont);
+      _tmLayout(el,kids,{x:x+2,y:y+headH+2,w:w-4,h:h-headH-4},depth+1,myHue,fmt);
+    }else{
+      let bg;
+      if(n.color) bg=n.color;
+      else if(depth===0) bg=_hsl(myHue,56,Math.max(40,60-Math.floor(idx/TM_HUES.length)*9));
+      else bg=_hsl(myHue,50,46+(idx%5)*6);
+      _tmLeaf(el,n,x,y,w,h,bg,fmt);
+    }
+  });
+}
+function renderTreemap(el,nodes,opt){
   opt=opt||{}; el.classList.add('treemap');
   const H=opt.height||300; el.style.height=H+'px';
   const W=el.clientWidth||el.offsetWidth||600;
-  const data=(leaves||[]).filter(d=>d.value>0).sort((a,b)=>b.value-a.value);
-  if(!data.length){ el.innerHTML=`<div class="tm-empty muted">${opt.empty||'No data'}</div>`; return data; }
-  const total=data.reduce((s,d)=>s+d.value,0);
-  const scale=(W*H)/total, boxes=[];
-  _squarify(data.map(d=>({d,area:Math.max(1,d.value*scale)})),{x:0,y:0,w:W,h:H},boxes);
-  const fmt=opt.fmt||(v=>''+v);
+  const data=(nodes||[]).filter(d=>d&&d.value>0);
   el.innerHTML='';
-  for(const b of boxes){
-    const d=b.d, div=document.createElement('div');
-    div.className='tm-cell'+(d.click?' clickable':'');
-    div.style.cssText=`left:${b.x}px;top:${b.y}px;width:${Math.max(0,b.w-1)}px;height:${Math.max(0,b.h-1)}px;background:${d.color||'#67707d'}`;
-    div.title=`${d.title||d.label} — ${fmt(d.value)} (${(d.value*100/total).toFixed(1)}%)`;
-    if(b.w>52&&b.h>24) div.innerHTML=`<span class="tm-l">${esc(d.label)}</span><span class="tm-v">${fmt(d.value)}</span>`;
-    if(d.click) div.onclick=()=>d.click(d);
-    el.appendChild(div);
-  }
+  if(!data.length){ el.innerHTML=`<div class="tm-empty muted">${opt.empty||'No data'}</div>`; return data; }
+  _tmLayout(el,data,{x:0,y:0,w:W,h:H},0,0,opt.fmt||(v=>''+v));
   return data;
 }
 function renderRamTree(){
   const el=document.getElementById('ramtree'); if(!el) return;
   const cap=document.getElementById('ramtree_cap');
+  const local=(CURRENT_HOST==='local');
   const host=currentHostBlock();
   const ramTotal=(host.ram_total||0)*1048576, ramUsed=(host.ram_used||0)*1048576;
   if(!ramTotal){ el.style.height='110px'; el.innerHTML='<div class="tm-empty muted">No memory data yet.</div>'; if(cap)cap.textContent=''; return; }
-  const local=(CURRENT_HOST==='local');
+  // Containers (local hub only — remotes don't report per-container RAM) and
+  // systemd services (local or remote) become two groups, each holding its
+  // members. So a Docker-less machine still gets a useful by-service breakdown.
   const cs=(local&&HH&&HH.docker&&HH.docker.containers)?HH.docker.containers.filter(c=>c.mem_bytes>0):[];
-  const leaves=[]; let sum=0;
-  cs.sort((a,b)=>b.mem_bytes-a.mem_bytes).forEach((c,i)=>{leaves.push({label:c.name,value:c.mem_bytes,color:TM_COLORS[i%TM_COLORS.length]});sum+=c.mem_bytes;});
-  const other=Math.max(0,ramUsed-sum); if(other>0)leaves.push({label:'Host & other processes',value:other,color:'#67707d'});
-  const free=Math.max(0,ramTotal-ramUsed); if(free>0)leaves.push({label:'Free',value:free,color:'#384049'});
-  renderTreemap(el,leaves,{height:300,fmt:fmtBytes});
-  if(cap) cap.innerHTML = local
-    ? `Each block is a container sized by its resident RAM (anon + shared). <b>Host &amp; other processes</b> covers everything outside a container; <b>Free</b> is unused. They sum to the host's ${fmtBytes(ramTotal)}. Hover for details.`
-    : `Per-container RAM is local-only; showing used vs free for <b>${esc(CURRENT_HOST)}</b>.`;
+  const sd=local?(HH&&HH.systemd||{}):(host.systemd||{});
+  const svcs=(sd.services||[]).filter(s=>s.mem_bytes>0);
+  const groups=[]; let acc=0;
+  if(cs.length){
+    const sum=cs.reduce((s,c)=>s+c.mem_bytes,0); acc+=sum;
+    groups.push({label:'📦 Containers ('+cs.length+')', value:sum, title:'All Docker containers',
+      children:cs.map(c=>({label:c.name, value:c.mem_bytes, title:'container · '+c.name}))});
+  }
+  if(svcs.length){
+    const sum=svcs.reduce((s,c)=>s+c.mem_bytes,0); acc+=sum;
+    groups.push({label:'⚙️ Services ('+svcs.length+')', value:sum, title:'systemd services',
+      children:svcs.map(s=>({label:(s.name||'').replace(/\.service$/,''), value:s.mem_bytes, title:'service · '+s.name}))});
+  }
+  const other=Math.max(0,ramUsed-acc); if(other>0)groups.push({label:'Host & other',value:other,color:'#5b6470',title:'RAM in use outside the groups above (kernel, host processes, vendor services)'});
+  const free=Math.max(0,ramTotal-ramUsed); if(free>0)groups.push({label:'Free',value:free,color:'#2f3741',title:'Unused RAM'});
+  renderTreemap(el,groups,{height:340,fmt:fmtBytes});
+  const parts=[]; if(cs.length)parts.push('containers'); if(svcs.length)parts.push('systemd services');
+  if(cap) cap.innerHTML = parts.length
+    ? `Grouped by <b>${parts.join('</b> and <b>')}</b>, each block sized by resident RAM (anon + shared). <b>Host &amp; other</b> is everything else in use; <b>Free</b> is unused — together the host's ${fmtBytes(ramTotal)}. Hover any block; the groups read as colour families.`
+    : `Showing used vs free for <b>${esc(local?'this host':CURRENT_HOST)}</b> (no per-container/service RAM available yet).`;
 }
 
 // ── Disks tab: WizTree-style folder treemap per disk (on-demand scan) ─────────
@@ -2044,12 +2100,19 @@ async function scanDisk(mount, path, id, rescan){
   const entries=data.entries||[];
   const sumSub=entries.reduce((s,e)=>s+e.bytes,0);
   const loose=Math.max(0,(data.total||0)-sumSub);
-  const leaves=entries.map((e,i)=>({ label:e.name, value:e.bytes, color:TM_COLORS[i%TM_COLORS.length],
-    title:e.path, click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false)):null }));
-  if(loose>0) leaves.push({label:'(loose files here)', value:loose, color:'#67707d'});
-  if(path===mount && data.free) leaves.push({label:'Free space', value:data.free, color:'#384049'});
-  renderTreemap(tm, leaves, {height:300, fmt:fmtBytes});
-  if(st) st.innerHTML='scanned '+relTime(data.at)+' · '+fmtBytes(data.total)+' across '+entries.length+' folders · <b>click a folder to drill in</b>';
+  // Each top folder becomes a group holding its sub-folders (2 levels at once);
+  // any folder with a real path is click-to-drill-deeper.
+  function mk(e){
+    const node={ label:e.name, value:e.bytes, title:e.path||e.name,
+      click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false)):null };
+    if(e.children&&e.children.length) node.children=e.children.map(mk);
+    return node;
+  }
+  const leaves=entries.map(mk);
+  if(loose>0) leaves.push({label:'(loose files)', value:loose, color:'#5b6470', title:'Files directly in '+path});
+  if(path===mount && data.free) leaves.push({label:'Free space', value:data.free, color:'#2f3741'});
+  renderTreemap(tm, leaves, {height:360, fmt:fmtBytes});
+  if(st) st.innerHTML='scanned '+relTime(data.at)+' · '+fmtBytes(data.total)+' across '+entries.length+' folders · <b>click any folder to drill deeper</b>';
 }
 function renderDiskCrumb(id, mount){
   const el=document.getElementById(id+'_crumb'); if(!el) return;
