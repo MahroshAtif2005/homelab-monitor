@@ -290,9 +290,29 @@ function Read-Services {
         # "failed" (red) would be alarming and wrong. A stopped Automatic service is
         # shown amber ("stopped") instead, and the Failed KPI stays 0.
         $auto = @($svcs | Where-Object { $_.StartMode -eq 'Auto' })
+        # Per-service RAM = its process working set. Many services share one
+        # svchost.exe, so split a shared process's RAM evenly across the services
+        # it hosts — otherwise each would claim the whole svchost and the Services
+        # group would balloon far past the host's used RAM. Working set counts
+        # shared DLLs, so it's approximate, but enough to see the heavy services.
+        $ws = @{}
+        foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) { $ws[[int]$p.Id] = [int64]$p.WorkingSet64 }
+        $pidShare = @{}
+        foreach ($s in $auto) {
+            if ($s.State -eq 'Running' -and [int]$s.ProcessId -gt 0) {
+                $k = [int]$s.ProcessId
+                $pidShare[$k] = (([int]$pidShare[$k]) + 1)
+            }
+        }
         $rows = @()
         foreach ($s in ($auto | Sort-Object @{e={$_.State -eq 'Running'}}, Name)) {
             $isRun = $s.State -eq 'Running'
+            $mem = $null
+            $ppid = [int]$s.ProcessId
+            if ($isRun -and $ppid -gt 0 -and $ws.ContainsKey($ppid)) {
+                $share = [math]::Max(1, [int]$pidShare[$ppid])
+                $mem = [int64]($ws[$ppid] / $share)
+            }
             $row = [ordered]@{
                 name      = "$($s.Name)"
                 status    = $(if ($isRun) { 'ok' } else { 'warn' })
@@ -303,7 +323,7 @@ function Read-Services {
                 watched   = $false
                 ports     = @()
                 uptime_s  = 0
-                mem_bytes = $null
+                mem_bytes = $mem
             }
             $rows += $row
         }
