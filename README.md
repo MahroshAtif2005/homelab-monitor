@@ -31,6 +31,8 @@ extend.
 
 ![HomeLab Monitor — a quick tour of the tabs](docs/demo.gif)
 
+*A 10-second tour: see the GPU and **which model holds the VRAM**, container and service health, and per-host system vitals — all on one page, readable from your phone over the VPN.*
+
 ## What it shows
 
 A **host pill bar** at the top lets you switch between the local box and any
@@ -181,6 +183,10 @@ docker compose up -d --build
 ```
 
 Either way, open **http://<your-host-ip>:9800** from any machine on your LAN or VPN.
+
+---
+
+> **Up and running?** If this one container saved you from standing up a Prometheus + Grafana stack, **[give it a star](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)** — it takes two seconds and is the single biggest thing that helps other home-labbers find it.
 
 ## Supported model servers
 
