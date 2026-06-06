@@ -18,20 +18,37 @@
 .wrap{max-width:1140px;margin:0 auto;padding:22px 18px 70px}
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 h1{font-size:22px;margin:0}.ver{color:var(--mut);font-size:12px;border:1px solid var(--bd);border-radius:20px;padding:1px 9px}
-.ghstar{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--tx);text-decoration:none;border:1px solid #d2992255;border-radius:20px;padding:3px 11px;background:#d2992211;transition:background .2s,border-color .2s}
-.ghstar:hover{border-color:var(--accent);background:#d2992222}
-.ghstar svg{width:13px;height:13px;fill:currentColor;flex:none}
-.ghstar .cnt{color:var(--mut)}
-/* once the user clicks Star, persist a localStorage flag and tone the button down — the trailing CTA swaps from a soft pre-star nudge to a thank-you + ideas pointer. */
-.ghstar.starred{background:transparent;border-color:var(--bd);color:var(--mut)}
-.ghstar.starred:hover{border-color:var(--mut);background:transparent}
+/* GitHub engagement cluster — sits in the sidebar right under the brand/version */
+.ghbox{display:flex;flex-direction:column;gap:7px;padding:11px 13px 12px;border-bottom:1px solid var(--bd)}
+.ghstar{position:relative;display:flex;align-items:center;gap:8px;text-decoration:none;border:1px solid var(--accent);border-radius:9px;padding:7px 11px;color:#1a1100;font-weight:600;font-size:12.5px;background:linear-gradient(180deg,#e6b948,#d29922);box-shadow:0 1px 1px #0000001f;transition:transform .12s ease,filter .2s;overflow:visible}
+.ghstar:hover{filter:brightness(1.07);transform:translateY(-1px)}
+.ghstar svg{width:15px;height:15px;fill:currentColor;flex:none}
+.ghstar .cnt{margin-left:auto;background:#1a110022;border-radius:6px;padding:1px 7px;font-variant-numeric:tabular-nums;font-weight:700;min-width:18px;text-align:center}
+/* discrete idle pulse to draw the eye, ~every 3.6s; stops once starred / reduced-motion */
+.ghstar:not(.starred){animation:ghpulse 3.6s ease-in-out infinite}
+@keyframes ghpulse{0%,70%,100%{box-shadow:0 1px 1px #0000001f, 0 0 0 0 rgba(210,153,34,0)}84%{box-shadow:0 1px 1px #0000001f, 0 0 0 5px rgba(210,153,34,.30)}}
+@media(prefers-reduced-motion:reduce){.ghstar{animation:none!important}}
+/* once starred: calm, muted, no pulse */
+.ghstar.starred{background:transparent;border-color:var(--bd);color:var(--mut);box-shadow:none;font-weight:500}
+.ghstar.starred:hover{border-color:var(--mut);filter:none;transform:none}
 .ghstar.starred svg{fill:var(--accent)}
-.star-cta{font-size:11px;color:var(--mut)}
-.star-cta a{color:inherit;text-decoration:none;border-bottom:1px dotted transparent;transition:color .2s,border-color .2s}
-.star-cta a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+.ghstar.starred .cnt{background:var(--inset);color:var(--mut)}
+/* secondary repo / issue buttons */
+.ghlinks{display:flex;gap:7px}
+.ghlinks a{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;font-size:11.5px;color:var(--mut);text-decoration:none;border:1px solid var(--bd);border-radius:7px;padding:5px 6px;transition:color .15s,border-color .15s,background .15s}
+.ghlinks a:hover{color:var(--tx);border-color:var(--mut);background:var(--hover)}
+.ghlinks svg{width:13px;height:13px;fill:currentColor;flex:none}
+.star-cta{font-size:11px;color:var(--mut);line-height:1.4}
+.star-cta a{color:var(--accent);text-decoration:none;border-bottom:1px dotted transparent;transition:border-color .2s}
+.star-cta a:hover{border-bottom-color:var(--accent)}
 .star-cta.cta-post{display:none}
 .ghstar.starred ~ .cta-pre{display:none}
-.ghstar.starred ~ .cta-post{display:inline}
+.ghstar.starred ~ .cta-post{display:block}
+/* click-celebration sparkles */
+.sparkles{position:absolute;left:15px;top:50%;width:0;height:0;pointer-events:none}
+.spark{position:absolute;left:0;top:0;width:5px;height:5px;border-radius:50%;background:#fff5d6;box-shadow:0 0 4px #ffcf4d;opacity:0}
+.spark.go{animation:sparkfly .62s ease-out forwards}
+@keyframes sparkfly{0%{opacity:1;transform:translate(0,0) scale(1)}100%{opacity:0;transform:translate(var(--dx),var(--dy)) scale(.2)}}
 .live{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-left:auto}
 .pulse{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:p 2s infinite}
 @keyframes p{0%{box-shadow:0 0 0 0 #3fb95066}70%{box-shadow:0 0 0 8px #3fb95000}100%{box-shadow:0 0 0 0 #3fb95000}}
@@ -389,11 +406,6 @@ a{color:var(--info)}
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
 <button type="button" class="upd osupd" id="osupdbadge" title="One or more machines have OS/kernel updates pending — click for details">⬆ <span id="osupdtext">updates</span></button>
-<a class="ghstar" id="ghstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener" title="Star HomeLab Monitor on GitHub">
-<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-<span id="ghlabel">Star</span> <span class="cnt" id="ghcount"></span></a>
-<span class="star-cta cta-pre">if it helps, a ⭐ helps me back</span>
-<span class="star-cta cta-post">thanks! got ideas? → <a href="https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">CONTRIBUTING</a></span>
 <span class="live"><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
 <p class="sub">One small container for your home lab — GPU &amp; local-AI, Docker containers, systemd services and host health, all on one page. Everything is discovered automatically; nothing is hardcoded.</p>
 
@@ -745,7 +757,23 @@ function setSettingsMode(on){ SETTINGS_OPEN = on; }
 // star elements into the sidebar + top bar (so their markup stays untouched).
 function mountShell(){
   const side = document.getElementById('sidebar'); if(!side) return;
+  const REPO = 'https://github.com/SikamikanikoBG/homelab-monitor';
+  const STAR_SVG  = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>';
+  const GH_SVG    = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>';
+  const ISSUE_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0z"/></svg>';
   side.innerHTML = '<div class="sbrand"><span class="logo">🛰️</span><span class="nm">HomeLab Monitor</span></div>'
+    + '<div class="ghbox">'
+    +   '<a class="ghstar" id="ghstar" href="'+REPO+'" target="_blank" rel="noopener" title="Star HomeLab Monitor on GitHub — it genuinely helps the project grow">'
+    +     STAR_SVG + '<span id="ghlabel">Star on GitHub</span>'
+    +     '<span class="cnt" id="ghcount">…</span>'
+    +     '<span class="sparkles" id="ghsparkles" aria-hidden="true"></span></a>'
+    +   '<div class="ghlinks">'
+    +     '<a href="'+REPO+'" target="_blank" rel="noopener" title="Browse the source on GitHub">'+GH_SVG+'Repo</a>'
+    +     '<a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener" title="Report a bug or request a feature">'+ISSUE_SVG+'Issue</a>'
+    +   '</div>'
+    +   '<div class="star-cta cta-pre">If it helps your homelab, a ⭐ helps mine back.</div>'
+    +   '<div class="star-cta cta-post">Thanks for the star! Got an idea or a bug? <a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener">Open an issue</a>.</div>'
+    + '</div>'
     + '<div class="navlist" id="navlist"></div><div class="foot" id="foot"></div>';
   const ver = document.getElementById('ver'); if(ver) document.querySelector('.sbrand').appendChild(ver);
   const tb = document.getElementById('topbar');
@@ -755,8 +783,6 @@ function mountShell(){
   const osupd = document.getElementById('osupdbadge'); if(osupd) tb.appendChild(osupd);
   const live = document.querySelector('header .live'); if(live) tb.appendChild(live);
   const foot = document.getElementById('foot');
-  const star = document.getElementById('ghstar'); if(star) foot.appendChild(star);
-  document.querySelectorAll('header .star-cta').forEach(s => foot.appendChild(s));
   foot.insertAdjacentHTML('beforeend',
     '<div class="footrow">'
     + '<button class="thtoggle" id="themeBtn"><span class="thicon">☾</span><span class="thlabel">Dark</span></button>'
@@ -2257,10 +2283,25 @@ setInterval(()=>{
   if(TAB==='security') renderSecurity();
 },15000);
 // One-shot GitHub star count — lazy, non-blocking, and the link still works offline.
+function fmtStars(n){ return n>=1000 ? (n/1000).toFixed(n>=10000?0:1).replace(/\.0$/,'')+'k' : ''+n; }
 fetch('https://api.github.com/repos/SikamikanikoBG/homelab-monitor')
   .then(r=>r.ok?r.json():null)
-  .then(d=>{if(d&&typeof d.stargazers_count==='number')document.getElementById('ghcount').textContent=d.stargazers_count;})
-  .catch(()=>{});
+  .then(d=>{if(d&&typeof d.stargazers_count==='number'){const el=document.getElementById('ghcount'); if(el) el.textContent=fmtStars(d.stargazers_count);}})
+  .catch(()=>{const el=document.getElementById('ghcount'); if(el) el.textContent='★';});
+// A small one-off sparkle burst when the user clicks Star — a tasteful reward,
+// not a constant animation. (Idle pulse is CSS-only and stops once starred.)
+function burstSparkles(){
+  const host=document.getElementById('ghsparkles'); if(!host) return;
+  for(let i=0;i<9;i++){
+    const s=document.createElement('span'); s.className='spark';
+    const ang=(Math.PI*2*i/9)+(i%2?0.35:0), dist=15+(i%3)*7;
+    s.style.setProperty('--dx',(Math.cos(ang)*dist).toFixed(1)+'px');
+    s.style.setProperty('--dy',(Math.sin(ang)*dist).toFixed(1)+'px');
+    host.appendChild(s);
+    requestAnimationFrame(()=>s.classList.add('go'));
+    setTimeout(()=>s.remove(),680);
+  }
+}
 
 // Star-button state: subtle gold nudge until the user clicks Star, then quietly
 // flip to muted "✓ Starred" and never push again on this device. We can't see
@@ -2276,9 +2317,11 @@ fetch('https://api.github.com/repos/SikamikanikoBG/homelab-monitor')
     lbl.textContent = '✓ Starred';
   }
   btn.addEventListener('click', () => {
+    const wasStarred = btn.classList.contains('starred');
     localStorage.setItem('hl_starred', '1');
     btn.classList.add('starred'); lbl.textContent = '✓ Starred';
     btn.title = "Thanks for starring HomeLab Monitor!";
+    if(!wasStarred) burstSparkles();   // reward the first click only
   });
 })();
 </script></body></html>
