@@ -183,6 +183,8 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .osvar{background:var(--card);border:1px solid var(--bd);color:var(--mut);border-radius:7px;padding:4px 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:500}
 .osvar:hover{border-color:var(--mut);color:var(--tx)}
 .osvar.on{background:var(--accent);border-color:var(--accent);color:#1a1100}
+/* Containers table totals row */
+tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-variant-numeric:tabular-nums}
 .hostrow{border:1px solid var(--bd);border-radius:10px;padding:11px 13px;margin-top:9px;background:#0d1117}
 .hostrow.ok{border-left:3px solid var(--ok)}.hostrow.warn{border-left:3px solid var(--warn)}.hostrow.fail{border-left:3px solid var(--crit)}.hostrow.untested{border-left:3px solid var(--bd)}
 .hostrow .hd{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
@@ -475,7 +477,8 @@ a{color:var(--info)}
       <th>Container</th><th>State</th>
       <th data-col="image">Image</th>
       <th>Ports</th><th>Uptime</th>
-      <th title="Resident RAM (working set, excludes page cache — like docker stats) used / the container's memory limit. When a container has no limit set, the total is the host's RAM.">Memory (RAM / total)</th>
+      <th title="Resident system RAM (working set, excludes page cache — like docker stats). GPU memory is the separate VRAM column.">RAM</th>
+      <th title="GPU memory held by this container's processes (nvidia-smi compute-apps, attributed via /proc/<pid>/cgroup). Blank when the container isn't using the GPU.">VRAM</th>
       <th data-col="disk" title="Writable layer + the container's volumes &amp; read-write bind mounts (so model/data volumes are included, not just the thin writable layer). Mounts shared by several containers are excluded so they aren't counted against each one.">Disk</th>
       <th>Status</th>
     </tr></thead><tbody id="cttbl"></tbody></table>
@@ -1054,7 +1057,15 @@ function renderHealth(){
     {v:ds.problems||0,l:'Need attention'},{v:(ds.total||0)-(ds.running||0),l:'Stopped'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('')
     : `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">Docker unavailable</div><div class="d">${esc(dk.reason||'')}</div></div></div>`;
-  document.getElementById('cttbl').innerHTML = (dk.containers||[]).map(c=>{
+  const ctlist = dk.containers||[];
+  // Table totals (footer): sum RAM, VRAM and disk across all containers — the
+  // "total" is the table's, not a per-container limit.
+  let tRam=0, tVram=0, tDisk=0, anyVram=false, anyDisk=false;
+  ctlist.forEach(c=>{ if(c.mem_bytes)tRam+=c.mem_bytes;
+    if(c.vram_bytes){tVram+=c.vram_bytes; anyVram=true;}
+    if(c.disk_bytes){tDisk+=c.disk_bytes; anyDisk=true;} });
+  const running = ctlist.filter(c=>c.state==='running').length;
+  document.getElementById('cttbl').innerHTML = ctlist.map(c=>{
     // Uptime now has its own column, so trim it out of the status text and
     // keep only the trailing health/exit detail (if any).
     const stext = c.status_text || '';
@@ -1064,11 +1075,19 @@ function renderHealth(){
      <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
      <td class="muted">${c.state==='running'?fmtUpShort(c.uptime_s):'—'}</td>
-     <td class="muted">${fmtBytes(c.mem_bytes)}${c.mem_limit!=null?` <span style="opacity:.55">/ ${fmtBytes(c.mem_limit)}</span>`:''}</td>
+     <td class="muted">${fmtBytes(c.mem_bytes)}</td>
+     <td class="muted">${c.vram_bytes!=null?fmtBytes(c.vram_bytes):'—'}</td>
      <td data-col="disk" class="muted">${fmtBytes(c.disk_bytes)}</td>
      <td class="muted">${upStripped?esc(upStripped):'—'}</td></tr>`;
   }).join('')
-    || (dk.available?'<tr><td colspan="8" class="muted">No containers found.</td></tr>':'');
+    + (ctlist.length ? `<tr class="cttot">
+        <td><b>Total</b> <span class="muted">${running} running</span></td>
+        <td></td><td data-col="image"></td><td></td><td class="muted"></td>
+        <td><b>${fmtBytes(tRam)}</b></td>
+        <td><b>${anyVram?fmtBytes(tVram):'—'}</b></td>
+        <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
+        <td></td></tr>` : '')
+    || (dk.available?'<tr><td colspan="9" class="muted">No containers found.</td></tr>':'');
 
   // Services — local-only branch; when remote, renderServicesTab() drives it.
   if(CURRENT_HOST === 'local') renderServicesBlock(HH.systemd);

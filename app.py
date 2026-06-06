@@ -1063,9 +1063,9 @@ def _container_published_ports(ct):
     return sorted(seen)
 
 def _container_stats(cid):
-    """One-shot RAM snapshot for a running container: resident RAM (working set,
-    excluding page cache — what `docker stats` shows) plus the memory limit
-    ("total"). Returns {"mem_bytes", "mem_limit"} or None."""
+    """One-shot resident-RAM snapshot for a running container: the working set,
+    excluding page cache, exactly like `docker stats`. This is system RAM only —
+    GPU VRAM is attributed separately (nvidia-smi compute-apps). Bytes or None."""
     try:
         d = json.loads(_docker(f"/containers/{cid}/stats?stream=false&one-shot=true"))
     except Exception:
@@ -1083,14 +1083,7 @@ def _container_stats(cid):
     cache = st.get("inactive_file")
     if cache is None:
         cache = st.get("cache", 0)
-    ram = max(0, usage - (cache or 0))
-    # The limit is the container's cap, or the host's total RAM when uncapped.
-    # Some runtimes report an "unlimited" sentinel (~2^63) instead — treat that
-    # as no total rather than showing 8 EB.
-    limit = ms.get("limit") or None
-    if limit and limit > (1 << 62):
-        limit = None
-    return {"mem_bytes": ram, "mem_limit": limit}
+    return max(0, usage - (cache or 0))
 
 def _refresh_docker_enrich(running_ids):
     """Per-running-container memory snapshot (parallel). Cached for
@@ -1099,10 +1092,8 @@ def _refresh_docker_enrich(running_ids):
     out = {}
     if running_ids:
         with ThreadPoolExecutor(max_workers=min(8, len(running_ids))) as ex:
-            for cid, st in zip(running_ids, ex.map(_container_stats, running_ids)):
-                d = out.setdefault(cid, {})
-                d["mem_bytes"] = (st or {}).get("mem_bytes")
-                d["mem_limit"] = (st or {}).get("mem_limit")
+            for cid, mem in zip(running_ids, ex.map(_container_stats, running_ids)):
+                out.setdefault(cid, {})["mem_bytes"] = mem
     return out
 
 def _dir_size(host_path, timeout=120):
@@ -1234,10 +1225,16 @@ def collect_docker():
         _docker_enrich["data"] = _refresh_docker_enrich(running_ids)
         _docker_enrich["at"] = time.time()
     _maybe_refresh_docker_disk()   # background; first pass leaves disk_bytes None until it lands
+    # Per-container GPU VRAM, attributed by the GPU sampler (nvidia-smi
+    # compute-apps → /proc/<pid>/cgroup → container name). procs is in MB and
+    # keyed by service name (== container name for container-owned PIDs); host /
+    # unattributed PIDs use "host:"/"pid:" keys that never match a container.
+    vram_mb = {p.get("service"): p.get("mem") for p in (LATEST.get("procs") or [])}
     for c in items:
         e = _docker_enrich["data"].get(c["id"]) or {}
         c["mem_bytes"]  = e.get("mem_bytes")
-        c["mem_limit"]  = e.get("mem_limit")
+        vmb = vram_mb.get(c["name"])
+        c["vram_bytes"] = round(vmb * 1048576) if vmb else None
         c["disk_bytes"] = _docker_disk["data"].get(c["id"])
     rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
     items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
