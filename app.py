@@ -3318,6 +3318,83 @@ def api_host_data(name):
                     "stale_for": age if age >= INTERVAL * 3 else 0,
                     "error": entry.get("error")})
 
+# ── On-demand disk-usage scan (WizTree-style folder treemap) ──────────────────
+# `du --max-depth=1` of a host path (read through the read-only HOST_ROOT mount),
+# run in a background thread so a slow scan of a big disk never blocks a request.
+# The UI polls until state=="done". Results cached per path; one filesystem only
+# (--one-file-system) so scanning "/" doesn't wander into other mounted disks.
+_DISK_SCAN, _DISK_SCAN_LOCK = {}, threading.Lock()
+_DISK_SCAN_TTL = 900   # reuse a completed scan for 15 min
+
+def _safe_host_dir(path):
+    """Map a requested absolute HOST path to its location under HOST_ROOT, only
+    if it's a real directory. Blocks '..' traversal."""
+    if not path or not path.startswith("/"):
+        return None
+    norm = os.path.normpath(path)
+    if ".." in norm.split("/"):
+        return None
+    base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    real = (base + norm) if base else norm
+    return real if os.path.isdir(real) else None
+
+def _disk_scan_worker(path, real):
+    base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
+    try:
+        r = subprocess.run(["du", "-b", "--max-depth=1", "--one-file-system", real],
+                           capture_output=True, text=True, timeout=600)
+        total, subs = 0, []
+        for ln in (r.stdout or "").splitlines():
+            parts = ln.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                b = int(parts[0])
+            except ValueError:
+                continue
+            p = os.path.normpath(parts[1])
+            if p == os.path.normpath(real):
+                total = b
+            else:
+                hostp = p[len(base):] if base and p.startswith(base) else p
+                subs.append({"name": os.path.basename(p) or hostp, "path": hostp or "/", "bytes": b})
+        subs.sort(key=lambda x: -x["bytes"])
+        free = None
+        try:
+            s = os.statvfs(real); free = s.f_bavail * s.f_frsize
+        except Exception:
+            pass
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "done", "at": int(time.time()),
+                                "total": total, "entries": subs, "free": free, "error": None}
+    except subprocess.TimeoutExpired:
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()),
+                                "error": "scan timed out — folder too large"}
+    except Exception as e:
+        with _DISK_SCAN_LOCK:
+            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()), "error": str(e)[:200]}
+
+@app.route("/api/disk_scan")
+def api_disk_scan():
+    path = os.path.normpath(request.args.get("path") or "/")
+    rescan = request.args.get("rescan") == "1"
+    real = _safe_host_dir(path)
+    if not real:
+        return jsonify({"path": path, "state": "error", "error": f"not a readable directory: {path}"})
+    with _DISK_SCAN_LOCK:
+        ent = _DISK_SCAN.get(path)
+        if ent and not rescan:
+            if ent["state"] == "scanning":
+                return jsonify({"path": path, "state": "scanning"})
+            if ent["state"] == "done" and time.time() - ent["at"] < _DISK_SCAN_TTL:
+                return jsonify({"path": path, **ent})
+            if ent["state"] == "error" and time.time() - ent["at"] < 20:
+                return jsonify({"path": path, **ent})
+        _DISK_SCAN[path] = {"state": "scanning", "at": int(time.time())}
+    threading.Thread(target=_disk_scan_worker, args=(path, real), daemon=True).start()
+    return jsonify({"path": path, "state": "scanning"})
+
 @app.route("/api/fleet")
 def api_fleet():
     """Compact summary KPIs for every host in the fleet. Drives the All-hosts

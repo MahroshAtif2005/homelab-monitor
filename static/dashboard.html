@@ -658,6 +658,11 @@ a{color:var(--info)}
   <div class="card"><h2>🖥️ CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
 </section>
 
+<!-- ───────── Disks (WizTree-style usage treemaps) ───────── -->
+<section data-tab="disks" hidden>
+  <div id="disksbody"></div>
+</section>
+
 <!-- ───────── Network ───────── -->
 <section data-tab="network" hidden>
   <div class="card"><h2>🌐 Network</h2>
@@ -723,6 +728,7 @@ const TABS = [
   {id:'containers', label:'Containers', charts:false},
   {id:'services',   label:'Services',   charts:false},
   {id:'host',       label:'System',     charts:true},
+  {id:'disks',      label:'Disks',      charts:false},
   {id:'network',    label:'Network',    charts:false},
   {id:'security',   label:'Security',   charts:false},
   {id:'hosts',      label:'Hosts',      charts:false, settings:true},
@@ -861,6 +867,7 @@ function showTab(id){
   }
   if(id==='overview') renderFleet();
   if(id==='host')     renderHostTab();
+  if(id==='disks')    renderDisksTab();
   if(id==='network')  renderNetwork();
   if(id==='security') renderSecurity();
   if(id==='services') renderServicesTab();
@@ -871,6 +878,7 @@ async function loadData(){
   try{ D = await(await fetch('/api/data?range='+R)).json(); }
   catch(e){ document.getElementById('lastup').textContent='offline'; return; }
   renderData();
+  if(TAB==='disks') renderDisksTab();   // populate/refresh disk cards (sig-guarded; won't wipe a scan)
 }
 async function loadHealth(){
   try{ HH = await(await fetch('/api/health')).json(); }catch(e){ return; }
@@ -1979,6 +1987,78 @@ function renderRamTree(){
   if(cap) cap.innerHTML = local
     ? `Each block is a container sized by its resident RAM (anon + shared). <b>Host &amp; other processes</b> covers everything outside a container; <b>Free</b> is unused. They sum to the host's ${fmtBytes(ramTotal)}. Hover for details.`
     : `Per-container RAM is local-only; showing used vs free for <b>${esc(CURRENT_HOST)}</b>.`;
+}
+
+// ── Disks tab: WizTree-style folder treemap per disk (on-demand scan) ─────────
+const _diskCrumbs = {};   // cardId -> [{name, path}]
+function _dskId(mount){ return 'dsk_'+mount.replace(/[^a-z0-9]/gi,'_'); }
+function renderDisksTab(){
+  const root=document.getElementById('disksbody'); if(!root) return;
+  if(CURRENT_HOST!=='local'){
+    root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">Local host only</div>'
+      +'<div class="d">Disk-content analysis reads the host filesystem directly, so it runs on the hub\'s own machine. Switch the host selector back to <b>Local</b> to use it.</div></div></div></div>';
+    return;
+  }
+  const disks=(currentHostBlock().disks)||[];
+  if(!disks.length){ root.innerHTML='<div class="card"><div class="muted">No disks reported yet.</div></div>'; return; }
+  // Only (re)build the cards if the set of mounts changed — otherwise we'd wipe
+  // an in-progress scan/treemap on every 15s refresh.
+  const sig=disks.map(d=>d.mount).join('|');
+  if(root.dataset.sig!==sig){
+    root.dataset.sig=sig;
+    root.innerHTML=disks.map(d=>{
+      const id=_dskId(d.mount);
+      return `<div class="card"><h2>💾 ${esc(d.mount)} <span class="muted" style="font-weight:400;font-size:13px">— ${d.used} / ${d.total} GB · ${d.pct}% used</span></h2>
+        <div class="tm-crumb" id="${id}_crumb"></div>
+        <div class="treemap" id="${id}_tm" style="height:300px"><div class="tm-empty muted">Click <b>Scan contents</b> to see what's using this disk.</div></div>
+        <div class="hstep-actions"><button class="btn-mini" id="${id}_scan">🔍 Scan contents</button>
+          <span class="muted" id="${id}_st" style="font-size:11.5px;align-self:center"></span></div></div>`;
+    }).join('');
+    disks.forEach(d=>{ const id=_dskId(d.mount);
+      document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true); });
+  } else {
+    // mounts unchanged: just refresh the used/total figures in the headers
+    disks.forEach(d=>{ const c=document.querySelector('#'+_dskId(d.mount)+'_crumb'); /* keep state */ });
+  }
+}
+async function scanDisk(mount, path, id, rescan){
+  const tm=document.getElementById(id+'_tm'), st=document.getElementById(id+'_st');
+  if(!tm) return;
+  tm.innerHTML='<div class="tm-empty muted">⏳ Scanning <b>'+esc(path)+'</b>… large disks can take a while (cached after the first run).</div>';
+  if(st) st.textContent='';
+  // breadcrumb bookkeeping
+  if(rescan || !_diskCrumbs[id]) _diskCrumbs[id]=[{name:mount, path:mount}];
+  const ci=_diskCrumbs[id].findIndex(c=>c.path===path);
+  if(ci>=0) _diskCrumbs[id]=_diskCrumbs[id].slice(0,ci+1);
+  else _diskCrumbs[id].push({name:(path.split('/').pop()||path), path});
+  renderDiskCrumb(id, mount);
+  let data=null;
+  for(let tries=0; tries<200; tries++){
+    let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)+(rescan&&tries===0?'&rescan=1':''))).json(); }
+    catch(e){ tm.innerHTML='<div class="tm-empty muted">Scan request failed: '+esc(String(e))+'</div>'; return; }
+    if(j.state==='done'){ data=j; break; }
+    if(j.state==='error'){ tm.innerHTML='<div class="tm-empty muted">⚠️ '+esc(j.error||'scan error')+'</div>'; return; }
+    await new Promise(r=>setTimeout(r,1500));
+  }
+  if(!data){ tm.innerHTML='<div class="tm-empty muted">Still scanning — try again in a moment, or Rescan.</div>'; return; }
+  const entries=data.entries||[];
+  const sumSub=entries.reduce((s,e)=>s+e.bytes,0);
+  const loose=Math.max(0,(data.total||0)-sumSub);
+  const leaves=entries.map((e,i)=>({ label:e.name, value:e.bytes, color:TM_COLORS[i%TM_COLORS.length],
+    title:e.path, click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false)):null }));
+  if(loose>0) leaves.push({label:'(loose files here)', value:loose, color:'#67707d'});
+  if(path===mount && data.free) leaves.push({label:'Free space', value:data.free, color:'#384049'});
+  renderTreemap(tm, leaves, {height:300, fmt:fmtBytes});
+  if(st) st.innerHTML='scanned '+relTime(data.at)+' · '+fmtBytes(data.total)+' across '+entries.length+' folders · <b>click a folder to drill in</b>';
+}
+function renderDiskCrumb(id, mount){
+  const el=document.getElementById(id+'_crumb'); if(!el) return;
+  const cr=_diskCrumbs[id]||[];
+  if(cr.length<2){ el.innerHTML=''; return; }
+  el.innerHTML=cr.map((c,i)=> i===cr.length-1
+    ? `<span class="cur">${esc(c.name)}</span>`
+    : `<button data-p="${esc(c.path)}">${esc(c.name)}</button><span class="sep">›</span>`).join('');
+  el.querySelectorAll('button').forEach(b=>b.onclick=()=>scanDisk(mount, b.dataset.p, id, false));
 }
 
 async function renderHostTab(){
