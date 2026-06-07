@@ -21,7 +21,13 @@ cockpit.
   <a class="md-button" href="https://hub.docker.com/r/sikamikaniko123/homelab-monitor" target="_blank" rel="noopener">Docker Hub →</a>
 </div>
 
-![A short walkthrough of the dashboard](screenshots/demo.gif){ .hl-gif }
+<div class="hl-video">
+  <iframe src="https://www.youtube-nocookie.com/embed/5uf2rG-RzcU?rel=0"
+          title="HomeLab Monitor — dashboard demo"
+          loading="lazy"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowfullscreen></iframe>
+</div>
 
 <p class="hl-badges">
   <span><span class="hl-dot"></span>One container · <code>docker compose up -d</code></span>

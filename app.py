@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.13.0"
+VERSION      = "0.13.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -1632,10 +1632,13 @@ def os_upgrade_for(os_id, version_id):
     endoflife.date returns cycles newest-first, so we locate the host's own cycle
     and flag it behind only when newer cycles sit before it (list order, not a
     numeric compare — openSUSE Leap renumbered 42.x → 15.x). The candidate is the
-    newest *qualifying* newer cycle, NOT just cycles[0]: it must be already
-    released, still supported, and — if the host is on an LTS — itself LTS. That
-    stops us telling a 24.04-LTS host to 'upgrade' to a short-lived interim (or an
-    unreleased) release."""
+    *nearest* qualifying newer cycle (smallest jump), NOT the newest one: distro
+    upgrade tooling only moves one release/LTS at a time, so a 22.04-LTS host's
+    actionable target is 24.04, not whatever the latest LTS happens to be. Each
+    candidate must be already released, still supported, and — if the host is on
+    an LTS — itself LTS. That keeps us from telling a 24.04-LTS host to 'upgrade'
+    to a short-lived interim (or an unreleased) release, and from telling a
+    22.04-LTS host to jump to a newer LTS it can't reach directly."""
     if not CHECK_OS_UPDATES or not os_id or not version_id:
         return None
     slug = _EOL_SLUG.get(os_id.lower())
@@ -1668,7 +1671,10 @@ def os_upgrade_for(os_id, version_id):
             if eol in (False, None): return True
             return str(eol) > today
         candidate = None
-        for c in cycles[:idx]:                  # strictly-newer entries, newest-first
+        # Walk strictly-newer entries nearest-first (reversed: newest-first list →
+        # closest-to-host first) so we recommend the next reachable release, not the
+        # newest. The filters still skip any non-qualifying step in between.
+        for c in reversed(cycles[:idx]):
             if released(c) and supported(c) and (not host_is_lts or c.get("lts")):
                 candidate = c["cycle"]
                 break
