@@ -57,7 +57,38 @@ docker compose down
 rm -rf ./data
 ```
 
+## Running on Windows (WSL2 — no Docker Desktop required)
+
+The dashboard is a Linux container, but it runs happily on **Windows 10/11** through
+**WSL2** — and you don't need the heavyweight Docker Desktop. Install the Docker Engine
+straight into a WSL distro instead:
+
+```powershell
+# In PowerShell — install WSL2 if you don't have it yet (one-time, reboot if asked):
+wsl --install
+```
+
+```bash
+# Then, inside your WSL (Ubuntu) shell — install Docker Engine + Compose:
+curl -fsSL https://get.docker.com | sh
+
+# Enable systemd so dockerd runs as a service (one-time):
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf   # then: wsl --shutdown, reopen
+
+curl -fsSLO https://raw.githubusercontent.com/SikamikanikoBG/homelab-monitor/main/docker-compose.yml
+docker compose up -d
+```
+
+WSL2 forwards the port to Windows automatically, so the dashboard is reachable at
+**`http://localhost:9800`** in your Windows browser. To keep Docker data off your `C:`
+drive, give the distro its own home on another drive with `wsl --export` / `wsl --import`.
+
+!!! tip "Want to *monitor* a Windows box (not run the hub on it)?"
+    You don't need any of the above — just enable OpenSSH Server on the Windows machine
+    and add it on the **Hosts** tab. See [Multi-machine → Windows hosts](multi-host.md#windows-hosts).
+
 ## Next steps
 
 - Add your other boxes to the cockpit → [**Multi-machine guide**](multi-host.md)
 - Tune sample interval, retention, alert thresholds → [**Configuration**](configuration.md)
+- See every panel → [**Features tour**](features.md)
