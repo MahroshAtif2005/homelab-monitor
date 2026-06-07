@@ -77,7 +77,7 @@ This is a host monitor: it runs with host access and a read-only Docker socket, 
 
 If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps other home-labbers find it. Thank you!
 
-[![Star History Chart](https://api.star-history.com/svg?repos=SikamikanikoBG/homelab-monitor&type=Date)](https://star-history.com/#SikamikanikoBG/homelab-monitor&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=SikamikanikoBG/homelab-monitor&type=Date&v=2)](https://star-history.com/#SikamikanikoBG/homelab-monitor&Date)
 
 ## Contributing
 
