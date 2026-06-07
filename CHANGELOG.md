@@ -5,6 +5,17 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.13.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.13.1) — 2026-06-07
+- **Mobile-friendly dashboard** — the dense tables (Containers, Services, AI
+  Models, Network) no longer push the whole page sideways on a phone; each one
+  now scrolls within its card. Verified no horizontal overflow down to 360px.
+- **Smarter OS-upgrade hint** — a host is now offered the **next reachable**
+  release instead of the newest one, so e.g. an Ubuntu 22.04 LTS box is pointed
+  at 24.04 rather than a newer LTS it can't `do-release-upgrade` to directly.
+- **Fix:** an empty amber banner could show on every tab even when setup was
+  healthy (the diagnostics banner's `display` overrode its hidden state).
+- Demo video now embedded from **YouTube** on the README and landing page.
+
 ## [0.13.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.13.0) — 2026-06-06
 - **Windows host monitoring** — register and monitor a **Windows** machine over
   SSH, agentless, via a built-in **PowerShell probe** (no install). Same fleet
