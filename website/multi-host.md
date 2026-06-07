@@ -83,6 +83,32 @@ Tracking the full multi-machine design in
 data model, cockpit grid, topology view, alerts roll-up, all sliced into
 follow-up PRs.
 
+## Windows hosts
+
+A registered host can be **Windows**, not just Linux. When the hub detects a Windows
+remote it pipes a PowerShell probe (`probe.ps1`) instead of `probe.py` — over the same
+SSH key, with nothing to install: PowerShell and WMI are already on every
+Windows 10/11 / Server box, the way Python 3 is on Linux. You get the same fleet row
+plus the **System** (CPU/RAM/disk/hardware), **Network** (NICs, listening ports, DNS,
+gateway) and **Services** (Windows services) tabs, and the **GPU** tab too when
+`nvidia-smi` is on the host.
+
+To add one:
+
+1. Enable the built-in OpenSSH Server on the Windows box:
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd ; Set-Service sshd -StartupType Automatic
+   ```
+2. Drop the hub's key into the user's `~/.ssh/authorized_keys`. **For an admin account**,
+   OpenSSH reads a shared file with a strict ACL instead — the Hosts onboarding shows the
+   exact `administrators_authorized_keys` + `icacls` command (just pick **Windows (admin)**).
+3. Add it on the **Hosts** tab as `user@windows-host`.
+
+SELinux/AppArmor, load-average and systemd rows are simply omitted — they have no Windows
+analogue. The Memory-map treemap groups RAM by **Windows service** (handy here, since a
+Windows box has no containers).
+
 ## Reliability
 
 - **Per-host SSH timeouts** so a slow remote can never block the poll loop.
