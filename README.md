@@ -8,11 +8,11 @@
 
 **One page for your whole home lab & AI rig — GPU, containers, services, disks. No agents, no Prometheus/Grafana, no cloud.**
 
-<a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4">
-  <img src="docs/demo.gif" alt="HomeLab Monitor — a 65-second tour of the dashboard" width="820">
+<a href="https://youtu.be/5uf2rG-RzcU" title="Watch the HomeLab Monitor demo on YouTube">
+  <img src="https://img.youtube.com/vi/5uf2rG-RzcU/maxresdefault.jpg" alt="HomeLab Monitor — watch the 65-second demo on YouTube" width="820">
 </a>
 
-<sub>▶ <a href="https://github.com/SikamikanikoBG/homelab-monitor/raw/main/docs/demo.mp4"><b>Watch the full HD demo (MP4, ~65s)</b></a> — the GIF above is a muted preview.</sub>
+<sub>▶ <a href="https://youtu.be/5uf2rG-RzcU"><b>Watch the 65-second demo on YouTube</b></a> — HD, with sound.</sub>
 
 Your home lab grew into a couple of machines, a Pi, and a GPU that's mysteriously always busy. HomeLab Monitor gives you one self-hosted page that answers the real questions: **which model is holding the GPU, which container is eating RAM, what's filling your disks**, and **is anything down** — across every box over SSH: Linux, a Pi, even Windows. Readable from your phone over the VPN.
 
