@@ -2062,12 +2062,29 @@ function renderRamTree(){
     groups.push({label:'⚙️ Services ('+svcs.length+')', value:sum, title:'systemd services',
       children:svcs.map(s=>({label:(s.name||'').replace(/\.service$/,''), value:s.mem_bytes, title:'service · '+s.name}))});
   }
-  const other=Math.max(0,ramUsed-acc); if(other>0)groups.push({label:'Host & other',value:other,color:'#5b6470',title:'RAM in use outside the groups above (kernel, host processes, vendor services)'});
+  // "Host & other" = used RAM outside the groups above. When the host reports
+  // non-reclaimable kernel memory (slab/page-tables/stacks), carve that out as its own
+  // 🧠 Kernel block so the leftover is genuinely "host/vendor processes & untracked".
+  const other=Math.max(0,ramUsed-acc); let splitKernel=false;
+  if(other>0){
+    const kernel=Math.max(0,Math.min(other,(host.ram_kernel||0)*1048576));
+    if(kernel>0){
+      splitKernel=true;
+      groups.push({label:'🧠 Kernel',value:kernel,color:'#46586e',title:'Non-reclaimable kernel memory — slab (SUnreclaim) + page tables + kernel stacks'});
+      const rest=other-kernel;
+      if(rest>0)groups.push({label:'Host processes & other',value:rest,color:'#5b6470',title:'Used RAM outside containers, services and the kernel (host/vendor processes, tmpfs, untracked)'});
+    }else{
+      groups.push({label:'Host & other',value:other,color:'#5b6470',title:'RAM in use outside the groups above (kernel, host processes, vendor services)'});
+    }
+  }
   const free=Math.max(0,ramTotal-ramUsed); if(free>0)groups.push({label:'Free',value:free,color:'#2f3741',title:'Unused RAM'});
   renderTreemap(el,groups,{height:340,fmt:fmtBytes});
   const parts=[]; if(cs.length)parts.push('containers'); if(svcs.length)parts.push('systemd services');
+  const tail = splitKernel
+    ? `<b>Kernel</b> is non-reclaimable kernel memory; <b>Host processes &amp; other</b> is everything else in use`
+    : `<b>Host &amp; other</b> is everything else in use`;
   if(cap) cap.innerHTML = parts.length
-    ? `Grouped by <b>${parts.join('</b> and <b>')}</b>, each block sized by resident RAM (anon + shared). <b>Host &amp; other</b> is everything else in use; <b>Free</b> is unused — together the host's ${fmtBytes(ramTotal)}. Hover any block; the groups read as colour families.`
+    ? `Grouped by <b>${parts.join('</b> and <b>')}</b>, each block sized by resident RAM (anon + shared). ${tail}; <b>Free</b> is unused — together the host's ${fmtBytes(ramTotal)}. Hover any block; the groups read as colour families.`
     : `Showing used vs free for <b>${esc(local?'this host':CURRENT_HOST)}</b> (no per-container/service RAM available yet).`;
 }
 

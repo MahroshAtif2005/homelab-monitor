@@ -38,8 +38,13 @@ def read_meminfo():
         total = m.get("MemTotal", 0)
         avail = m.get("MemAvailable", m.get("MemFree", 0) + m.get("Cached", 0))
         used = max(0, total - avail)
+        # Non-reclaimable kernel memory (slab/page-tables/stacks): inside "used" RAM but
+        # tied to no container/service, so the hub treemap can carve it out of the
+        # "Host & other" bucket. SReclaimable is left out (it counts as available).
+        kernel = m.get("SUnreclaim", 0) + m.get("KernelStack", 0) + m.get("PageTables", 0)
         # MB to match the hub's units.
-        return {"ram_total": total // 1024, "ram_used": used // 1024}
+        return {"ram_total": total // 1024, "ram_used": used // 1024,
+                "ram_kernel": kernel // 1024}
     except Exception:
         return {}
 
