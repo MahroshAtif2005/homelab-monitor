@@ -105,9 +105,9 @@ If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely hel
 
 <a href="https://www.star-history.com/?repos=SikamikanikoBG%2Fhomelab-monitor&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&theme=dark&legend=top-left&cachebust=20260609" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left&cachebust=20260609" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left&cachebust=20260609" />
  </picture>
 </a>
 
