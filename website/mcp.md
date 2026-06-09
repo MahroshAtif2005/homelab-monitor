@@ -55,29 +55,34 @@ scan until it's done.
 
 ## Run it
 
-=== "Claude Code (Docker, stdio)"
+The MCP server is **built into the monitor image** and served on `MCP_PORT`
+(default `9810`) alongside the dashboard — there's nothing extra to deploy. Set
+`ENABLE_MCP=0` to turn it off.
+
+=== "Connect (built-in, HTTP)"
 
     ```bash
-    docker build -f mcp/Dockerfile -t homelab-monitor-mcp .
-    claude mcp add homelab -- \
-      docker run -i --rm -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 homelab-monitor-mcp
+    # the dashboard is already running on :9800; the MCP server is on :9810
+    claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
     ```
 
-=== "Local Python (stdio)"
+=== "Local Python (dev, stdio)"
+
+    Run the server straight from a checkout against any monitor:
 
     ```bash
     pip install -r mcp/requirements.txt   # Python 3.10+
     HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 python mcp/server.py
     ```
 
-=== "docker-compose sidecar (HTTP)"
+=== "Docker stdio (advanced)"
 
-    The root `docker-compose.yml` ships a `homelab-monitor-mcp` service behind a
-    profile so it stays opt-in:
+    The same image can also be driven over stdio against a remote monitor:
 
     ```bash
-    docker compose --profile mcp up -d homelab-monitor-mcp
-    claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+    claude mcp add homelab -- docker run -i --rm \
+      -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 -e MCP_TRANSPORT=stdio \
+      sikamikaniko123/homelab-monitor python /app/mcp_server.py
     ```
 
 ## Try it

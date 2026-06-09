@@ -15,9 +15,7 @@ design/
 .github/
 scripts/
 *.md
-# …but the MCP sidecar image (mcp/Dockerfile, context = repo root) bundles the
-# CHANGELOG as a resource, so keep that one file in the build context. The main
-# image's Dockerfile COPYs only app.py/probe.*/static/, so re-including it here is
-# harmless for that build.
+# …but the image bundles the CHANGELOG (the MCP server serves it as a resource),
+# so keep that one file in the build context.
 !CHANGELOG.md
 mkdocs.yml

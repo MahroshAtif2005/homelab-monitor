@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.13.1"
+VERSION      = "0.14.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -3201,10 +3201,16 @@ def api_health():
     systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
                                     "services": [], "summary": {}}
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
+    mcp_enabled = os.environ.get("ENABLE_MCP", "1").strip().lower() not in ("0", "false", "no")
+    try:
+        mcp_port = int(os.environ.get("MCP_PORT", "9810") or 9810)
+    except ValueError:
+        mcp_port = 9810
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
+                    "mcp": {"enabled": mcp_enabled, "port": mcp_port},
                     "overview": build_overview(now, docker, systemd)})
 
 @app.route("/metrics")

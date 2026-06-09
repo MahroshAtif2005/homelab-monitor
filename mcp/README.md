@@ -9,6 +9,12 @@ It's a thin, well-described wrapper over the monitor's existing **read-only** HT
 endpoints. No collectors are touched and **nothing is mutated** — see the guardrails
 below.
 
+> **It ships inside the monitor image.** Since v0.14.0 the server runs in the same
+> container as the dashboard, on `MCP_PORT` (default `9810`). You usually don't run
+> anything from this folder — just connect:
+> `claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp`.
+> The files here are the source (and let you run it standalone for dev).
+
 ## Tools
 
 Everything the dashboard shows is reachable. Start with `list_hosts` → `get_host` →
@@ -47,30 +53,32 @@ Everything the dashboard shows is reachable. Start with `list_hosts` → `get_ho
 
 ## Run it
 
-### A. Add to Claude Code via Docker (stdio)
+### A. Built-in (recommended)
+
+The monitor image already runs this server on `MCP_PORT` (default `9810`). Just
+connect:
 
 ```bash
-docker build -f mcp/Dockerfile -t homelab-monitor-mcp .
-claude mcp add homelab -- \
-  docker run -i --rm -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 homelab-monitor-mcp
-```
-
-### B. Local Python (stdio)
-
-```bash
-pip install -r mcp/requirements.txt   # Python 3.10+
-HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 python mcp/server.py
-```
-
-### C. As an optional docker-compose sidecar (HTTP)
-
-The root `docker-compose.yml` ships a `homelab-monitor-mcp` service behind a
-profile so it stays opt-in:
-
-```bash
-docker compose --profile mcp up -d homelab-monitor-mcp
-# then point a client at the streamable-http endpoint:
 claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+```
+
+### B. Local Python (dev, stdio)
+
+Run it from a checkout against any monitor:
+
+```bash
+pip install -r requirements.txt   # Python 3.10+
+HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 python server.py
+```
+
+### C. Docker stdio against a remote monitor (advanced)
+
+The same image can be driven over stdio:
+
+```bash
+claude mcp add homelab -- docker run -i --rm \
+  -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 -e MCP_TRANSPORT=stdio \
+  sikamikaniko123/homelab-monitor python /app/mcp_server.py
 ```
 
 ## Guardrails
