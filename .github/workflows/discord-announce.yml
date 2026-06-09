@@ -1,0 +1,101 @@
+name: Announce release on Discord
+
+# On every published, non-prerelease release, post the changelog as a rich
+# embed to the project Discord #announcements channel via webhook.
+#
+# Unlike the selfh.st announcer (minor+ only, feeding a human-curated weekly),
+# this posts EVERY non-prerelease release: #announcements IS the changelog, and
+# people who join a project's Discord want every release note. If it ever feels
+# noisy, copy the patch-skip gate from selfhst-newsletter.yml into the gate step.
+#
+#   secrets.DISCORD_ANNOUNCE_WEBHOOK   Discord webhook URL for #announcements
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)post, e.g. v0.14.3'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release
+        id: rel
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let r;
+            if (context.eventName === 'workflow_dispatch') {
+              r = (await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner, repo: context.repo.repo,
+                tag: context.payload.inputs.tag,
+              })).data;
+            } else {
+              r = context.payload.release;
+            }
+            core.setOutput('tag', r.tag_name);
+            core.setOutput('name', r.name || r.tag_name);
+            core.setOutput('url', r.html_url);
+            core.setOutput('prerelease', String(r.prerelease));
+            core.setOutput('body', r.body || '');
+
+      - name: Skip prereleases
+        id: gate
+        env:
+          PRERELEASE: ${{ steps.rel.outputs.prerelease }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "::notice::$TAG is a prerelease — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post to Discord
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_ANNOUNCE_WEBHOOK }}
+          NAME: ${{ steps.rel.outputs.name }}
+          URL: ${{ steps.rel.outputs.url }}
+          BODY: ${{ steps.rel.outputs.body }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "::error::DISCORD_ANNOUNCE_WEBHOOK not set"; exit 1
+          fi
+          # Tidy GitHub markdown for Discord: ATX headings -> bold, drop the
+          # auto-generated "Full Changelog" compare line.
+          desc=$(printf '%s' "$BODY" \
+            | sed -E 's/^#{1,6}[[:space:]]+(.*)$/**\1**/' \
+            | sed -E '/^\*\*Full Changelog\*\*/d; /^Full Changelog/d')
+          # Discord embed description hard limit is 4096 chars; keep headroom
+          # and link out to the full notes when we truncate.
+          if [ "$(printf '%s' "$desc" | wc -c)" -gt 3500 ]; then
+            desc="$(printf '%s' "$desc" | cut -c1-3500)
+
+… [read the full release notes →]($URL)"
+          fi
+          payload=$(jq -nc \
+            --arg name "$NAME" --arg url "$URL" --arg desc "$desc" \
+            '{
+              username: "homelab-monitor",
+              embeds: [{
+                title: $name,
+                url: $url,
+                description: $desc,
+                color: 5793266,
+                footer: { text: "homelab-monitor • new release" }
+              }]
+            }')
+          code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' \
+            -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK?wait=true")
+          echo "HTTP $code"; cat /tmp/resp.txt || true
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Discord post failed (HTTP $code)"; exit 1
+          fi
