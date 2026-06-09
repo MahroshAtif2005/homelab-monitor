@@ -474,3 +474,58 @@
   vertical-align: middle;
   box-shadow: 0 0 8px var(--hl-amber-soft);
 }
+
+/* ── MCP / AI-agent band ──────────────────────────────────────────────────── */
+.hl-mcp {
+  max-width: 880px;
+  margin: 0 auto 48px;
+  padding: 28px 26px 24px;
+  border: 1px solid var(--hl-bd-2);
+  border-radius: 16px;
+  background:
+    radial-gradient(120% 140% at 50% -20%, rgba(88, 166, 255, 0.08), transparent 60%),
+    var(--hl-card);
+  text-align: center;
+}
+.hl-mcp-pitch {
+  margin: 0 auto 18px;
+  max-width: 720px;
+  color: var(--hl-tx-mut);
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+.hl-mcp-pitch strong { color: var(--hl-tx); font-weight: 600; }
+.hl-mcp-diagram {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  margin: 4px auto 10px;
+}
+.hl-mcp-cap {
+  margin: 0 auto 18px;
+  max-width: 640px;
+  color: var(--hl-tx-dim);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+.hl-mcp pre {
+  text-align: left;
+  max-width: 720px;
+  margin: 0 auto 16px;
+}
+.hl-mcp-prompts {
+  margin: 4px auto 6px;
+  color: var(--hl-tx-mut);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.hl-mcp ul {
+  text-align: left;
+  max-width: 720px;
+  margin: 0 auto 20px;
+  color: var(--hl-tx-mut);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+.hl-mcp .md-button { margin-top: 4px; }

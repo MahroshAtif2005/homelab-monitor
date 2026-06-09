@@ -1,4 +1,5 @@
 ---
+description: A small, friendly self-hosted homelab dashboard — GPU, AI VRAM, Docker, systemd, host health — with a built-in read-only MCP server for Claude and any AI agent.
 hide:
   - navigation
   - toc
@@ -84,6 +85,45 @@ check (firewall, SSH hardening, SELinux/AppArmor, fail2ban) — issues first.
 Discord webhook or [ntfy.sh](https://ntfy.sh). Edge-triggered: one ping per
 state change, never a spam flood. Configured from the UI.
 </div>
+
+<div class="hl-feature hl-reveal delay-1" markdown>
+### <span class="ico">🤝</span> MCP for AI agents
+A built-in, **read-only** [Model Context Protocol](https://modelcontextprotocol.io)
+server lets **Claude, ChatGPT or any MCP client** explore your homelab — one line to
+connect, nothing it can change. [More →](mcp.md)
+</div>
+
+</div>
+
+<div class="hl-section-title hl-reveal">Now readable by your AI agent, too</div>
+
+<div class="hl-mcp hl-reveal" markdown>
+
+<p class="hl-mcp-pitch">
+The same host, GPU, container and disk data you read on the dashboard is now exposed
+over a built-in, <strong>read-only</strong> MCP server — so you can just <em>ask</em>
+your agent instead of digging. One line connects
+<strong>Claude</strong>, <strong>ChatGPT</strong> or any MCP client; nothing to write,
+nothing it can change.
+</p>
+
+<img class="hl-mcp-diagram" src="assets/mcp-agents.svg" alt="HomeLab Monitor connects over MCP to Claude, ChatGPT, or any MCP client; read-only, both directions are question and answer">
+
+<p class="hl-mcp-cap">Your homelab speaks MCP — ask in plain language; your agent reads its live state over MCP. Read-only: both directions are just question and answer.</p>
+
+```bash
+# the dashboard is on :9800; the read-only MCP server rides along on :9810
+claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+```
+
+<p class="hl-mcp-prompts">Then just ask — the agent picks the right tools:</p>
+
+- *"My GPU's been pinned for an hour — which model server is loaded, and who's actually calling it?"*
+- *"What's eating `/backup`? Give me the biggest folders and flag anything that looks like runaway logs."*
+- *"Which host is lowest on RAM right now, and what's the top process holding it?"*
+- *"I want to reboot and run an OS upgrade this weekend — which box needs it most, and a safe order given what's running?"*
+
+[Full tool list &amp; setup → MCP docs](mcp.md){ .md-button }
 
 </div>
 

@@ -1,7 +1,12 @@
-# MCP server
+---
+title: MCP server — connect Claude, ChatGPT & any AI agent to your homelab
+description: Connect Claude, ChatGPT or any MCP client to your homelab. HomeLab Monitor ships a read-only Model Context Protocol server with 12 tools — one line to connect.
+---
 
-HomeLab Monitor ships an optional **[Model Context Protocol](https://modelcontextprotocol.io)
-server** so an AI agent — Claude, or any MCP-capable client — can connect to the
+# MCP server — connect Claude, ChatGPT & any AI agent
+
+HomeLab Monitor ships a built-in **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)
+server** so an AI agent — Claude, ChatGPT, or any MCP-capable client — can connect to the
 monitor and *explore the whole homelab ecosystem* through it: hosts, containers,
 systemd services, GPU, AI model servers, alerts and host posture.
 
