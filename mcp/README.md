@@ -11,13 +11,22 @@ below.
 
 ## Tools
 
+Everything the dashboard shows is reachable. Start with `list_hosts` → `get_host` →
+`get_snapshot`, then drill in with the detail tools.
+
 | Tool | What it answers | Wraps |
 |------|-----------------|-------|
 | `list_hosts()` | What's in the fleet and is it healthy? | `GET /api/fleet` |
 | `get_host(name)` | One host's System / Network / Security inventory (`"local"` = the hub) | `GET /api/host_data/<name>` |
-| `get_snapshot()` | Live GPU / host / Docker / systemd vitals right now | `GET /api/health` |
+| `get_snapshot()` | Live GPU / host / Docker / systemd overview + diagnostics | `GET /api/health` |
+| `get_containers()` | Full Docker list: state, health, ports, RAM/VRAM, image disk, uptime | `GET /api/health` |
+| `get_services()` | Full systemd list: active/sub state, ports, RAM, admin/watched flags | `GET /api/health` |
+| `get_memory(range="6h")` | Per-service & per-process RAM breakdown (the memory treemap) | `GET /api/data` |
+| `get_gpu(range="6h")` | GPU util / VRAM / power / temp, per-model VRAM, caller attribution | `GET /api/data` |
 | `get_ai_models(range="6h")` | Which models are loaded, VRAM, and *who is driving them* | `GET /api/data` |
+| `get_history(range="6h")` | Charted time-series (GPU + host) for trends | `GET /api/data` |
 | `get_events(range="6h")` / `get_alerts(...)` | Recent OOM kills / threshold crossings + insights | `GET /api/data` |
+| `scan_disk(path="/", rescan=False)` | WizTree-style nested folder-size treemap | `GET /api/disk_scan` |
 
 ## Resources
 

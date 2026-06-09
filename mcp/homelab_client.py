@@ -17,6 +17,7 @@ fleet — see issue #70's guardrails.
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -199,9 +200,36 @@ def get_snapshot():
             "failed_services": failed_services,
         },
         "os_updates": h.get("os_updates"),
+        "diagnostics": h.get("diagnostics"),
         "update_available": bool(update.get("available")),
         "current_version": update.get("current") or h.get("version"),
     }
+
+
+def get_containers():
+    """Every Docker container with full detail (the Containers tab).
+
+    Each item: name, id, image, state, status/status_text, health label, exposed
+    ports, RAM (`mem_bytes`), VRAM (`vram_bytes`), image disk (`disk_bytes`),
+    uptime. Returns the complete list, not just problems.
+    """
+    h = _get("/api/health")
+    d = h.get("docker") or {}
+    return {"available": d.get("available"), "reason": d.get("reason"),
+            "summary": d.get("summary"), "containers": d.get("containers") or []}
+
+
+def get_services():
+    """Every systemd unit with full detail (the Services tab).
+
+    Each item: name, active/sub state, description, listening ports, RAM
+    (`mem_bytes`), uptime, whether it's an admin/vendor unit and whether it's
+    explicitly watched, plus the monitor's own status verdict.
+    """
+    h = _get("/api/health")
+    s = h.get("systemd") or {}
+    return {"available": s.get("available"), "reason": s.get("reason"),
+            "summary": s.get("summary"), "services": s.get("services") or []}
 
 
 def get_ai_models(range="6h"):
@@ -240,6 +268,98 @@ def get_events(range="6h"):
 def get_alerts(range="6h"):
     """Alias for get_events — the monitor's alerts *are* its edge-triggered events."""
     return get_events(range)
+
+
+def get_memory(range="6h"):
+    """RAM breakdown — the data behind the System tab's memory treemap.
+
+    `per_service` is peak/avg/present RAM (MB) per container/systemd service over
+    `range`; `current_procs` is the current RAM (MB) per service right now;
+    `ram_kernel_mb` is non-reclaimable kernel memory (slab/page-tables/stacks).
+    Together these explain where used RAM is going.
+    """
+    data = _get("/api/data?range=" + urllib.parse.quote(str(range)))
+    now = data.get("now") or {}
+    # NB: /api/data's top-level `mem_total` and `now.mem_used` are GPU *VRAM* (see
+    # get_gpu). System RAM lives on the host snapshot — read it from there.
+    host = now.get("host") or {}
+    return {
+        "range": data.get("range", range),
+        "ram_total_mb": host.get("ram_total"),
+        "ram_used_mb": host.get("ram_used"),
+        "ram_kernel_mb": host.get("ram_kernel"),
+        "peak_used_mb": data.get("peak_mem"),
+        "pressure_free_mb": data.get("pressure_free_mb"),
+        "per_service": data.get("summary") or [],
+        "current_procs": now.get("procs") or [],
+    }
+
+
+def get_gpu(range="6h"):
+    """GPU detail — current utilisation/VRAM/power/temp, per-model VRAM use and the
+    caller→server attribution that explains *who is driving the GPU*.
+
+    `models_vram` is peak/avg VRAM (MB) per (server, model) over `range`;
+    `callers` is connection-seconds per caller→server edge over the same window.
+    """
+    data = _get("/api/data?range=" + urllib.parse.quote(str(range)))
+    now = data.get("now") or {}
+    return {
+        "range": data.get("range", range),
+        "available": now.get("gpu_avail"),
+        "util_pct": now.get("util"),
+        "vram_used_mb": now.get("mem_used"),
+        "vram_total_mb": now.get("mem_total"),
+        "power_w": now.get("power"),
+        "temp_c": now.get("temp"),
+        "pressure_free_mb": data.get("pressure_free_mb"),
+        "models_vram": data.get("model_summary") or [],
+        "callers": data.get("callers") or [],
+    }
+
+
+def get_history(range="6h"):
+    """Charted time-series the dashboard graphs over `range`.
+
+    `labels` are unix timestamps; `series` holds aligned arrays: GPU `util`/`mem`/
+    `power`/`temp`, host `cpu`/`ram_used`/`ram_total`/`load1`/`ctemp`, and `mempk`
+    (peak GPU VRAM per bucket). `bucket_sec` is the down-sampling bucket width.
+    """
+    data = _get("/api/data?range=" + urllib.parse.quote(str(range)))
+    return {
+        "range": data.get("range", range),
+        "bucket_sec": data.get("bucket_sec"),
+        "labels": data.get("labels") or [],
+        "series": data.get("total") or {},
+        "peak_mem_mb": data.get("peak_mem"),
+    }
+
+
+def scan_disk(path="/", rescan=False, max_wait=60):
+    """WizTree-style nested folder-size treemap for a host path (the Disks tab).
+
+    Wraps the monitor's on-demand `/api/disk_scan`, which runs in the background;
+    this polls until it's `done` (up to `max_wait` seconds) and returns the tree.
+    `entries` is a nested list of {name, path, bytes, children}. `path` must be an
+    absolute host path (e.g. "/", "/var", "/home"). Set `rescan=True` to force a
+    fresh scan instead of reusing a cached one.
+    """
+    base_q = "?path=" + urllib.parse.quote(str(path))
+    query = base_q + ("&rescan=1" if rescan else "")
+    waited = 0.0
+    while True:
+        d = _get("/api/disk_scan" + query)
+        state = d.get("state")
+        if state != "scanning":
+            return {"path": d.get("path", path), "state": state,
+                    "total_bytes": d.get("total"), "free_bytes": d.get("free"),
+                    "entries": d.get("entries") or [], "error": d.get("error")}
+        if waited >= max_wait:
+            return {"path": path, "state": "scanning",
+                    "note": "still scanning after %ds — call scan_disk again to poll" % int(max_wait)}
+        time.sleep(1.5)
+        waited += 1.5
+        query = base_q  # never re-trigger a rescan on subsequent polls
 
 
 def get_metrics():

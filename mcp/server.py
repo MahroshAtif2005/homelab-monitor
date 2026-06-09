@@ -35,12 +35,16 @@ import homelab_client as hc  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 INSTRUCTIONS = (
-    "Read-only access to a HomeLab Monitor instance. Use `list_hosts` to see the "
-    "fleet, `get_host` for one machine's full System/Network/Security inventory, "
-    "`get_snapshot` for live GPU/host/Docker/systemd vitals, `get_ai_models` to see "
-    "which model servers are loaded and who is driving them, and `get_events` for "
-    "recent OOM kills / threshold crossings. Resources expose Prometheus `/metrics` "
-    "and the CHANGELOG for version context. This server never mutates the fleet."
+    "Read-only access to a HomeLab Monitor instance — everything the dashboard shows "
+    "is reachable here. Orientation: `list_hosts` (fleet) → `get_host` (one machine's "
+    "full System/Network/Security inventory) → `get_snapshot` (live overview). Detail "
+    "tools: `get_containers` and `get_services` (full Docker/systemd lists), "
+    "`get_memory` (per-service/per-process RAM breakdown), `get_gpu` (utilisation, "
+    "per-model VRAM, and who's driving it), `get_ai_models` (loaded models), "
+    "`get_history` (charted time-series), `get_events`/`get_alerts` (OOM kills / "
+    "threshold crossings), and `scan_disk(path)` (WizTree-style folder treemap). "
+    "Resources expose Prometheus `/metrics`, `/healthz` and the CHANGELOG. This "
+    "server never mutates the fleet."
 )
 
 mcp = FastMCP("homelab-monitor", instructions=INSTRUCTIONS)
@@ -74,6 +78,60 @@ def get_snapshot() -> dict:
     updates and whether a monitor update is available. DB-free and cheap.
     """
     return hc.get_snapshot()
+
+
+@mcp.tool()
+def get_containers() -> dict:
+    """Full Docker container list (Containers tab): per container name, image, state,
+    health, exposed ports, RAM (`mem_bytes`), VRAM (`vram_bytes`), image disk and
+    uptime — plus the summary counts.
+    """
+    return hc.get_containers()
+
+
+@mcp.tool()
+def get_services() -> dict:
+    """Full systemd unit list (Services tab): per unit active/sub state, description,
+    listening ports, RAM, uptime, admin/watched flags and status verdict — plus the
+    summary counts.
+    """
+    return hc.get_services()
+
+
+@mcp.tool()
+def get_memory(range: str = "6h") -> dict:
+    """RAM breakdown behind the memory treemap: per-service peak/avg/present RAM over
+    `range`, the current RAM per process right now, kernel (non-reclaimable) memory,
+    and totals. Answers "what is eating RAM on this hub?".
+    """
+    return hc.get_memory(range)
+
+
+@mcp.tool()
+def get_gpu(range: str = "6h") -> dict:
+    """GPU detail: current utilisation, VRAM used/total, power and temperature, plus
+    per-model VRAM use and the caller→server attribution over `range`. Answers "why
+    is the GPU pinned, and which service is calling the model server?".
+    """
+    return hc.get_gpu(range)
+
+
+@mcp.tool()
+def get_history(range: str = "6h") -> dict:
+    """Charted time-series the dashboard graphs over `range`: timestamps + aligned
+    arrays for GPU util/VRAM/power/temp and host CPU/RAM/load/temp. Use for trends.
+    """
+    return hc.get_history(range)
+
+
+@mcp.tool()
+def scan_disk(path: str = "/", rescan: bool = False) -> dict:
+    """WizTree-style nested folder-size treemap for a host path (Disks tab). Wraps the
+    monitor's on-demand scan and polls until done. `path` is an absolute host path
+    (e.g. "/", "/var"); set `rescan=True` to force a fresh scan. Returns total/free
+    bytes and a nested `entries` tree of {name, path, bytes, children}.
+    """
+    return hc.scan_disk(path, rescan)
 
 
 @mcp.tool()

@@ -29,6 +29,11 @@ async def main():
             print("get_snapshot ok, len=", len(txt), "version-in-payload:", '"version"' in txt)
             models = await session.call_tool("get_ai_models", {"range": "24h"})
             print("get_ai_models ok, len=", len(models.content[0].text))
+            for name, args in (("get_containers", {}), ("get_services", {}),
+                               ("get_memory", {"range": "24h"}), ("get_gpu", {"range": "24h"}),
+                               ("get_history", {"range": "24h"}), ("scan_disk", {"path": "/"})):
+                r = await session.call_tool(name, args)
+                print("%s ok, len=%d" % (name, len(r.content[0].text)))
             cl = await session.read_resource("homelab://changelog")
             body = cl.contents[0].text
             print("changelog resource ok, starts:", body.splitlines()[0][:40])

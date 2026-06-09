@@ -70,18 +70,41 @@ HEALTH = {
                     {"name": "weird", "active": "active", "status": "bad"},
                 ]},
     "update": {"available": True, "current": "0.13.1"},
-    "os_updates": {"count": 3}, "diagnostics": {}, "overview": {"status": "warn"},
+    "os_updates": {"count": 3},
+    "diagnostics": {"checks": [{"name": "docker", "ok": True}], "summary": "ok"},
+    "overview": [{"key": "gpu", "label": "GPU", "status": "ok"}],
 }
 
 DATA = {
-    "version": "0.13.1", "range": "6h",
-    "now": {"models": [{"service": "ollama", "model": "llama3:70b", "vram": 8200, "state": "loaded"}]},
+    "version": "0.13.1", "range": "6h", "bucket_sec": 60,
+    "mem_total": 24576, "peak_mem": 9000, "pressure_free_mb": 2048,
+    "labels": [1000, 1060, 1120],
+    "total": {"util": [10, 20, 0], "mem": [8000, 9000, 1000], "power": [200, 210, 90],
+              "temp": [60, 62, 35], "cpu": [5, 7, 1], "ram_used": [40000, 41000, 39000],
+              "ram_total": [128000, 128000, 128000], "load1": [0.9, 1.1, 0.8], "ctemp": [45, 46, 40]},
+    "now": {
+        "gpu_avail": True, "util": 73, "mem_used": 9000, "mem_total": 24576,
+        "power": 210, "temp": 62, "ts": 1120,
+        "host": _host(15, 40000, 128000, [{"mount": "/", "pct": 60}]),
+        "models": [{"service": "ollama", "model": "llama3:70b", "vram": 8200, "state": "loaded"}],
+        "procs": [{"service": "ollama", "mem": 8200}, {"service": "immich_ml", "mem": 1400}],
+    },
+    "summary": [{"service": "ollama", "peak": 8200, "avg": 6100, "present": 100},
+                {"service": "immich_ml", "peak": 1500, "avg": 900, "present": 80}],
     "model_summary": [{"service": "ollama", "model": "llama3:70b", "peak": 8200, "avg": 6100}],
     "callers": [{"caller": "open-webui", "server": "ollama", "seconds": 3600, "samples": 360}],
     "events": [{"ts": 1650, "service": "immich_ml", "kind": "oom", "detail": "killed",
                 "blame": "immich_ml lost to ollama"}],
     "insights": ["GPU VRAM peaked at 8.2 GB driven by open-webui"],
 }
+
+DISK_DONE = {
+    "path": "/", "state": "done", "total": 355218889101, "free": 82583969792,
+    "entries": [{"name": "var", "path": "/var", "bytes": 172911017873,
+                 "children": [{"name": "lib", "path": "/var/lib", "bytes": 170963548531}]}],
+    "error": None,
+}
+DISK_SCANNING = {"path": "/slow", "state": "scanning"}
 
 METRICS = "# HELP gpu_util GPU utilization\ngpu_util{gpu=\"gpu0\"} 73\n"
 HEALTHZ = {"status": "ok", "version": "0.13.1"}
@@ -100,8 +123,20 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # silence
         pass
 
+    def _json(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/disk_scan":
+            # crude query parse: /slow always scanning, everything else done.
+            scanning = "%2Fslow" in self.path or "/slow" in self.path
+            self._json(DISK_SCANNING if scanning else DISK_DONE)
+            return
         if path == "/metrics":
             body = METRICS.encode()
             self.send_response(200)
@@ -174,6 +209,44 @@ def run():
         check(failed == {"borgbackup", "weird"}, "failed = active==failed or status==bad")
         check("nvidia-cdi-refresh" not in failed, "completed oneshot (inactive) not flagged")
         check(r["update_available"] is True, "update flag")
+
+        print("get_containers")
+        r = hc.get_containers()
+        check(len(r["containers"]) == 3, "full container list (not just problems)")
+        check(r["summary"]["total"] == 12, "container summary passed through")
+
+        print("get_services")
+        r = hc.get_services()
+        check(len(r["services"]) == 4, "full service list (not just failed)")
+
+        print("get_memory")
+        r = hc.get_memory("24h")
+        check(r["ram_total_mb"] == 128000, "system RAM total from host (not GPU VRAM)")
+        check(r["ram_used_mb"] == 40000, "system RAM used from host")
+        check(r["ram_kernel_mb"] == 512, "kernel memory from now.host")
+        svcs = {s["service"] for s in r["per_service"]}
+        check(svcs == {"ollama", "immich_ml"}, "per-service RAM breakdown")
+        check({p["service"] for p in r["current_procs"]} == {"ollama", "immich_ml"}, "current procs")
+
+        print("get_gpu")
+        r = hc.get_gpu("24h")
+        check(r["util_pct"] == 73 and r["vram_used_mb"] == 9000, "gpu now vitals")
+        check(r["power_w"] == 210 and r["temp_c"] == 62, "gpu power/temp")
+        check(r["models_vram"][0]["peak"] == 8200, "per-model vram")
+        check(r["callers"][0]["server"] == "ollama", "gpu caller attribution")
+
+        print("get_history")
+        r = hc.get_history("24h")
+        check(r["labels"] == [1000, 1060, 1120], "history timestamps")
+        check(r["series"]["util"] == [10, 20, 0], "history series aligned")
+        check(r["bucket_sec"] == 60, "bucket width")
+
+        print("scan_disk")
+        r = hc.scan_disk("/")
+        check(r["state"] == "done" and r["total_bytes"] == 355218889101, "disk scan completes")
+        check(r["entries"][0]["children"][0]["name"] == "lib", "nested folder tree")
+        r = hc.scan_disk("/slow", max_wait=0)
+        check(r["state"] == "scanning" and "note" in r, "scanning path returns poll-again note")
 
         print("get_ai_models")
         r = hc.get_ai_models("24h")
