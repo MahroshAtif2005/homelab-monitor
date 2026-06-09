@@ -5,6 +5,13 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.14.2](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.2) — 2026-06-09
+- **Fix:** correct the `io.modelcontextprotocol.server.name` image label to match the
+  publisher namespace casing (`io.github.SikamikanikoBG/homelab-monitor`) so the
+  image passes the official MCP Registry's OCI ownership check. `server.json` trimmed
+  to a ≤100-char description and the placeholder remote dropped (OCI/stdio entry is
+  the canonical one for a self-hosted server). Discoverability only — no runtime changes.
+
 ## [0.14.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.1) — 2026-06-09
 - **MCP registry packaging** — the image is now publishable to the official
   [MCP Registry](https://registry.modelcontextprotocol.io): added the
