@@ -69,6 +69,17 @@ The hub stitches `nvidia-smi`, the Docker API, model-server APIs (Ollama, vLLM, 
 - **`/metrics` Prometheus endpoint + Grafana dashboard** → [Prometheus & Grafana](https://sikamikanikobg.github.io/homelab-monitor/prometheus/)
 - **The full data pipeline + caller attribution** → [How it works](https://sikamikanikobg.github.io/homelab-monitor/how-it-works/)
 
+## Connect an AI agent (MCP)
+
+An optional **MCP server** lets Claude (or any MCP client) connect to the monitor and explore the whole homelab — hosts, containers, services, GPU, AI model servers and alerts — as named tools instead of a raw JSON blob. It's a thin, **read-only** wrapper over the endpoints above.
+
+```bash
+docker build -f mcp/Dockerfile -t homelab-monitor-mcp .
+claude mcp add homelab -- docker run -i --rm -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 homelab-monitor-mcp
+```
+
+Then ask things like *"which host has a reboot pending and an OS upgrade available?"* or *"why is the GPU pinned, and which service is calling it?"*. Full setup → [mcp/README.md](mcp/README.md).
+
 ## Security
 
 This is a host monitor: it runs with host access and a read-only Docker socket, root mount, and D-Bus socket — a broad footprint by design. **Keep it behind your LAN/VPN/firewall and don't expose it to the public internet.** Details → [docs](https://sikamikanikobg.github.io/homelab-monitor/how-it-works/).

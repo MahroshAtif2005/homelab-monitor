@@ -51,3 +51,30 @@ services:
     # A hard GPU reservation makes `docker compose up` fail on any host without the
     # NVIDIA runtime — the monitor is useful without a GPU, so we let it start
     # everywhere and auto-use the GPU via the NVIDIA_* env vars above when present.
+
+  # ── Optional: MCP server ────────────────────────────────────────────────────
+  # Lets Claude (or any MCP client) connect to the monitor and explore the whole
+  # homelab — read-only. Opt-in via a profile, so a plain `docker compose up`
+  # never starts it. Bring it up explicitly with:
+  #   docker compose --profile mcp up -d homelab-monitor-mcp
+  # then point a client at the streamable-http endpoint:
+  #   claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+  # See docs/mcp + mcp/README.md. Read-only: no write tools.
+  homelab-monitor-mcp:
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    image: sikamikaniko123/homelab-monitor-mcp:latest
+    container_name: homelab-monitor-mcp
+    restart: unless-stopped
+    profiles: ["mcp"]            # opt-in only
+    depends_on:
+      - homelab-monitor
+    # Host networking so it can reach the monitor on localhost:9800 and bind the
+    # MCP port directly on the host (same model as the monitor itself).
+    network_mode: host
+    environment:
+      HOMELAB_MONITOR_URL: "http://localhost:9800"   # the monitor above
+      MCP_TRANSPORT: "http"                           # streamable-http for a sidecar
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9810"                                # dashboard stays on 9800
