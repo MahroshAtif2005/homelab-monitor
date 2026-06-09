@@ -5,6 +5,14 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.14.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.1) — 2026-06-09
+- **MCP registry packaging** — the image is now publishable to the official
+  [MCP Registry](https://registry.modelcontextprotocol.io): added the
+  `io.modelcontextprotocol.server.name` image label and a root `server.json`
+  (OCI + streamable-HTTP entries). Also added a `smithery.yaml` so the server can
+  be catalogued on [Smithery](https://smithery.ai), and a 400×400 logo. No runtime
+  changes — discoverability only.
+
 ## [0.14.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.0) — 2026-06-09
 - **Built-in MCP server** — a first-class [Model Context Protocol](https://modelcontextprotocol.io)
   server now ships **inside the same image**, so Claude (or any MCP client) can
