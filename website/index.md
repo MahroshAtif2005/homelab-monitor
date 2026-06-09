@@ -11,9 +11,9 @@ hide:
 
 <p class="hl-tag">
 One small container for your home lab — GPU, AI VRAM, Docker, systemd and host
-health, all on one page. <strong>Multi-machine since 0.8</strong> — register
-your other boxes over SSH and see every host's vitals side-by-side in one
-cockpit.
+health on a single page, with every machine registered over SSH in one cockpit.
+<strong>Now readable by AI agents too</strong>, through a built-in read-only
+<strong>MCP server</strong>.
 </p>
 
 <div class="hl-cta">
@@ -109,7 +109,7 @@ nothing it can change.
 
 <img class="hl-mcp-diagram" src="assets/mcp-agents.svg" alt="HomeLab Monitor connects over MCP to Claude, ChatGPT, or any MCP client; read-only, both directions are question and answer">
 
-<p class="hl-mcp-cap">Your homelab speaks MCP — ask in plain language; your agent reads its live state over MCP. Read-only: both directions are just question and answer.</p>
+<p class="hl-mcp-cap">Connect any MCP client — Claude, ChatGPT, or an agent running on your own local Ollama models — and it reads your homelab's live state. Read-only: both directions are just question and answer.</p>
 
 ```bash
 # the dashboard is on :9800; the read-only MCP server rides along on :9810
