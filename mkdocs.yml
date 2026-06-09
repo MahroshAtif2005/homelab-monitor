@@ -1,5 +1,5 @@
 site_name: HomeLab Monitor
-site_description: A small, friendly dashboard for a self-hosted home lab — GPU, AI VRAM, Docker, systemd and host health. Multi-machine since 0.8.
+site_description: A small, friendly self-hosted homelab dashboard — GPU, AI VRAM, Docker, systemd, host health — with a built-in read-only MCP server for Claude and any AI agent.
 site_url: https://sikamikanikobg.github.io/homelab-monitor/
 site_author: SikamikanikoBG
 repo_url: https://github.com/SikamikanikoBG/homelab-monitor
