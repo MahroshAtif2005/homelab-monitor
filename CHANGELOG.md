@@ -5,6 +5,16 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.14.3](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.3) — 2026-06-09
+- **Fix:** the built-in MCP server over HTTP rejected remote clients with **421
+  Misdirected Request**. The MCP SDK's DNS-rebinding guard only trusts a
+  `localhost` Host header, so the documented `claude mcp add --transport http
+  homelab http://YOUR-HUB:9810/mcp` failed whenever the hub was reached by name or
+  IP. The HTTP/SSE transport now disables that localhost-only check by default
+  (safe — every tool is read-only), and a new `MCP_ALLOWED_HOSTS` (plus optional
+  `MCP_ALLOWED_ORIGINS`) env lets you lock it back down to specific hosts. stdio
+  is unaffected.
+
 ## [0.14.2](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.2) — 2026-06-09
 - **Fix:** correct the `io.modelcontextprotocol.server.name` image label to match the
   publisher namespace casing (`io.github.SikamikanikoBG/homelab-monitor`) so the
