@@ -73,14 +73,23 @@ The hub stitches `nvidia-smi`, the Docker API, model-server APIs (Ollama, vLLM, 
 
 ## Connect an AI agent (MCP)
 
-A **read-only MCP server is built in** — same image, no extra container. It lets Claude (or any MCP client) connect to the monitor and explore the whole homelab — hosts, containers, services, GPU, AI model servers, RAM/disk and alerts — as named tools instead of a raw JSON blob, with full dashboard parity.
+**Your homelab is now legible to AI agents — point a client at one URL and it can see every host, container, GPU and disk. Read-only, no extra setup.**
+
+HomeLab Monitor isn't just a dashboard for *you* anymore; it's context for your AI agent too. A **read-only [MCP](https://modelcontextprotocol.io) server is built into the same container** (served on `:9810`) — so Claude, Claude Code, or any MCP client connects in one line and explores your whole lab through **12 named tools**, with the same coverage you see on the dashboard: hosts, containers, systemd services, GPU **and who's driving it**, per-process RAM, AI model servers, disk treemaps, history and alerts.
 
 ```bash
-# served on :9810 alongside the dashboard (disable with ENABLE_MCP=0)
+# the dashboard is on :9800; the MCP server rides along on :9810
 claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
 ```
 
-Then ask things like *"which host has a reboot pending and an OS upgrade available?"* or *"why is the GPU pinned, and which service is calling it?"*. Full tool list & setup → [MCP docs](https://sikamikanikobg.github.io/homelab-monitor/mcp/).
+Once connected, skip the tab-hunting and just **ask** — the agent picks the right tools:
+
+- *"My GPU's been pinned for an hour — which model server is loaded, and who's actually calling it?"*
+- *"What's eating `/backup`? Give me the biggest folders and flag anything that looks like runaway logs."*
+- *"Which host is lowest on RAM right now, and what's the top process holding it?"*
+- *"I want to reboot and run an OS upgrade this weekend — which box needs it most, and what's a safe order given what's running on each?"*
+
+**Read-only by design** — there are no write tools, so an agent can look but never touch your fleet. Turn it off anytime with `ENABLE_MCP=0`. Full tool list & setup → [MCP docs](https://sikamikanikobg.github.io/homelab-monitor/mcp/).
 
 ## Security
 
