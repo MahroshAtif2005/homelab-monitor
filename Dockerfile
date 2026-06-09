@@ -32,6 +32,10 @@ COPY mcp/homelab_client.py /app/homelab_client.py
 COPY CHANGELOG.md          /app/CHANGELOG.md
 COPY launch.py             /app/launch.py
 
+# Identifies this image to the official MCP Registry (registry.modelcontextprotocol.io),
+# which validates OCI-packaged servers by matching this label to the published name.
+LABEL io.modelcontextprotocol.server.name="io.github.sikamikanikobg/homelab-monitor"
+
 ENV PORT=8099 \
     MCP_PORT=9810
 EXPOSE 8099 9810

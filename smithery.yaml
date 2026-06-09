@@ -1,0 +1,25 @@
+# Smithery (smithery.ai) config for HomeLab Monitor's built-in MCP server.
+# Self-hosted: the server runs in your own homelab inside the monitor image, so
+# Smithery drives it over stdio via `docker run`, pointed at your dashboard URL.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      homelab_monitor_url:
+        type: string
+        description: "Base URL of the running HomeLab Monitor dashboard (e.g. http://YOUR-HUB:9800)"
+        default: "http://localhost:9800"
+    required:
+      - homelab_monitor_url
+  commandFunction: |-
+    (config) => ({
+      command: "docker",
+      args: [
+        "run", "-i", "--rm",
+        "-e", `HOMELAB_MONITOR_URL=${config.homelab_monitor_url}`,
+        "-e", "MCP_TRANSPORT=stdio",
+        "sikamikaniko123/homelab-monitor",
+        "python", "/app/mcp_server.py"
+      ]
+    })
