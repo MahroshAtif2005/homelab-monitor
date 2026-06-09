@@ -77,6 +77,10 @@ The hub stitches `nvidia-smi`, the Docker API, model-server APIs (Ollama, vLLM, 
 
 HomeLab Monitor isn't just a dashboard for *you* anymore; it's context for your AI agent too. A **read-only [MCP](https://modelcontextprotocol.io) server is built into the same container** (served on `:9810`) — so Claude, Claude Code, or any MCP client connects in one line and explores your whole lab through **12 named tools**, with the same coverage you see on the dashboard: hosts, containers, systemd services, GPU **and who's driving it**, per-process RAM, AI model servers, disk treemaps, history and alerts.
 
+<p align="center"><img src="docs/mcp-agents.svg" alt="HomeLab Monitor connects over MCP to AI agents and MCP clients — Claude, ChatGPT, agents on local Ollama models, or any MCP client; read-only, both directions are question and answer" width="720"></p>
+
+<p align="center"><sub>Connect any MCP client — Claude, ChatGPT, or an agent on your own local Ollama models — and it reads your homelab's live state. Read-only: both directions are just question and answer.</sub></p>
+
 ```bash
 # the dashboard is on :9800; the MCP server rides along on :9810
 claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
