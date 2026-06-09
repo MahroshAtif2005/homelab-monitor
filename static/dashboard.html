@@ -484,6 +484,18 @@ a{color:var(--info)}
       <table class="sectbl" style="margin-top:10px"><thead><tr><th>Requirement</th><th>Status</th><th>Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
     </div>
   </div>
+  <div class="card" id="mcpcard">
+    <h2>AI agent (MCP)</h2>
+    <div class="fleet-meta">A read-only <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP</a> server is built in, so Claude — or any MCP client — can connect and explore this homelab with full dashboard parity. <span id="mcpstatus"></span></div>
+    <div id="mcpconn" style="margin-top:10px" hidden>
+      <div class="muted">Connect with the Claude CLI (then ask it about your fleet):</div>
+      <pre class="cmd" id="mcpcmd">claude mcp add --transport http homelab …</pre>
+      <div class="row">
+        <button class="btn" type="button" id="mcpcopy">📋 Copy command</button>
+        <a class="btn" id="mcpdocs" href="https://sikamikanikobg.github.io/homelab-monitor/mcp/" target="_blank" rel="noopener">MCP docs →</a>
+      </div>
+    </div>
+  </div>
   <div class="card">
     <h2>🛰️ All hosts</h2>
     <div class="fleet-meta" id="fleet_meta">Every registered host at a glance. Click a row to focus that host in the other tabs.</div>
@@ -1094,6 +1106,23 @@ function renderHealth(){
         + `<td class="muted">${esc(c.detail||'')}${rem}</td></tr>`;
     }).join('');
     if(dcard) dcard.hidden = false;
+  }
+  // Built-in MCP server: tell the user it's there and how to connect.
+  const mcp = HH.mcp || {};
+  const mcard = document.getElementById('mcpcard');
+  if(mcard){
+    const host = location.hostname || 'YOUR-HUB';
+    const ep = `http://${host}:${mcp.port||9810}/mcp`;
+    const st = document.getElementById('mcpstatus'), conn = document.getElementById('mcpconn');
+    if(mcp.enabled === false){
+      if(st) st.innerHTML = `<span class="badge warn">Disabled</span> — set <code>ENABLE_MCP=1</code> to turn it on.`;
+      if(conn) conn.hidden = true;
+    } else {
+      if(st) st.innerHTML = `<span class="badge ok">Enabled</span> — serving on <code>${esc(ep)}</code>.`;
+      const cmd = document.getElementById('mcpcmd');
+      if(cmd) cmd.textContent = `claude mcp add --transport http homelab ${ep}`;
+      if(conn) conn.hidden = false;
+    }
   }
   const overall = (diag.summary||{}).overall;
   const banner = document.getElementById('diagbanner');
@@ -2062,12 +2091,29 @@ function renderRamTree(){
     groups.push({label:'⚙️ Services ('+svcs.length+')', value:sum, title:'systemd services',
       children:svcs.map(s=>({label:(s.name||'').replace(/\.service$/,''), value:s.mem_bytes, title:'service · '+s.name}))});
   }
-  const other=Math.max(0,ramUsed-acc); if(other>0)groups.push({label:'Host & other',value:other,color:'#5b6470',title:'RAM in use outside the groups above (kernel, host processes, vendor services)'});
+  // "Host & other" = used RAM outside the groups above. When the host reports
+  // non-reclaimable kernel memory (slab/page-tables/stacks), carve that out as its own
+  // 🧠 Kernel block so the leftover is genuinely "host/vendor processes & untracked".
+  const other=Math.max(0,ramUsed-acc); let splitKernel=false;
+  if(other>0){
+    const kernel=Math.max(0,Math.min(other,(host.ram_kernel||0)*1048576));
+    if(kernel>0){
+      splitKernel=true;
+      groups.push({label:'🧠 Kernel',value:kernel,color:'#46586e',title:'Non-reclaimable kernel memory — slab (SUnreclaim) + page tables + kernel stacks'});
+      const rest=other-kernel;
+      if(rest>0)groups.push({label:'Host processes & other',value:rest,color:'#5b6470',title:'Used RAM outside containers, services and the kernel (host/vendor processes, tmpfs, untracked)'});
+    }else{
+      groups.push({label:'Host & other',value:other,color:'#5b6470',title:'RAM in use outside the groups above (kernel, host processes, vendor services)'});
+    }
+  }
   const free=Math.max(0,ramTotal-ramUsed); if(free>0)groups.push({label:'Free',value:free,color:'#2f3741',title:'Unused RAM'});
   renderTreemap(el,groups,{height:340,fmt:fmtBytes});
   const parts=[]; if(cs.length)parts.push('containers'); if(svcs.length)parts.push('systemd services');
+  const tail = splitKernel
+    ? `<b>Kernel</b> is non-reclaimable kernel memory; <b>Host processes &amp; other</b> is everything else in use`
+    : `<b>Host &amp; other</b> is everything else in use`;
   if(cap) cap.innerHTML = parts.length
-    ? `Grouped by <b>${parts.join('</b> and <b>')}</b>, each block sized by resident RAM (anon + shared). <b>Host &amp; other</b> is everything else in use; <b>Free</b> is unused — together the host's ${fmtBytes(ramTotal)}. Hover any block; the groups read as colour families.`
+    ? `Grouped by <b>${parts.join('</b> and <b>')}</b>, each block sized by resident RAM (anon + shared). ${tail}; <b>Free</b> is unused — together the host's ${fmtBytes(ramTotal)}. Hover any block; the groups read as colour families.`
     : `Showing used vs free for <b>${esc(local?'this host':CURRENT_HOST)}</b> (no per-container/service RAM available yet).`;
 }
 
@@ -2507,6 +2553,12 @@ document.getElementById('h_target').addEventListener('keydown', e => { if(e.key=
 document.getElementById('key_copy').onclick = async () => {
   const b=document.getElementById('key_copy'), t=b.textContent;
   const ok = await copyText(document.getElementById('key_cmd').textContent);
+  b.textContent = ok ? '✓ Copied' : '⚠️ Copy failed — select and Ctrl+C';
+  setTimeout(()=>{b.textContent=t;}, 1800);
+};
+document.getElementById('mcpcopy').onclick = async () => {
+  const b=document.getElementById('mcpcopy'), t=b.textContent;
+  const ok = await copyText(document.getElementById('mcpcmd').textContent);
   b.textContent = ok ? '✓ Copied' : '⚠️ Copy failed — select and Ctrl+C';
   setTimeout(()=>{b.textContent=t;}, 1800);
 };

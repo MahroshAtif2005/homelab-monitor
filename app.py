@@ -32,7 +32,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.13.1"
+VERSION      = "0.14.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
@@ -526,8 +526,13 @@ def read_host():
             mi[ln.split(":")[0]] = int(ln.split()[1])
         h["ram_total"] = round(mi["MemTotal"] / 1024)
         h["ram_used"] = round((mi["MemTotal"] - mi.get("MemAvailable", mi.get("MemFree", 0))) / 1024)
+        # Non-reclaimable kernel memory (slab/page-tables/stacks): part of "used" RAM
+        # but attributed to no container or service, so the treemap can split it out of
+        # "Host & other". SReclaimable is excluded (it counts as available, not used).
+        h["ram_kernel"] = round((mi.get("SUnreclaim", 0) + mi.get("KernelStack", 0)
+                                 + mi.get("PageTables", 0)) / 1024)
     except Exception:
-        h["ram_total"] = h["ram_used"] = 0
+        h["ram_total"] = h["ram_used"] = h["ram_kernel"] = 0
     try: h["load1"] = float(open("/proc/loadavg").read().split()[0])
     except Exception: h["load1"] = 0
     try: h["uptime"] = int(float(open("/proc/uptime").read().split()[0]))
@@ -2135,6 +2140,7 @@ def _local_now_snapshot():
         "cores":     H.get("cores"),
         "ram_used":  H.get("ram_used"),
         "ram_total": H.get("ram_total"),
+        "ram_kernel": H.get("ram_kernel"),
         "load1":     H.get("load1"),
         "uptime":    H.get("uptime"),
         "ctemp":     H.get("ctemp"),
@@ -3195,10 +3201,16 @@ def api_health():
     systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
                                     "services": [], "summary": {}}
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
+    mcp_enabled = os.environ.get("ENABLE_MCP", "1").strip().lower() not in ("0", "false", "no")
+    try:
+        mcp_port = int(os.environ.get("MCP_PORT", "9810") or 9810)
+    except ValueError:
+        mcp_port = 9810
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
+                    "mcp": {"enabled": mcp_enabled, "port": mcp_port},
                     "overview": build_overview(now, docker, systemd)})
 
 @app.route("/metrics")

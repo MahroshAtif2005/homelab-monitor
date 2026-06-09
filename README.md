@@ -24,7 +24,7 @@ docker compose up -d
 
 Open `http://<your-host>:9800` and you're done. Full options (from source, GPU toolkit, Windows/WSL2) → [**Install docs**](https://sikamikanikobg.github.io/homelab-monitor/install/).
 
-> 🆕 **v0.13.0** — Windows hosts, a RAM-vs-VRAM split for containers, WizTree-style RAM + disk treemaps, and a redesigned Hosts onboarding. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md).
+> 🆕 **v0.14.0** — a **built-in read-only MCP server**: connect Claude (or any MCP client) to your homelab and explore it with full dashboard parity, no extra container. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md) · [MCP docs](https://sikamikanikobg.github.io/homelab-monitor/mcp/).
 
 ## What you get
 
@@ -55,6 +55,8 @@ Set these under `environment:` in `docker-compose.yml` (all optional):
 | `RETENTION_DAYS` | `180` | How long history is kept |
 | `PRESSURE_FREE_MB` | `2048` | Free VRAM below this counts as "pressure" |
 | `PORT` | `9800` | Dashboard port |
+| `MCP_PORT` | `9810` | Port for the built-in read-only MCP server |
+| `ENABLE_MCP` | `1` | Set `0` to run the dashboard without the MCP server |
 | `WATCH_CONTAINERS` | — | Extra containers to scan for OOM (comma-separated) |
 | `WATCH_SERVICES` | — | systemd units to always show, even vendor ones (comma-separated) |
 | `CHECK_UPDATES` | `true` | Set `false` to disable the daily GitHub-releases check (no outbound calls) |
@@ -68,6 +70,17 @@ The hub stitches `nvidia-smi`, the Docker API, model-server APIs (Ollama, vLLM, 
 - **30+ recognised model servers** → [Model servers](https://sikamikanikobg.github.io/homelab-monitor/model-servers/)
 - **`/metrics` Prometheus endpoint + Grafana dashboard** → [Prometheus & Grafana](https://sikamikanikobg.github.io/homelab-monitor/prometheus/)
 - **The full data pipeline + caller attribution** → [How it works](https://sikamikanikobg.github.io/homelab-monitor/how-it-works/)
+
+## Connect an AI agent (MCP)
+
+A **read-only MCP server is built in** — same image, no extra container. It lets Claude (or any MCP client) connect to the monitor and explore the whole homelab — hosts, containers, services, GPU, AI model servers, RAM/disk and alerts — as named tools instead of a raw JSON blob, with full dashboard parity.
+
+```bash
+# served on :9810 alongside the dashboard (disable with ENABLE_MCP=0)
+claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+```
+
+Then ask things like *"which host has a reboot pending and an OS upgrade available?"* or *"why is the GPU pinned, and which service is calling it?"*. Full tool list & setup → [MCP docs](https://sikamikanikobg.github.io/homelab-monitor/mcp/).
 
 ## Security
 

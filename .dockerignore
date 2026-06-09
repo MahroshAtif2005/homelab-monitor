@@ -15,4 +15,7 @@ design/
 .github/
 scripts/
 *.md
+# …but the image bundles the CHANGELOG (the MCP server serves it as a resource),
+# so keep that one file in the build context.
+!CHANGELOG.md
 mkdocs.yml

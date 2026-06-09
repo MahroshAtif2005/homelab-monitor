@@ -4,7 +4,9 @@ WORKDIR /app
 # flask = web layer; jeepney = pure-Python D-Bus client used to read systemd
 # (no native libs, keeps the image slim). curl only needed to vendor Chart.js below.
 # openssh-client provides ssh + ssh-keygen for the multi-host registry probes.
-RUN pip install --no-cache-dir flask==3.0.3 jeepney==0.8.0 prometheus_client==0.20.0 \
+# mcp = the Model Context Protocol SDK powering the built-in MCP server (served on
+# $MCP_PORT alongside the dashboard); it pulls in starlette/uvicorn for HTTP.
+RUN pip install --no-cache-dir flask==3.0.3 jeepney==0.8.0 prometheus_client==0.20.0 "mcp>=1.9.0" \
  && apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates openssh-client \
  && rm -rf /var/lib/apt/lists/*
@@ -22,8 +24,17 @@ COPY probe.ps1 /app/probe.ps1
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
 
-ENV PORT=8099
-EXPOSE 8099
+# Built-in MCP server (read-only): the FastMCP wrapper + its pure-stdlib client,
+# plus the CHANGELOG it serves as a resource, and the process launcher that runs
+# the dashboard and the MCP server side-by-side in this one container.
+COPY mcp/server.py         /app/mcp_server.py
+COPY mcp/homelab_client.py /app/homelab_client.py
+COPY CHANGELOG.md          /app/CHANGELOG.md
+COPY launch.py             /app/launch.py
+
+ENV PORT=8099 \
+    MCP_PORT=9810
+EXPOSE 8099 9810
 
 # Self-healthcheck so the container reports its own status to Docker (and to
 # our own Containers tab, which reads the same Docker API). /healthz is a
@@ -32,4 +43,5 @@ EXPOSE 8099
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT:-9800}/healthz" || exit 1
 
-CMD ["python", "app.py"]
+# Runs the dashboard (Flask) and the MCP server together. ENABLE_MCP=0 to opt out.
+CMD ["python", "/app/launch.py"]

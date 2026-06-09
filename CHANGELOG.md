@@ -5,6 +5,20 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.14.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.0) — 2026-06-09
+- **Built-in MCP server** — a first-class [Model Context Protocol](https://modelcontextprotocol.io)
+  server now ships **inside the same image**, so Claude (or any MCP client) can
+  connect to the monitor and explore the whole homelab as named, **read-only**
+  tools — no extra container. Served on `MCP_PORT` (default **9810**) alongside the
+  dashboard; connect with `claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp`.
+  Full dashboard parity: `list_hosts`, `get_host`, `get_snapshot`, `get_containers`,
+  `get_services`, `get_memory` (per-service/per-process RAM), `get_gpu` (util/VRAM/
+  power + caller attribution), `get_ai_models`, `get_history` (charted series),
+  `get_events`/`get_alerts`, and `scan_disk` (WizTree-style folder treemap) — plus
+  `metrics`, `health` and `changelog` resources. Read-only by design: no write tools.
+  Opt out with `ENABLE_MCP=0`. Docs:
+  [MCP server](https://sikamikanikobg.github.io/homelab-monitor/mcp/). Closes #70.
+
 ## [0.13.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.13.1) — 2026-06-07
 - **Mobile-friendly dashboard** — the dense tables (Containers, Services, AI
   Models, Network) no longer push the whole page sideways on a phone; each one

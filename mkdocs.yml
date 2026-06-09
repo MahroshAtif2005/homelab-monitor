@@ -78,6 +78,7 @@ nav:
   - Configuration: configuration.md
   - Model servers: model-servers.md
   - Prometheus & Grafana: prometheus.md
+  - MCP server: mcp.md
   - How it works: how-it-works.md
   - Contributing: contributing.md
 

@@ -32,6 +32,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility   # injects nvidia-smi into the container
       PORT: "9800"                          # dashboard served on 0.0.0.0:9800 (LAN/VPN reachable)
+      MCP_PORT: "9810"                       # built-in read-only MCP server on 0.0.0.0:9810/mcp
+      # ENABLE_MCP: "0"                      # uncomment to run the dashboard without the MCP server
       SAMPLE_INTERVAL: "10"                 # seconds between samples
       RETENTION_DAYS: "180"                 # how long history is kept
       PRESSURE_FREE_MB: "2048"              # free VRAM below this counts as "pressure"
@@ -51,3 +53,8 @@ services:
     # A hard GPU reservation makes `docker compose up` fail on any host without the
     # NVIDIA runtime — the monitor is useful without a GPU, so we let it start
     # everywhere and auto-use the GPU via the NVIDIA_* env vars above when present.
+    #
+    # The read-only MCP server is built into this same image and served on
+    # $MCP_PORT (9810) — host networking above already exposes it. Connect with:
+    #   claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp
+    # See https://sikamikanikobg.github.io/homelab-monitor/mcp/.
