@@ -18,6 +18,14 @@ Transports (env `MCP_TRANSPORT`):
 Config:
   * `HOMELAB_MONITOR_URL`  base URL of the monitor   (default http://localhost:9800)
   * `HOMELAB_HTTP_TIMEOUT` per-request timeout, sec  (default 10)
+  * `MCP_ALLOWED_HOSTS`    comma-separated Host allow-list for the HTTP transport
+                           (e.g. "YOUR-HUB:9810"; `host:*` wildcards ok). Unset →
+                           the SDK's localhost-only DNS-rebinding check is turned
+                           OFF so the server is reachable across the homelab by
+                           name/IP, matching the documented `claude mcp add …
+                           http://YOUR-HUB:9810/mcp`. Set it to lock back down.
+  * `MCP_ALLOWED_ORIGINS`  comma-separated Origin allow-list (only consulted when
+                           `MCP_ALLOWED_HOSTS` is set).
 
 Guardrails: **read-only**. There are no write tools. Any future write capability
 (run a probe, restart a container, apply an OS update) must be opt-in, clearly
@@ -33,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import homelab_client as hc  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
 INSTRUCTIONS = (
     "Read-only access to a HomeLab Monitor instance — everything the dashboard shows "
@@ -196,17 +205,44 @@ def changelog_resource() -> str:
 
 # ── entrypoint ───────────────────────────────────────────────────────────────
 
+def _transport_security():
+    """DNS-rebinding protection for the HTTP/SSE transport.
+
+    The MCP SDK ships a Host/Origin allow-list that, by default, only accepts
+    `localhost`/`127.0.0.1`. That's the right default for a stdio server a browser
+    might reach, but this transport deliberately binds 0.0.0.0 so the homelab can
+    reach it — under that default it returns **421 Misdirected Request** to anyone
+    connecting by hostname or IP, breaking the documented `claude mcp add …
+    http://YOUR-HUB:9810/mcp`.
+
+    So: if `MCP_ALLOWED_HOSTS` is set we honour it (exact or `host:*` patterns,
+    plus matching `MCP_ALLOWED_ORIGINS`); otherwise we turn the check off, which
+    is safe here because every tool is read-only.
+    """
+    hosts = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if not hosts:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    origins = [o.strip() for o in os.environ.get("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
 def main():
     transport = (os.environ.get("MCP_TRANSPORT") or "stdio").strip().lower()
     if transport in ("http", "streamable-http", "streamable_http"):
         mcp.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
         mcp.settings.port = int(os.environ.get("MCP_PORT", "9810"))
+        mcp.settings.transport_security = _transport_security()
         print("homelab-monitor MCP on http://%s:%s/mcp -> %s"
               % (mcp.settings.host, mcp.settings.port, hc.base_url()), file=sys.stderr)
         mcp.run(transport="streamable-http")
     elif transport == "sse":
         mcp.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
         mcp.settings.port = int(os.environ.get("MCP_PORT", "9810"))
+        mcp.settings.transport_security = _transport_security()
         mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
