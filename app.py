@@ -3237,6 +3237,55 @@ def healthz():
     instant and never gets blocked behind a slow collector pass."""
     return jsonify({"status": "ok", "version": VERSION}), 200
 
+@app.route("/api/changelog")
+def api_changelog():
+    """Serve the bundled CHANGELOG.md, sliced to a version range, so the dashboard's
+    one-time 'what's new' modal can show exactly what shipped — straight from the
+    image, no GitHub round-trip (works fully offline). Read-only.
+      ?to=<ver>     newest version to include (default: the running VERSION)
+      ?since=<ver>  exclusive lower bound — return every section newer than it,
+                    up to `to` (the multi-version roll-up). Omit for just `to`."""
+    to_v = request.args.get("to") or VERSION
+    since_v = request.args.get("since")
+    to_t = _parse_semver(to_v)
+    since_t = _parse_semver(since_v) if since_v else None
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return jsonify({"current": VERSION, "sections": [], "markdown": ""})
+    # Split on "## [x.y.z](url) — date" headers (Keep-a-Changelog style).
+    hdr = re.compile(r"^##\s*\[([^\]]+)\]\(([^)]*)\)\s*[—\-–]?\s*(.*)$")
+    sections, cur = [], None
+    for line in text.splitlines():
+        m = hdr.match(line)
+        if m:
+            if cur:
+                sections.append(cur)
+            cur = {"version": m.group(1).strip(), "url": m.group(2).strip(),
+                   "date": m.group(3).strip(), "lines": [line]}
+        elif cur is not None:
+            cur["lines"].append(line)
+    if cur:
+        sections.append(cur)
+    picked = []
+    for s in sections:                       # file is newest-first
+        sv = _parse_semver(s["version"])
+        if sv > to_t:
+            continue
+        if since_t is not None:
+            if sv > since_t:
+                picked.append(s)
+        else:
+            picked.append(s)                 # no lower bound → just the newest <= to
+            break
+    md = "\n".join("\n".join(s["lines"]).rstrip() for s in picked)
+    return jsonify({"current": VERSION, "to": to_v, "since": since_v,
+                    "sections": [{"version": s["version"], "date": s["date"], "url": s["url"]}
+                                 for s in picked],
+                    "markdown": md})
+
 @app.route("/favicon.ico")
 def favicon():
     """Default-favicon URL — browsers ask for /favicon.ico even when an explicit

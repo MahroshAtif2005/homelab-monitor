@@ -188,6 +188,26 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .umodal .notes blockquote{border-left:3px solid var(--bd);padding:.2em 0 .2em 10px;color:var(--mut);margin:.5em 0}
 .umodal .notes hr{border:0;border-top:1px solid var(--bd);margin:1em 0}
 .umodal .notes img{max-width:100%}
+/* ── "What's new" modal (one-time, post-upgrade) — builds on .umodal/.notes ── */
+.wn .box{max-width:560px;animation:wnin .18s cubic-bezier(.2,.7,.3,1)}
+@keyframes wnin{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+.wn-hd{align-items:flex-start;gap:12px;background:linear-gradient(180deg,rgba(210,153,34,.12),transparent)}
+.wn-spark{font-size:22px;line-height:1;filter:saturate(1.1);animation:wnpop .5s ease-out both}
+@keyframes wnpop{0%{transform:scale(.4) rotate(-12deg);opacity:0}60%{transform:scale(1.18) rotate(6deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+@media(prefers-reduced-motion:reduce){.wn .box,.wn-spark{animation:none}}
+.wn-ttl{display:flex;flex-direction:column;gap:2px}
+.wn-ttl strong{font-size:15px}
+.wn-ttl #wnver{color:var(--accent)}
+.wn-sub{font-size:11.5px;color:var(--mut)}
+.wn .notes{margin-top:0;border-top:0;padding-top:2px;max-height:52vh}
+/* each rolled-up version section gets a quiet header from the changelog's own ## */
+.wn .notes h2{display:flex;align-items:baseline;gap:8px;font-size:1.02em;border-top:1px solid var(--bd);padding-top:.7em;margin-top:1em}
+.wn .notes h2:first-child{border-top:0;padding-top:0;margin-top:.2em}
+.wn-ft{display:flex;align-items:center;gap:14px;padding:12px 18px;border-top:1px solid var(--bd)}
+.wn-link{font-size:12.5px;color:var(--mut);text-decoration:none}
+.wn-link:hover{color:var(--tx)}
+.wn-go{margin-left:auto;background:linear-gradient(180deg,#e6b948,#d29922)!important;border:1px solid var(--accent)!important;color:#1a1100!important;font-weight:600;padding:7px 16px!important}
+.wn-go:hover{filter:brightness(1.07)}
 /* Hosts tab (multi-machine monitoring) */
 .hosts-key{background:#0d1117;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--tx);word-break:break-all;white-space:pre-wrap;margin:0}
 .hosts-form{display:grid;grid-template-columns:1fr 1.6fr auto;gap:8px;max-width:760px;align-items:end}
@@ -881,6 +901,28 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
     </div>
   </div>
 </div>
+
+<!-- ───────── "What's new" modal — one-time, only after a version upgrade (#…) ───────── -->
+<div class="umodal wn" id="wnmodal" role="dialog" aria-modal="true" aria-labelledby="wntitle">
+  <div class="box">
+    <div class="hd wn-hd">
+      <span class="wn-spark">🎉</span>
+      <div class="wn-ttl">
+        <strong id="wntitle">You're now on <span id="wnver">v…</span></strong>
+        <div class="wn-sub" id="wnsub">What's new</div>
+      </div>
+      <button class="x" type="button" id="wnclose" aria-label="Close">×</button>
+    </div>
+    <div class="bd">
+      <div class="notes" id="wnnotes"><!-- changelog rendered here --></div>
+    </div>
+    <div class="wn-ft">
+      <a class="wn-link" id="wnfull" href="https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Full changelog ↗</a>
+      <a class="wn-link" id="wnstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener">⭐ Star on GitHub</a>
+      <button class="btn wn-go" type="button" id="wngo">Got it</button>
+    </div>
+  </div>
+</div>
 <script>
 // ── Tab registry. Add a monitor: append one entry here + a matching <section
 //    data-tab="..."> above + a render in renderData()/renderHealth(). ──────────
@@ -1068,6 +1110,7 @@ function renderMcpPill(s){
 async function loadHealth(){
   try{ HH = await(await fetch('/api/health')).json(); }catch(e){ return; }
   renderHealth();
+  if(HH && HH.version) maybeWhatsNew(HH.version);   // one-time post-upgrade modal
   try{ renderMcpPill(await(await fetch('/api/mcp-status')).json()); }
   catch(e){ /* leave the pill unchanged on a transient fetch error */ }
 }
@@ -2917,6 +2960,114 @@ document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
     else window.open(url, '_blank', 'noopener,noreferrer,width=620,height=660');
     status('Opened '+s.t+' with your link + blurb. To include the screenshot, use “Copy snapshot” or ⬇ Download and attach it.');
   };
+})();
+
+/* ════════ "What's new" — one-time welcome modal after a version upgrade ════════
+   Only fires when the running version is strictly NEWER than the last one this
+   browser saw (fresh install seeds silently; same-version redeploy & downgrade
+   do nothing). Notes come from /api/changelog (the bundled CHANGELOG, offline). */
+const WN_KEY = 'hl_seen_version';
+let WN_DONE = false;
+
+function verGt(a, b){                    // a > b ? (tolerant numeric semver)
+  const p = v => String(v||'').replace(/^v/i,'').split('-')[0].split('.').map(n=>parseInt(n,10)||0);
+  const x = p(a), y = p(b), n = Math.max(x.length, y.length);
+  for(let i=0;i<n;i++){ const d=(x[i]||0)-(y[i]||0); if(d) return d>0; }
+  return false;
+}
+
+// Minimal Markdown → HTML for the changelog subset (headings, bullet lists,
+// **bold**, `code`, [links](url)). Everything is escaped first, so it's safe to
+// set as innerHTML even though the source is our own bundled file.
+function mdMini(md){
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const inline = s => esc(s)
+    .replace(/`([^`]+)`/g, (_,c)=>`<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, (_,b)=>`<strong>${b}</strong>`)
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, (_,t,u)=>`<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
+  const out = []; let inList = false;
+  const closeList = () => { if(inList){ out.push('</ul>'); inList=false; } };
+  for(let raw of (md||'').split('\n')){
+    const line = raw.replace(/\s+$/,'');
+    let m;
+    if((m = line.match(/^##\s*\[([^\]]+)\]\((https?:[^)]*)\)\s*[—\-–]?\s*(.*)$/))){
+      closeList();
+      const date = m[3] ? ` <span class="wn-sub">${esc(m[3])}</span>` : '';
+      out.push(`<h2><a href="${m[2]}" target="_blank" rel="noopener">v${esc(m[1])}</a>${date}</h2>`);
+    } else if((m = line.match(/^#{1,4}\s+(.*)$/))){
+      closeList(); out.push(`<h3>${inline(m[1])}</h3>`);
+    } else if((m = line.match(/^\s*[-*]\s+(.*)$/))){
+      if(!inList){ out.push('<ul>'); inList=true; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if(line.trim() === ''){
+      closeList();
+    } else {
+      closeList(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join('');
+}
+
+function showWhatsNew(data, curVersion){
+  const md = data && data.markdown;
+  if(!md) return false;                          // nothing to show
+  document.getElementById('wnver').textContent  = 'v' + curVersion;
+  const n = (data.sections || []).length;
+  document.getElementById('wnsub').textContent  =
+    n > 1 ? `What's new across ${n} releases` : "What's new in this release";
+  document.getElementById('wnnotes').innerHTML  = mdMini(md);
+  const latest = (data.sections && data.sections[0]) || null;
+  if(latest && latest.url) document.getElementById('wnfull').href = latest.url;
+  document.getElementById('wnmodal').classList.add('show');
+  return true;
+}
+
+async function maybeWhatsNew(curVersion){
+  if(WN_DONE || !curVersion) return;
+  WN_DONE = true;                                // never re-run this page load
+  let seen;
+  try{ seen = localStorage.getItem(WN_KEY); }catch(e){ return; }
+  if(seen === curVersion) return;                // same version (redeploy) → nothing
+  let since;
+  if(!seen){
+    // No recorded version yet. If this browser has used the dashboard before
+    // (other hl_* keys exist), it's a returning user who just upgraded INTO this
+    // feature → show the current release once. A truly fresh install (no
+    // footprint at all) seeds silently — a first run isn't an "upgrade".
+    const usedBefore = ['hl_tab','hl_range','hl_montab','hl_host'].some(k=>{
+      try{ return localStorage.getItem(k) != null; }catch(e){ return false; }
+    });
+    if(!usedBefore){ try{ localStorage.setItem(WN_KEY, curVersion); }catch(e){} return; }
+    since = null;                                // unknown prior version → just the current section
+  } else {
+    if(!verGt(curVersion, seen)){                // downgrade → reseed, no popup
+      try{ localStorage.setItem(WN_KEY, curVersion); }catch(e){} return;
+    }
+    since = seen;                                // upgrade → roll up everything since `seen`
+  }
+  try{
+    const q = since ? `?since=${encodeURIComponent(since)}&to=${encodeURIComponent(curVersion)}`
+                    : `?to=${encodeURIComponent(curVersion)}`;
+    const data = await (await fetch('/api/changelog' + q)).json();
+    if(showWhatsNew(data, curVersion)){
+      try{ localStorage.setItem(WN_KEY, curVersion); }catch(e){}   // mark seen only after a successful show
+    }
+    // If there were no notes, leave hl_seen_version untouched so a fixed
+    // changelog can still surface on a later load — better than silently losing it.
+  }catch(e){ /* transient fetch fail → don't burn the one-show; retry next load */
+    WN_DONE = false;
+  }
+}
+
+(function(){
+  const modal = document.getElementById('wnmodal');
+  if(!modal) return;
+  const close = () => modal.classList.remove('show');
+  document.getElementById('wnclose').onclick = close;
+  document.getElementById('wngo').onclick = close;
+  modal.addEventListener('click', e => { if(e.target === modal) close(); });   // backdrop
+  document.addEventListener('keydown', e => { if(e.key === 'Escape' && modal.classList.contains('show')) close(); });
 })();
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
