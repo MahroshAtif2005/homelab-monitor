@@ -4,6 +4,7 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
 <script src="/static/chart.min.js" onerror="this.remove();var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';document.head.appendChild(s)"></script>
+<script src="/static/html2canvas.min.js" onerror="this.remove();var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';document.head.appendChild(s)"></script>
 <style>
 :root{--mono:ui-monospace,"JetBrains Mono","SF Mono","Cascadia Code",Menlo,Consolas,monospace}
 :root,[data-theme="dark"]{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mut:#8b949e;--accent:#d29922;--free:#21262d;
@@ -455,6 +456,56 @@ a{color:var(--info)}
 .ntbl td{padding:6px 8px;border-bottom:1px solid var(--bd);font-family:var(--mono);vertical-align:top}
 .ntbl tr:hover td{background:var(--hover)}
 .subhd{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin:18px 0 2px}
+/* ═══════════ Snapshot + Share (#31 / #87) ═══════════ */
+#controls{display:flex;align-items:center;flex-wrap:wrap;row-gap:7px}
+#controls[hidden]{display:none}   /* ID-specificity display:flex would otherwise beat the hidden attr → controls flash before first tab */
+#controls .ctrl-spring{flex:1 1 auto;min-width:8px}
+.sharewrap{position:relative;margin-left:8px}
+/* the button: cohesive with the segmented range control, accent on hover */
+.sharebtn{display:inline-flex;align-items:center;gap:6px;background:var(--inset);border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:4px 11px;font:inherit;font-size:12px;cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.sharebtn:hover{border-color:var(--accent);color:var(--accent);background:var(--hover)}
+.sharebtn:active{transform:translateY(.5px)}
+.sharebtn svg{width:13px;height:13px;fill:currentColor;flex:none}
+.sharebtn .caret{font-size:9px;opacity:.6;margin-left:-1px}
+.sharewrap.open .sharebtn{border-color:var(--accent);color:var(--accent)}
+/* popover */
+.sharepop{position:absolute;right:0;top:calc(100% + 7px);width:288px;background:var(--card);border:1px solid var(--bd);border-radius:10px;box-shadow:0 12px 34px -8px #00000080,0 2px 8px -2px #0000004d;padding:12px;z-index:30;display:none;animation:sharein .13s ease-out}
+.sharewrap.open .sharepop{display:block}
+@keyframes sharein{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
+.sharepop h3{margin:0 0 9px;font-size:12px;font-weight:600;color:var(--tx);display:flex;align-items:center;gap:6px}
+.sharepop h3 .x{margin-left:auto;background:none;border:0;color:var(--mut);font-size:17px;line-height:1;cursor:pointer;padding:0 2px}
+.sharepop h3 .x:hover{color:var(--tx)}
+/* preview */
+.shareprev{position:relative;border:1px solid var(--bd);border-radius:7px;overflow:hidden;background:var(--inset);aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+.shareprev img{width:100%;height:100%;object-fit:cover;object-position:top}
+.shareprev .ph{color:var(--mut);font-size:11.5px;display:flex;flex-direction:column;align-items:center;gap:7px;text-align:center;padding:10px}
+.shareprev .spin{width:18px;height:18px;border:2px solid var(--bd);border-top-color:var(--accent);border-radius:50%;animation:shspin .7s linear infinite}
+@keyframes shspin{to{transform:rotate(360deg)}}
+.sharefn{font-family:var(--mono);font-size:10.5px;color:var(--mut);text-align:center;margin:6px 0 10px;word-break:break-all}
+/* primary actions */
+.shareact{display:flex;flex-direction:column;gap:5px}
+.shareact button{display:flex;align-items:center;gap:9px;width:100%;background:var(--inset);border:1px solid var(--bd);color:var(--tx);border-radius:7px;padding:8px 10px;font:inherit;font-size:12.5px;cursor:pointer;text-align:left;transition:border-color .13s,background .13s}
+.shareact button:hover{border-color:var(--mut);background:var(--hover)}
+.shareact button:disabled{opacity:.5;cursor:default}
+.shareact button .ai{font-size:14px;width:17px;text-align:center;flex:none}
+.shareact .primary{border-color:var(--accent);background:linear-gradient(180deg,var(--hover),var(--inset))}
+.shareact .primary:hover{border-color:var(--accent);background:var(--hover)}
+.shareact button .ok{margin-left:auto;color:var(--ok);font-size:12px;opacity:0;transition:opacity .15s}
+.shareact button.done .ok{opacity:1}
+.shareact button .hint{color:var(--mut);font-size:10.5px;font-weight:400}
+.sharestatus{margin-top:9px;font-size:11px;line-height:1.45;color:var(--tx);background:var(--inset);border:1px solid var(--bd);border-left:2px solid var(--accent);border-radius:6px;padding:7px 9px}
+.sharestatus[hidden]{display:none}
+.sharestatus.warn{border-left-color:var(--warn)}
+/* social grid */
+.sharesoc-h{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin:12px 2px 7px}
+.sharesoc{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.socbtn{display:flex;align-items:center;justify-content:center;aspect-ratio:1;background:var(--inset);border:1px solid var(--bd);border-radius:8px;cursor:pointer;color:var(--mut);transition:transform .12s,border-color .12s,color .12s,background .12s}
+.socbtn:hover{transform:translateY(-2px);border-color:var(--brand,var(--mut));color:var(--brand,var(--tx));background:var(--hover)}
+.socbtn svg{width:17px;height:17px;fill:currentColor}
+/* privacy */
+.sharepriv{margin-top:11px;font-size:10.5px;line-height:1.45;color:var(--mut);display:flex;gap:6px;align-items:flex-start;border-top:1px solid var(--bd);padding-top:9px}
+.sharepriv .lk{flex:none}
+@media(max-width:680px){.sharepop{position:fixed;left:10px;right:10px;top:auto;bottom:10px;width:auto}}
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -478,7 +529,30 @@ a{color:var(--info)}
 <button class="rb" data-r="1h">1h</button><button class="rb" data-r="6h">6h</button><button class="rb" data-r="24h">24h</button>
 <button class="rb" data-r="7d">7d</button><button class="rb" data-r="30d">30d</button><button class="rb" data-r="all">All</button>
 <span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
-</div></div>
+</div>
+<span class="ctrl-spring"></span>
+<div class="sharewrap" id="sharewrap">
+  <button class="sharebtn" id="sharebtn" type="button" aria-haspopup="true" aria-expanded="false" title="Snapshot or share this view">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16a3 3 0 0 0-2.3 1.1l-6.8-3.9a3 3 0 0 0 0-2.4l6.8-3.9A3 3 0 1 0 15 4l-.1.5-6.8 3.9a3 3 0 1 0 0 5.2l6.8 3.9.1.5A3 3 0 1 0 18 16z"/></svg>
+    Share<span class="caret">▾</span>
+  </button>
+  <div class="sharepop" id="sharepop" role="dialog" aria-label="Share this view">
+    <h3>Share this view <button class="x" id="sharex" type="button" aria-label="Close">×</button></h3>
+    <div class="shareprev" id="shareprev"><div class="ph"><div class="spin"></div>Rendering snapshot…</div></div>
+    <div class="sharefn" id="sharefn">&nbsp;</div>
+    <div class="shareact">
+      <button class="primary" id="share_dl" type="button"><span class="ai">⬇</span> Download snapshot <span class="ok">✓</span></button>
+      <button id="share_native" type="button" hidden><span class="ai">↗</span> Share snapshot…&nbsp;<span class="hint">native sheet</span> <span class="ok">✓</span></button>
+      <button id="share_img" type="button"><span class="ai">📋</span> Copy snapshot to clipboard <span class="ok">✓</span></button>
+      <button id="share_copy" type="button"><span class="ai">⧉</span> Copy link &amp; blurb <span class="ok">✓</span></button>
+    </div>
+    <div class="sharestatus" id="sharestatus" hidden></div>
+    <div class="sharesoc-h">Post a link to</div>
+    <div class="sharesoc" id="sharesoc"></div>
+    <div class="sharepriv"><span class="lk">🔒</span><span>The message is generic — it never includes host names, IPs or service details. Your snapshot is attached only by you; nothing is uploaded anywhere.</span></div>
+  </div>
+</div>
+</div>
 
 <!-- Degraded-setup banner: shown on any tab when a requirement isn't met. -->
 <div class="diagbanner" id="diagbanner" hidden></div>
@@ -2667,6 +2741,183 @@ initTheme();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();});
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
+
+/* ════════ Snapshot + Share (#31 / #87) ════════
+   One capture engine (html2canvas on the visible tab) feeds two consumers:
+   a PNG download (#31) and the share actions (#87). Capture runs once per open
+   and is reused by every action, so there's no duplicate capture code. */
+(function(){
+  const SHARE_TITLE = 'HomeLab Monitor — one small container for your whole home lab';
+  // Generic by design: never embeds host names, IPs or service details (#87 privacy).
+  const BLURB = "Keeping an eye on my home lab with HomeLab Monitor — GPU & local-AI, "
+              + "Docker, systemd services and host health, all on one self-hosted page. 🛰️";
+  const SHARE_URL = 'https://github.com/SikamikanikoBG/homelab-monitor';
+
+  // Brand-accurate single-path logos; colour applied on hover via --brand.
+  const SOCIAL = [
+    {k:'x',         t:'X',            c:'#c9d1d9', svg:'M18.9 1.2h3.7l-8 9.1L24 22.8h-7.4l-5.8-7.6-6.6 7.6H.5l8.6-9.8L0 1.2h7.6l5.2 6.9 6-6.9zm-1.3 19.4h2L6.5 3.3H4.3l13.3 17.3z',
+      url:()=>`https://twitter.com/intent/tweet?text=${enc(BLURB)}&url=${enc(SHARE_URL)}&hashtags=homelab,selfhosted`},
+    {k:'reddit',    t:'Reddit',       c:'#FF4500', svg:'M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm5 4.7c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5c-.51 0-.96-.26-1.23-.65l-2.6.55.83 3.9c1.5.06 2.85.46 3.83 1.07.26-.25.62-.41 1.01-.41.83 0 1.5.67 1.5 1.5 0 .61-.37 1.14-.89 1.37.03.21.05.42.05.64 0 2.27-2.64 4.11-5.9 4.11s-5.9-1.84-5.9-4.11c0-.22.02-.44.06-.65a1.49 1.49 0 0 1-.88-1.36c0-.83.67-1.5 1.5-1.5.39 0 .74.15 1 .39.99-.61 2.35-1.01 3.86-1.06l.93-4.36a.33.33 0 0 1 .4-.25l3.04.65c.21-.34.59-.57 1.02-.57zM9.25 12c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5-.67-1.5-1.5-1.5zm5.5 0c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5-.67-1.5-1.5-1.5zm-5.47 4.95a.33.33 0 0 0-.23.57c.66.66 1.9.71 2.26.71.36 0 1.6-.05 2.26-.71a.33.33 0 1 0-.46-.46c-.42.41-1.29.56-1.8.56-.51 0-1.38-.15-1.8-.56a.33.33 0 0 0-.23-.11z',
+      url:()=>`https://www.reddit.com/submit?url=${enc(SHARE_URL)}&title=${enc(SHARE_TITLE)}`},
+    {k:'hn',        t:'Hacker News',  c:'#FF6600', svg:'M0 0v24h24V0H0zm12.7 13.6V18h-1.4v-4.4L7.6 6.7h1.6l2.1 4.1c.1.2.2.4.3.6l.3-.6 2.1-4.1h1.5l-3.8 6.9z',
+      url:()=>`https://news.ycombinator.com/submitlink?u=${enc(SHARE_URL)}&t=${enc(SHARE_TITLE)}`},
+    {k:'linkedin',  t:'LinkedIn',     c:'#0A66C2', svg:'M20.4 20.4h-3.6v-5.6c0-1.3 0-3-1.9-3-1.8 0-2.1 1.4-2.1 2.9v5.7H9.3V9h3.4v1.6h.1c.5-.9 1.7-1.9 3.4-1.9 3.6 0 4.3 2.4 4.3 5.5v6.2zM5.3 7.4a2.1 2.1 0 1 1 0-4.2 2.1 2.1 0 0 1 0 4.2zM7.1 20.4H3.5V9h3.6v11.4zM22.2 0H1.8C.8 0 0 .8 0 1.7v20.6c0 .9.8 1.7 1.8 1.7h20.4c1 0 1.8-.8 1.8-1.7V1.7c0-.9-.8-1.7-1.8-1.7z',
+      url:()=>`https://www.linkedin.com/sharing/share-offsite/?url=${enc(SHARE_URL)}`},
+    {k:'facebook',  t:'Facebook',     c:'#1877F2', svg:'M24 12a12 12 0 1 0-13.9 11.9v-8.4H7.1V12h3V9.4c0-3 1.8-4.6 4.5-4.6 1.3 0 2.6.2 2.6.2v2.9h-1.5c-1.5 0-1.9.9-1.9 1.8V12h3.3l-.5 3.5h-2.8v8.4A12 12 0 0 0 24 12z',
+      url:()=>`https://www.facebook.com/sharer/sharer.php?u=${enc(SHARE_URL)}`},
+    {k:'mastodon',  t:'Mastodon',     c:'#6364FF', svg:'M23.3 17.2c-.35 1.8-3.13 3.77-6.33 4.15-1.67.2-3.31.38-5.06.3-2.86-.13-5.12-.68-5.12-.68 0 .28.02.55.05.8.37 2.83 2.8 3 5.1 3.08 2.32.08 4.39-.57 4.39-.57l.1 2.1s-1.62.87-4.51 1.03c-1.6.09-3.58-.04-5.89-.65C1.04 25.32.18 19.97.05 14.54c-.04-1.61-.01-3.13-.01-4.4 0-5.56 3.64-7.19 3.64-7.19C5.52 2.1 8.74 1.77 12.08 1.74h.08c3.34.03 6.56.36 8.4 1.21 0 0 3.64 1.63 3.64 7.19 0 0 .05 4.1-.5 6.96zm-3.8-7.06c0-1.37-.35-2.46-1.05-3.26-.72-.81-1.67-1.22-2.85-1.22-1.36 0-2.39.52-3.07 1.57l-.66 1.11-.66-1.11c-.68-1.05-1.71-1.57-3.07-1.57-1.18 0-2.13.41-2.85 1.22-.7.8-1.05 1.89-1.05 3.26v5.59h2.22V10.3c0-1.37.58-2.07 1.73-2.07 1.27 0 1.91.83 1.91 2.46v3.56h2.2v-3.56c0-1.63.64-2.46 1.91-2.46 1.15 0 1.73.7 1.73 2.07v5.43h2.22v-5.59z',
+      prompt:true, url:(inst)=>`https://${inst}/share?text=${enc(BLURB+' '+SHARE_URL)}`},
+    {k:'bluesky',   t:'Bluesky',      c:'#0285FF', svg:'M5.8 3.3C8.4 5.2 11.2 9.2 12 11.4c.8-2.2 3.6-6.2 6.2-8.1 1.9-1.4 5-2.5 5 1.1 0 .7-.4 6-.7 6.9-.8 3-3.9 3.7-6.6 3.3 4.7.8 5.9 3.4 3.3 6.1-4.9 5-7.1-1.3-7.6-2.9-.1-.3-.1-.4-.2-.4 0 0-.1.1-.2.4-.5 1.6-2.7 7.9-7.6 2.9-2.6-2.7-1.4-5.3 3.3-6.1-2.7.4-5.8-.3-6.6-3.3C.3 10.5 0 5.1 0 4.4c0-3.6 3.1-2.5 5-1.1z',
+      url:()=>`https://bsky.app/intent/compose?text=${enc(BLURB+' '+SHARE_URL)}`},
+    {k:'telegram',  t:'Telegram',     c:'#26A5E4', svg:'M23.9 3.3 20.3 20c-.27 1.2-1 1.5-2 .93l-5.5-4.05-2.65 2.55c-.3.3-.54.54-1.1.54l.4-5.56L19.5 6.3c.44-.4-.1-.62-.68-.22L6.3 13.7l-5.4-1.7c-1.17-.36-1.2-1.17.24-1.73L22.4 1.78c.98-.36 1.83.22 1.5 1.52z',
+      url:()=>`https://t.me/share/url?url=${enc(SHARE_URL)}&text=${enc(BLURB)}`},
+    {k:'whatsapp',  t:'WhatsApp',     c:'#25D366', svg:'M.1 24l1.7-6.2a12 12 0 1 1 4.4 4.3L.1 24zM6.5 20l.4.2a9.9 9.9 0 0 0 5.1 1.4 10 10 0 1 0-10-10c0 1.9.5 3.7 1.5 5.3l.3.4-1 3.6 3.2-.9zm11.4-5.5c-.16-.08-1.3-.64-1.5-.72-.2-.07-.35-.1-.5.1l-.7.85c-.13.16-.25.18-.46.06a8.1 8.1 0 0 1-2.4-1.47 9 9 0 0 1-1.65-2.05c-.17-.3 0-.43.13-.58l.38-.44c.13-.15.17-.26.26-.43.08-.17.04-.32-.02-.45l-.7-1.68c-.18-.44-.37-.38-.5-.39h-.43c-.15 0-.4.06-.6.28-.2.22-.78.76-.78 1.85s.8 2.15.9 2.3c.13.16 1.57 2.4 3.8 3.36.53.23.95.37 1.27.47.53.17 1.02.15 1.4.09.43-.06 1.3-.53 1.5-1.04.18-.51.18-.95.13-1.04-.05-.1-.2-.16-.42-.27z',
+      url:()=>`https://api.whatsapp.com/send?text=${enc(BLURB+' '+SHARE_URL)}`},
+    {k:'email',     t:'Email',        c:'#8b949e', svg:'M22 4H2C.9 4 0 4.9 0 6v12c0 1.1.9 2 2 2h20c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-10 5L2 8V6l10 5 10-5v2z',
+      url:()=>`mailto:?subject=${enc(SHARE_TITLE)}&body=${enc(BLURB+'\n\n'+SHARE_URL)}`},
+  ];
+  const enc = encodeURIComponent;
+
+  const wrap = document.getElementById('sharewrap');
+  const btn  = document.getElementById('sharebtn');
+  const pop  = document.getElementById('sharepop');
+  const prev = document.getElementById('shareprev');
+  const fnEl = document.getElementById('sharefn');
+  const dlB  = document.getElementById('share_dl');
+  const cpB  = document.getElementById('share_copy');
+  const nvB  = document.getElementById('share_native');
+  const imgB = document.getElementById('share_img');
+  const stEl = document.getElementById('sharestatus');
+  if(!wrap) return;
+
+  function status(msg, warn){ stEl.textContent = msg; stEl.classList.toggle('warn', !!warn); stEl.hidden = false; }
+  function clearStatus(){ stEl.hidden = true; }
+  // Insecure origins (http://ardi:9801 over a hostname) block the image-bearing
+  // share paths; localhost/HTTPS are "secure contexts" where they light up.
+  const SECURE = window.isSecureContext;
+  const canCopyImg = !!(SECURE && window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
+
+  // Render the social grid from SOCIAL (easy to extend → "many platforms").
+  document.getElementById('sharesoc').innerHTML = SOCIAL.map(s =>
+    `<button class="socbtn" type="button" data-net="${s.k}" title="Share on ${s.t}" aria-label="Share on ${s.t}" style="--brand:${s.c}">`
+    + `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${s.svg}"></path></svg></button>`).join('');
+
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function stamp(){ const d=new Date();
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`; }
+
+  let CAP = null;            // last capture {blob,dataURL,filename}
+  function flash(b){ b.classList.add('done'); setTimeout(()=>b.classList.remove('done'), 1500); }
+
+  // The one capture engine — html2canvas over the visible tab, charts included.
+  async function capture(){
+    const sec = document.querySelector('section[data-tab]:not([hidden])')
+             || document.querySelector('section[data-tab="overview"]');
+    const tab = (sec && sec.dataset.tab) || 'view';
+    if(typeof html2canvas === 'undefined') throw new Error('snapshot engine still loading');
+    const bg = getComputedStyle(document.body).backgroundColor || '#0d1117';
+    const canvas = await html2canvas(sec, {backgroundColor:bg, scale:2, useCORS:true, logging:false,
+                                           windowWidth:document.documentElement.clientWidth});
+    const filename = `homelab-${tab}-${stamp()}.png`;
+    const dataURL = canvas.toDataURL('image/png');
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+    return {blob, dataURL, filename};
+  }
+
+  async function openShare(){
+    wrap.classList.add('open'); btn.setAttribute('aria-expanded','true');
+    prev.innerHTML = '<div class="ph"><div class="spin"></div>Rendering snapshot…</div>';
+    fnEl.innerHTML = '&nbsp;'; CAP = null; clearStatus();
+    dlB.disabled = imgB.disabled = true;
+    try{
+      CAP = await capture();
+      prev.innerHTML = `<img alt="Snapshot preview" src="${CAP.dataURL}">`;
+      fnEl.textContent = CAP.filename;
+      dlB.disabled = imgB.disabled = false;
+      // Native share with the PNG attached — only where the platform truly supports
+      // sharing files (mobile / secure-context desktop). On plain HTTP it stays hidden.
+      let canShareFiles = false;
+      try{
+        const f = new File([CAP.blob], CAP.filename, {type:'image/png'});
+        canShareFiles = !!(navigator.canShare && navigator.canShare({files:[f]}));
+      }catch(_){}
+      nvB.hidden = !canShareFiles;
+      // If neither image-bearing path exists, say so plainly (and Download is the way).
+      if(!canShareFiles && !canCopyImg){
+        status('To attach the screenshot here: use ⬇ Download, then attach the PNG in your post. '
+             + '(One-tap image share & clipboard copy need HTTPS or localhost — this dev box is plain http.)');
+      }
+    }catch(e){
+      prev.innerHTML = `<div class="ph">⚠️ Couldn't render the snapshot<br><span style="opacity:.7">${esc(e.message||'')}</span><br>Link &amp; blurb still work below.</div>`;
+      fnEl.innerHTML = '&nbsp;'; dlB.disabled = imgB.disabled = true; nvB.hidden = true;
+    }
+  }
+  function closeShare(){ wrap.classList.remove('open'); btn.setAttribute('aria-expanded','false'); }
+
+  btn.onclick = (e)=>{ e.stopPropagation(); wrap.classList.contains('open') ? closeShare() : openShare(); };
+  document.getElementById('sharex').onclick = closeShare;
+  pop.onclick = (e)=> e.stopPropagation();
+  document.addEventListener('click', ()=>{ if(wrap.classList.contains('open')) closeShare(); });
+  document.addEventListener('keydown', (e)=>{ if(e.key==='Escape' && wrap.classList.contains('open')) closeShare(); });
+
+  // #31 — download the PNG. Always works (no secure-context needed).
+  function doDownload(){
+    if(!CAP) return false;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(CAP.blob); a.download = CAP.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    return true;
+  }
+  dlB.onclick = ()=>{ if(doDownload()){ flash(dlB); status('Saved “'+CAP.filename+'” to your downloads — attach it wherever you like.'); } };
+
+  // #87 — copy generic blurb + link (works anywhere: Discord, Slack, group chats…).
+  cpB.onclick = async ()=>{
+    const ok = await copyText(BLURB + '\n' + SHARE_URL);
+    if(ok){ flash(cpB); status('Link + blurb copied — paste it into Discord, Slack, a chat, anywhere.'); }
+    else   { status('Couldn’t copy automatically — select the text manually and Ctrl+C.', true); }
+  };
+
+  // #87 — copy the SNAPSHOT image itself to the clipboard (best UX: paste straight
+  // into a chat). Needs a secure context; falls back to a download so it's never silent.
+  imgB.onclick = async ()=>{
+    if(!CAP) return;
+    if(canCopyImg){
+      try{
+        await navigator.clipboard.write([new ClipboardItem({'image/png':CAP.blob})]);
+        flash(imgB); status('Snapshot copied — paste the image straight into Discord, Slack, a DM…'); return;
+      }catch(_){ /* fall through to download */ }
+    }
+    doDownload();
+    status('Copying images needs HTTPS/localhost — this dev box is plain http, so I saved the PNG to your downloads instead. Attach it to your post.', true);
+  };
+
+  // #87 — native share sheet, snapshot attached (mobile / secure-context desktop).
+  nvB.onclick = async ()=>{
+    if(!CAP) return;
+    const f = new File([CAP.blob], CAP.filename, {type:'image/png'});
+    try{ await navigator.share({title:SHARE_TITLE, text:BLURB+'\n'+SHARE_URL, files:[f]}); flash(nvB); status('Shared via your device’s share sheet.'); }
+    catch(e){
+      if(e && e.name === 'AbortError') return;   // user dismissed the sheet
+      doDownload(); status('Native share fell through — saved the PNG to your downloads so you can attach it.', true);
+    }
+  };
+  // #87 — open a platform's web-share intent (link + blurb; no host data).
+  document.getElementById('sharesoc').onclick = (e)=>{
+    const b = e.target.closest('.socbtn'); if(!b) return;
+    const s = SOCIAL.find(x=>x.k===b.dataset.net); if(!s) return;
+    let url;
+    if(s.prompt){
+      let inst = prompt('Your Mastodon instance (e.g. mastodon.social):', 'mastodon.social');
+      if(!inst) return;
+      inst = inst.trim().replace(/^https?:\/\//,'').replace(/\/+$/,'');
+      url = s.url(inst);
+    } else url = s.url();
+    if(url.startsWith('mailto:')) location.href = url;
+    else window.open(url, '_blank', 'noopener,noreferrer,width=620,height=660');
+    status('Opened '+s.t+' with your link + blurb. To include the screenshot, use “Copy snapshot” or ⬇ Download and attach it.');
+  };
+})();
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
