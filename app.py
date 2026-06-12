@@ -1325,6 +1325,38 @@ def _listen_inode_to_port():
             continue
     return inodes
 
+def _cgroup_pids(control_group):
+    """Return all PIDs in a systemd service's cgroup.
+
+    Instead of reading /sys/fs/cgroup/.../cgroup.procs (which is unavailable
+    inside Docker's private cgroup namespace), we scan /proc/<pid>/cgroup for
+    every running process and match the service's ControlGroup string. Works
+    on bare-metal and in Docker, and avoids cgroup v1/v2 path differences.
+
+    Falls back to an empty list if the cgroup path is empty or no PIDs match.
+    """
+    if not control_group:
+        return []
+    # Normalize: ControlGroup may or may not have a leading slash; strip it
+    # so we can match against the proc entries consistently.
+    cg = control_group.lstrip("/")
+    pids = []
+    try:
+        for pid_dir in os.listdir("/proc"):
+            if not pid_dir.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid_dir}/cgroup") as f:
+                    for ln in f:
+                        if cg in ln.strip():
+                            pids.append(int(pid_dir))
+                            break
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+    except Exception:
+        return []
+    return pids
+
 def _ports_for_pid(pid, inode_to_port):
     """LISTEN ports owned by `pid` by walking /proc/<pid>/fd/* for socket:[N]
     symlinks and joining inodes to ports. Empty list on any access failure —
@@ -1448,6 +1480,20 @@ def collect_systemd():
                 if ex is not None:
                     s["exit_status"] = int(ex)
             s["ports"] = _ports_for_pid(pid, inode_to_port)
+            if not s["ports"]:
+                # MainPID owns no listening sockets — walk the service's full
+                # cgroup to cover child/forking processes (e.g. Pi-hole FTL,
+                # dnsmasq).  Union ports across all children since a forking
+                # service can listen on several ports across children.
+                # Falls back gracefully if cgroup is unreadable.
+                cgroup = svc_props.get("ControlGroup")
+                for cpid in _cgroup_pids(cgroup):
+                    if cpid == pid:
+                        continue
+                    child_ports = _ports_for_pid(cpid, inode_to_port)
+                    if child_ports:
+                        s["ports"].extend(child_ports)
+                        s["ports"] = sorted(set(s["ports"]))
             s.pop("_obj_path", None)
     except Exception as e:
         return {"available": False, "reason": f"systemd query failed: {e}", "services": [], "summary": {}}
