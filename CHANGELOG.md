@@ -5,6 +5,16 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.15.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.15.0) — 2026-06-12
+*Polish, safety & sharing.*
+- **Snapshot & Share** — grab the current tab as a PNG, or share a generic link + blurb (no host data) to X, Reddit, Hacker News, LinkedIn, Mastodon, Bluesky, Telegram, WhatsApp and more. Closes #31, #87.
+- **Service ports** — the Services tab shows each service's listening port as a click-through link, now including forking services (Pi-hole FTL, dnsmasq, libvirtd) whose socket lives in a child process — resolved via the unit's cgroup. Closes #83. Thanks @ravvdevv.
+- **Backup & restore** — one-click SQLite export/import so you never lose your history. Closes #86.
+- **MCP status pill** — see at a glance when an AI agent is connected to the built-in MCP server. Closes #84.
+- **Telegram alerting** — a third notification channel alongside Discord and ntfy. Closes #27.
+- **Desktop polish** — the dashboard fills the width and tints nav vs. main for easier scanning. Closes #85.
+- **What's new** — a one-time welcome modal after an upgrade, rolling up the changelog for every release since the one you last ran (served offline from this file).
+
 ## [0.14.4](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.14.4) — 2026-06-10
 - **Fix:** Services tab now refreshes immediately when you switch hosts. The host-switch path in `refreshCurrentTab()` was missing a `services` branch, so Services only re-rendered on tab-change instead of right away. Closes #82. Thanks @mohd-ibadullah for the first-time contribution.
 

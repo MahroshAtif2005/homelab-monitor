@@ -33,7 +33,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.14.4"
+VERSION      = "0.15.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
