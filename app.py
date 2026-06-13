@@ -174,7 +174,8 @@ except sqlite3.OperationalError as e:
 _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {}}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
+          "model_meta": {}, "serving": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -447,6 +448,160 @@ def probe_models(ct):
     if len(idle) > CATALOG_MAX:
         idle = [(f"{len(idle)} models available", None)]
     return loaded + idle
+
+# ── Model intelligence: per-model metadata + live serving telemetry ───────────
+# Two passive, no-dep enrichments that make the AI Models tab authoritative:
+#   1. Ollama /api/show — param size, quantization, context length, capabilities
+#      (immutable per tag, so cached; only fetched for currently-loaded models).
+#   2. vLLM / TGI /metrics — running/waiting requests, KV-cache fill, tokens/sec
+#      (Prometheus text, parsed with stdlib regex; tok/s from a counter delta).
+def _http_post_json(ip, port, path, payload, timeout=2):
+    c = http.client.HTTPConnection(ip, port, timeout=timeout)
+    try:
+        body = json.dumps(payload).encode()
+        c.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        r = c.getresponse(); data = r.read(); status = r.status
+    finally:
+        c.close()
+    return json.loads(data) if status < 400 else None
+
+def _http_text(ip, port, path, timeout=2):
+    c = http.client.HTTPConnection(ip, port, timeout=timeout)
+    try:
+        c.request("GET", path); r = c.getresponse(); data = r.read(); status = r.status
+    finally:
+        c.close()
+    return data.decode("utf-8", "replace") if status < 400 else None
+
+_OLLAMA_META = {}   # model name -> {param_size, quant, ctx, caps}; immutable per tag, cached
+
+def _ollama_meta(ip, model):
+    """POST /api/show once per model and cache. Passive — triggers no inference."""
+    if model in _OLLAMA_META:
+        return _OLLAMA_META[model]
+    meta = {}
+    try:
+        d = _http_post_json(ip, 11434, "/api/show", {"model": model}) or {}
+        det = d.get("details") or {}
+        meta["param_size"] = det.get("parameter_size") or ""
+        meta["quant"] = det.get("quantization_level") or ""
+        ctx = ""
+        for k, v in (d.get("model_info") or {}).items():
+            if k.endswith(".context_length"):
+                ctx = int(v) if str(v).isdigit() else v; break
+        meta["ctx"] = ctx
+        meta["caps"] = [c for c in (d.get("capabilities") or []) if c != "completion"]
+    except Exception:
+        meta = {}
+    if any(meta.get(k) for k in ("param_size", "quant", "ctx", "caps")):
+        _OLLAMA_META[model] = meta
+    return meta
+
+def collect_model_meta(ai, models):
+    """{model_name: meta} for Ollama models. Cached metadata is returned for free;
+    a fresh /api/show is only paid for a currently-loaded model we haven't seen."""
+    ip_of = {ct["name"]: (ct.get("ip") or "127.0.0.1") for ct in ai}
+    is_ollama = {ct["name"] for ct in ai
+                 if "ollama" in (ct.get("name", "") + " " + ct.get("image", "")).lower()}
+    out = {}
+    for svc, mdl, vram in models:
+        if svc not in is_ollama or not mdl:
+            continue
+        if mdl in _OLLAMA_META:
+            out[mdl] = _OLLAMA_META[mdl]
+        elif vram is not None:                      # only pay /api/show for loaded models
+            meta = _ollama_meta(ip_of.get(svc, "127.0.0.1"), mdl)
+            if meta:
+                out[mdl] = meta
+    return out
+
+_PROM_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([0-9.eEnaN+-]+)\s*$")
+
+def _parse_prom(text):
+    """Prometheus exposition text -> {metric_name: value summed across label sets}.
+    Comments and non-finite values are skipped."""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] == "#":
+            continue
+        m = _PROM_RE.match(line)
+        if not m:
+            continue
+        try:
+            v = float(m.group(3))
+        except ValueError:
+            continue
+        if v != v or v in (float("inf"), float("-inf")):   # NaN / inf
+            continue
+        out[m.group(1)] = out.get(m.group(1), 0.0) + v
+    return out
+
+def _first_metric(metrics, *names):
+    for n in names:
+        if n in metrics:
+            return metrics[n]
+    return None
+
+def _serving_extract(metrics):
+    """Pull the serving KPIs out of a parsed /metrics dict (vLLM + TGI aliases).
+    Returns raw fields incl. the generation-tokens counter for rate calc upstream."""
+    out = {}
+    running = _first_metric(metrics, "vllm:num_requests_running", "tgi_batch_current_size")
+    waiting = _first_metric(metrics, "vllm:num_requests_waiting", "tgi_queue_size")
+    kv = _first_metric(metrics, "vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
+    gen = _first_metric(metrics, "vllm:generation_tokens_total", "tgi_request_generated_tokens_sum")
+    ts_sum = _first_metric(metrics, "vllm:time_to_first_token_seconds_sum")
+    ts_cnt = _first_metric(metrics, "vllm:time_to_first_token_seconds_count")
+    if running is not None: out["running"] = int(running)
+    if waiting is not None: out["waiting"] = int(waiting)
+    if kv is not None:      out["kv_cache_pct"] = round(kv * 100, 1) if kv <= 1.5 else round(kv, 1)
+    if gen is not None:     out["gen_tokens_total"] = gen
+    if ts_sum is not None and ts_cnt:
+        out["ttft_avg_s"] = round(ts_sum / ts_cnt, 3)
+    return out
+
+_METRICS_HINTS = ("vllm", "text-generation-inference", "tgi", "sglang", "aphrodite",
+                  "lorax", "mistral", "text-embeddings-inference", "infinity")
+_SERVE_PREV = {}    # svc -> (gen_tokens_total, ts), for tokens/sec from the counter delta
+
+def collect_serving(ai):
+    """Scrape /metrics from Prometheus-exposing inference servers and return a list of
+    live serving stats (running/waiting/KV-cache/tok-s/TTFT). Bounded: only hint-matched
+    containers, a few candidate ports at a short timeout, first hit wins."""
+    out, nowt = [], time.time()
+    for ct in ai:
+        name = ct.get("name", "")
+        if not any(h in (name + " " + ct.get("image", "")).lower() for h in _METRICS_HINTS):
+            continue
+        ip = ct.get("ip") or "127.0.0.1"
+        ports = []
+        for p in (list(ct.get("ports") or []) + [8000]):
+            if p and p not in ports:
+                ports.append(p)
+        text = None
+        for p in ports[:4]:
+            try:
+                t = _http_text(ip, p, "/metrics", timeout=1.0)
+            except Exception:
+                t = None
+            if t and ("vllm:" in t or "tgi_" in t):
+                text = t; break
+        if not text:
+            continue
+        st = _serving_extract(_parse_prom(text))
+        gen = st.pop("gen_tokens_total", None)
+        if gen is not None:
+            prev = _SERVE_PREV.get(name)
+            if prev and nowt > prev[1]:
+                rate = (gen - prev[0]) / (nowt - prev[1])
+                if rate >= 0:
+                    st["tok_per_s"] = round(rate, 1)
+            _SERVE_PREV[name] = (gen, nowt)
+        if st:
+            st["service"] = name
+            out.append(st)
+    return out
 
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
 def _cpu_pct():
@@ -3434,6 +3589,18 @@ def sample_once():
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = sample_callers(conts, {c["name"] for c in ai})
 
+    # Model intelligence: per-model metadata (Ollama /api/show, cached) + live serving
+    # telemetry (vLLM/TGI /metrics). Both best-effort — a slow/absent endpoint must
+    # never wedge the sample, so each is isolated.
+    try:
+        model_meta = collect_model_meta(ai, models)
+    except Exception:
+        model_meta = {}
+    try:
+        serving = collect_serving(ai)
+    except Exception:
+        serving = []
+
     host = read_host()
     ts = int(time.time())
     if _DB_MAINTENANCE:
@@ -3471,6 +3638,7 @@ def sample_once():
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  model_meta=model_meta, serving=serving,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
 
