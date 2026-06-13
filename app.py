@@ -175,7 +175,7 @@ _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
-          "model_meta": {}, "serving": []}
+          "model_meta": {}, "serving": [], "training": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -2170,6 +2170,104 @@ def collect_top_processes(top_n=10):
             "by_mem": sorted(rows, key=lambda r: -r["mem_mb"])[:top_n],
             "ncpu": ncpu}
 
+# ── Experiments: training-run detection + GPU activity sessions ────────────────
+# Auto-recognise training / fine-tuning jobs from /proc cmdline, and reconstruct
+# "GPU activity sessions" from the power/util history we already store — so the
+# Experiments tab works with zero config and no agent inside the job.
+TRAIN_LAUNCHERS = ("torchrun", "deepspeed", "torch.distributed.run",
+                   "torch.distributed.launch", "torch.distributed.elastic", "accelerate")
+_TRAIN_SCRIPT_RE = re.compile(r"(train|finetune|fine[_-]?tune|sft|dpo|grpo|ppo|pretrain|lora|qlora)", re.I)
+_ML_FRAMEWORK_RE = re.compile(r"(pytorch_lightning|lightning\.|transformers\.trainer|"
+                              r"axolotl|unsloth|trl|llama[_-]?factory|nanogpt|megatron)", re.I)
+
+def _classify_training(argv):
+    """argv: cmdline tokens. Return a short label if this looks like a training /
+    fine-tuning job, else None. Conservative — must not flag plain inference."""
+    if not argv:
+        return None
+    low = " ".join(argv).lower()
+    for l in TRAIN_LAUNCHERS:
+        if l in low:
+            return l.split(".")[-1]
+    for a in argv:
+        if a.endswith(".py") and _TRAIN_SCRIPT_RE.search(os.path.basename(a)):
+            return os.path.basename(a)
+    if "python" in low and _ML_FRAMEWORK_RE.search(low):
+        return "training"
+    return None
+
+_TRAIN_SEEN = {}   # pid -> first-seen ts (resets on restart; gives a live elapsed clock)
+
+def collect_training(gpu_pids, now=None):
+    """Scan /proc for training-like processes; annotate each with the VRAM its PID
+    holds on the GPU (from nvidia-smi compute-apps) and how long we've seen it.
+    `gpu_pids`: {int pid -> MB}. Returns [] where /proc is unavailable."""
+    now = now or int(time.time())
+    out, alive = [], set()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        argv = [t for t in raw.decode("utf-8", "replace").split("\x00") if t]
+        label = _classify_training(argv)
+        if not label:
+            continue
+        alive.add(pid)
+        first = _TRAIN_SEEN.setdefault(pid, now)
+        vram = gpu_pids.get(int(pid), 0)
+        out.append({"pid": int(pid), "label": label, "cmd": " ".join(argv)[:240],
+                    "elapsed": max(0, now - first), "vram": round(vram), "on_gpu": bool(vram)})
+    for dead in [p for p in _TRAIN_SEEN if p not in alive]:
+        _TRAIN_SEEN.pop(dead, None)
+    return sorted(out, key=lambda r: -r["elapsed"])
+
+_ACTIVE_UTIL = 20    # GPU util % at/above which a sample counts as a "busy" session sample
+
+def _gpu_sessions(rows, interval, active_util=_ACTIVE_UTIL, max_gap=3, min_len=2, price=0.0):
+    """Reconstruct contiguous GPU-busy sessions from sample rows. `rows`: ascending
+    (ts, util, power, mem_used). A session is a run of samples with util>=active_util,
+    tolerating up to `max_gap` idle samples. Returns sessions newest-first with
+    duration, peak util/VRAM, average power, energy (kWh) and money."""
+    kwh_per = interval / 3_600_000.0
+    sessions, cur, gap = [], None, 0
+
+    def close():
+        nonlocal cur
+        if cur and cur["n"] >= min_len:
+            energy = cur["sum_power"] * kwh_per
+            sessions.append({
+                "start": cur["start"], "end": cur["end"],
+                "duration": cur["end"] - cur["start"] + interval,
+                "peak_util": round(cur["peak_util"]), "peak_vram": round(cur["peak_vram"]),
+                "avg_power": round(cur["sum_power"] / cur["n"]),
+                "energy_kwh": round(energy, 4), "cost": round(energy * price, 4)})
+        cur = None
+
+    for ts, util, power, mem in rows:
+        if (util or 0) >= active_util:
+            if cur is None:
+                cur = {"start": ts, "end": ts, "peak_util": 0, "peak_vram": 0, "sum_power": 0.0, "n": 0}
+            cur["end"] = ts
+            cur["peak_util"] = max(cur["peak_util"], util or 0)
+            cur["peak_vram"] = max(cur["peak_vram"], mem or 0)
+            cur["sum_power"] += (power or 0)
+            cur["n"] += 1
+            gap = 0
+        elif cur is not None:
+            gap += 1
+            if gap > max_gap:
+                close(); gap = 0
+    close()
+    return sorted(sessions, key=lambda s: -s["start"])
+
 def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
@@ -3526,6 +3624,7 @@ def sample_once():
     gpus = []
     gpu_extra = {}
     procs = {}
+    gpu_pids = {}
     gpu_avail = False
     try:
         # One CSV row per card (issue #95). Parse each field defensively: nvidia-smi
@@ -3560,6 +3659,10 @@ def sample_once():
                 pid, mem = (p.strip() for p in line.split(","))
                 svc = service_for_pid(pid, nm)
                 procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
+                try:
+                    gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _gpu_num(mem)
+                except ValueError:
+                    pass
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if LATEST.get("gpu_avail"):
@@ -3600,6 +3703,10 @@ def sample_once():
         serving = collect_serving(ai)
     except Exception:
         serving = []
+    try:
+        training = collect_training(gpu_pids)
+    except Exception:
+        training = []
 
     host = read_host()
     ts = int(time.time())
@@ -3638,7 +3745,7 @@ def sample_once():
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
-                  model_meta=model_meta, serving=serving,
+                  model_meta=model_meta, serving=serving, training=training,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
 
@@ -3907,6 +4014,36 @@ def api_cost():
                    "night_start": s.get("night_start", "22:00"),
                    "night_end": s.get("night_end", "06:00")},
         "series": {"labels": labels, "cost_cum": cost_cum},
+    })
+
+@app.route("/api/sessions")
+def api_sessions():
+    """GPU activity sessions over the range — contiguous GPU-busy periods rebuilt
+    from the power/util history. Plus the live training processes detected on the
+    hub right now (LATEST['training']). Powers the Experiments tab."""
+    s = get_settings()
+    try:
+        price = float(s.get("kwh_price") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        rows = cur.execute("SELECT ts,util,power,mem_used FROM samples WHERE ts>=? ORDER BY ts", (since,)).fetchall()
+    sessions = _gpu_sessions(rows, INTERVAL, price=price)[:50]
+    tot_energy = round(sum(x["energy_kwh"] for x in sessions), 3)
+    return jsonify({
+        "range": rng, "currency": s.get("currency") or "$",
+        "price": price, "kwh_price": price,
+        "active_pct": _ACTIVE_UTIL,
+        "sessions": sessions,
+        "totals": {"count": len(sessions), "energy_kwh": tot_energy,
+                   "cost": round(tot_energy * price, 2),
+                   "active_hours": round(sum(x["duration"] for x in sessions) / 3600.0, 1)},
+        "training": LATEST.get("training") or [],
     })
 
 # ── Container logs over SSE (issue #28) ───────────────────────────────────────
