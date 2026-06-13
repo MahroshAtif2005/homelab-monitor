@@ -748,6 +748,20 @@ a{color:var(--info)}
         </div>
       </div>
 
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Electricity price (per kWh)</div>
+          <input type="number" id="al_kwh" min="0" step="0.01" placeholder="e.g. 0.30"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Currency symbol</div>
+          <input type="text" id="al_currency" maxlength="4" placeholder="$"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+      </div>
+      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Power &amp; cost</b> card on the Host tab from the GPU power history. Leave the price blank to hide the card.</p>
+
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
         <button class="rb on" id="al_save">Save</button>
         <button class="rb"    id="al_test">Send test alert</button>
@@ -852,6 +866,16 @@ a{color:var(--info)}
   <div class="card" id="topproc-card" hidden><h2>🧠 Top processes</h2>
     <div class="topproc-grid" id="topproc"></div>
     <p class="cap" id="topproc_cap"></p>
+  </div>
+  <div class="card" id="cost-card" hidden><h2>💰 Power &amp; cost</h2>
+    <div id="cost-disabled" class="topproc-empty" hidden>
+      Set a price per kWh in <a href="#alerts" id="cost-settings-link">Settings</a> to see what your GPU costs to run.
+    </div>
+    <div id="cost-body" hidden>
+      <div class="grid" id="cost-kpis"></div>
+      <div class="chartbox short" style="margin-top:12px"><canvas id="costchart"></canvas></div>
+      <p class="cap" id="cost_cap"></p>
+    </div>
   </div>
   <div class="card"><h2>🧠 Memory map — containers &amp; services</h2>
     <div id="ramtree" class="treemap"></div>
@@ -1186,6 +1210,7 @@ function renderData(){
        <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
     renderSysInfo();
     renderTopProcs();
+    renderCost();
   }
   // Network/Security read the active host block; re-render them on each data
   // refresh (and on first load) when one of them is the visible tab.
@@ -1226,6 +1251,47 @@ function renderTopProcs(){
   box.innerHTML = col('By CPU', cpu, true) + col('By RAM', mem, false);
   const cap = document.getElementById('topproc_cap');
   if(cap) cap.textContent = `Grouped by command across ${ncpu} cores · CPU% is per-core · refreshes every 15s`;
+}
+
+// Power & cost card (issue #25): turns the GPU power history into kWh -> money.
+// Fetches /api/cost for the active range; hidden until a kWh price is set, and a
+// thin cumulative-cost line tracks spend across the selected range. Local only.
+async function renderCost(){
+  const card = document.getElementById('cost-card');
+  if(!card) return;
+  if(CURRENT_HOST !== 'local'){ card.hidden = true; return; }
+  let j; try{ j = await (await fetch('/api/cost?range=' + encodeURIComponent(R))).json(); }
+  catch(e){ card.hidden = true; return; }
+  card.hidden = false;
+  const dis = document.getElementById('cost-disabled'), body = document.getElementById('cost-body');
+  if(!j.enabled){
+    dis.hidden = false; body.hidden = true;
+    if(charts['costchart']){ charts['costchart'].destroy(); delete charts['costchart']; }
+    const lk = document.getElementById('cost-settings-link');
+    if(lk) lk.onclick = e => { e.preventDefault(); showTab('alerts'); };
+    return;
+  }
+  dis.hidden = true; body.hidden = false;
+  const cur = j.currency || '$';
+  const money = v => cur + (v || 0).toFixed(2);
+  document.getElementById('cost-kpis').innerHTML = [
+    {v: j.current_w + ' W', l: 'Current draw'},
+    {v: j.avg_24h_w + ' W', l: '24h average'},
+    {v: j.avg_7d_w + ' W',  l: '7d average'},
+    {v: money(j.cost.today), l: 'Cost today',   s: (j.kwh.today||0).toFixed(2) + ' kWh'},
+    {v: money(j.cost.d7),    l: 'Last 7 days',   s: (j.kwh.d7||0).toFixed(1) + ' kWh'},
+    {v: money(j.cost.d30),   l: 'Last 30 days',  s: (j.kwh.d30||0).toFixed(1) + ' kWh'},
+  ].map(t => `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const labels = fmtLabels(j.series.labels);
+  mk('costchart', {type:'line', data:{labels, datasets:[
+    {label:'Cumulative cost ('+cur+')', data:j.series.cost_cum, borderColor:'#3fb950',
+     backgroundColor:'#3fb95033', fill:true, pointRadius:0, tension:.25}]},
+    options:{responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')}, ticks:{color:cv('--mut'), maxTicksLimit:10, autoSkip:true}},
+       y:{min:0, grid:{color:cv('--free')}, ticks:{color:cv('--mut'), callback:v=>cur+(+v).toFixed(2)}}},
+      plugins:{legend:{labels:{color:cv('--tx'), boxWidth:12}}}}, plugins:[areaBg]});
+  const cap = document.getElementById('cost_cap');
+  if(cap) cap.textContent = `At ${cur}${j.kwh_price}/kWh · integrated from GPU power samples · ${j.range} range`;
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
@@ -1629,6 +1695,8 @@ async function loadAlerts(){
   document.getElementById('al_telegram_chat_id').value = s.telegram_chat_id||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
+  document.getElementById('al_kwh').value         = s.kwh_price||'';
+  document.getElementById('al_currency').value    = s.currency||'$';
   // The webhook is a secret — server only returns whether one is set.
   const inp=document.getElementById('al_discord');
   if(!ALERTS_LOADED){ inp.value=''; inp.placeholder = s.discord_webhook_url_set
@@ -1659,6 +1727,8 @@ async function saveAlerts(){
     telegram_chat_id: document.getElementById('al_telegram_chat_id').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
     disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
+    kwh_price:        document.getElementById('al_kwh').value.trim(),
+    currency:         document.getElementById('al_currency').value.trim()||'$',
   };
   // Only send the webhook field if the user actually typed in it — empty means
   // "no change" when one is already saved (matching the placeholder hint),

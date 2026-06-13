@@ -2813,6 +2813,8 @@ SETTING_DEFAULTS = {
     "telegram_chat_id":    "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
+    "kwh_price":           "",         # electricity price per kWh; empty hides the cost card (#25)
+    "currency":            "$",        # symbol shown next to costs
 }
 SETTING_SECRETS = {"discord_webhook_url", "telegram_token"}   # never round-tripped to the UI in full
 
@@ -3365,6 +3367,55 @@ def api_data():
                     "services": services, "other": other, "summary": summary, "model_summary": model_summary,
                     "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
+
+@app.route("/api/cost")
+def api_cost():
+    """Power → kWh → money (#25). Integrates the GPU `power` samples we already
+    collect over the requested range. Each sample stands for INTERVAL seconds, so
+    energy(kWh) = sum(power_W) * INTERVAL / 3_600_000. Cost = energy * kwh_price.
+    The card stays hidden until a price is set, so `enabled` gates the UI."""
+    s = get_settings()
+    try:
+        price = float(s.get("kwh_price") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    currency = s.get("currency") or "$"
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per_wsample = INTERVAL / 3_600_000.0   # one power sample -> kWh
+
+    with LOCK:
+        cur = DB.cursor()
+        def avg_w(since):
+            return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
+        def kwh(since):
+            tot = cur.execute("SELECT SUM(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0
+            return tot * kwh_per_wsample
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        windows = {"today": kwh(midnight), "d7": kwh(now - 604800), "d30": kwh(now - 2592000)}
+
+        # Cumulative-cost series across the selected range (mirrors api_data buckets).
+        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
+                           (bk, bk, since)).fetchall()
+    labels, cost_cum, running = [], [], 0.0
+    for b, p in rows:
+        running += (p or 0) * kwh_per_wsample * price
+        labels.append(int(b)); cost_cum.append(round(running, 4))
+
+    fmt = lambda k: round(k * price, 2)
+    return jsonify({
+        "enabled": price > 0, "kwh_price": price, "currency": currency,
+        "range": rng, "bucket_sec": bk,
+        "current_w": round(LATEST.get("power") or 0),
+        "avg_24h_w": avg_w(now - 86400), "avg_7d_w": avg_w(now - 604800),
+        "kwh": {k: round(v, 3) for k, v in windows.items()},
+        "cost": {k: fmt(v) for k, v in windows.items()},
+        "series": {"labels": labels, "cost_cum": cost_cum},
+    })
 
 @app.route("/healthz")
 def healthz():
