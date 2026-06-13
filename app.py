@@ -1957,6 +1957,12 @@ def _parse_ssh_target(t):
     port = int(g["port"]) if g["port"] else 22
     if not (1 <= port <= 65535):
         return None
+    # Defence-in-depth: a user/host beginning with '-' could be read as an ssh
+    # option (e.g. "-oProxyCommand=…") if it ever reached argv unguarded. The
+    # ssh calls below also pass the destination after "--", so this is the belt
+    # to that suspenders.
+    if g["user"].startswith("-") or g["host"].startswith("-"):
+        return None
     return g["user"], g["host"], port
 
 def list_hosts():
@@ -2300,7 +2306,7 @@ def _ssh(user, host, port, cmd, timeout=8):
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), "--", f"{user}@{host}", cmd,
         ], capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
@@ -2319,7 +2325,7 @@ def _ssh_with_stdin(user, host, port, cmd, stdin_bytes, timeout=60):
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), "--", f"{user}@{host}", cmd,
         ], input=stdin_bytes, capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
@@ -2762,6 +2768,30 @@ def get_settings():
     except Exception as e:
         print("settings read error:", e, flush=True)
     return out
+
+# Settings that hold a URL the server itself will later POST to (the alert
+# webhooks). The dashboard API is intentionally unauthenticated on a trusted
+# LAN, so validating the scheme/host on save keeps someone who can reach the
+# dashboard from pointing these at a non-HTTP scheme or an empty host — a small
+# SSRF-surface tightening, not a change to the trusted-LAN model.
+_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server"}
+
+def _validate_url_settings(updates):
+    """Return an error string if any URL-valued setting is malformed, else None.
+    An empty value is allowed (it clears the setting)."""
+    for key in _URL_SETTING_KEYS:
+        if key not in updates:
+            continue
+        val = (updates[key] or "").strip()
+        if not val:
+            continue
+        try:
+            u = urllib.parse.urlparse(val)
+        except Exception:
+            return f"{key} is not a valid URL."
+        if u.scheme not in ("http", "https") or not u.netloc:
+            return f"{key} must be an http(s) URL with a host."
+    return None
 
 def save_settings(updates):
     """Persist any subset of known setting keys. Unknown keys are ignored."""
@@ -3562,7 +3592,9 @@ def _disk_scan_worker(path, real):
         # --max-depth=2 gives two levels at once (folder + its sub-folders) for a
         # nested treemap. du recurses fully regardless of --max-depth, so this is
         # no costlier than depth 1 — it only prints more.
-        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", real],
+        # `--` ends option parsing so a path can never be read as a du flag.
+        # `real` always starts with "/" already, so this is belt-and-suspenders.
+        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", "--", real],
                            capture_output=True, text=True, timeout=600)
         sizes = {}
         for ln in (r.stdout or "").splitlines():
@@ -3778,6 +3810,9 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
+        err = _validate_url_settings(updates)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
     return jsonify({"version": VERSION, "settings": _public_settings()})
 
