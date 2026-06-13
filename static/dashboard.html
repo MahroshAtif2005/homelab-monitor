@@ -125,6 +125,25 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .topproc-bar>span{display:block;height:100%;border-radius:4px}
 .topproc-val{flex:none;font-variant-numeric:tabular-nums;font-weight:600;min-width:52px;text-align:right}
 .topproc-empty{color:var(--mut);font-size:12.5px;padding:6px 2px}
+/* Container logs side drawer (issue #28) */
+.ctrow{cursor:pointer}
+.ctrow:hover td{background:rgba(127,127,127,.07)}
+.logdrawer{position:fixed;inset:0;z-index:60}
+.logdrawer[hidden]{display:none}
+.logdrawer-scrim{position:absolute;inset:0;background:rgba(0,0,0,.45);animation:lfade .15s ease}
+.logdrawer-panel{position:absolute;top:0;right:0;height:100%;width:min(780px,94vw);display:flex;flex-direction:column;
+  background:var(--card);border-left:1px solid var(--bd);box-shadow:-8px 0 30px rgba(0,0,0,.35);animation:lslide .18s ease}
+@keyframes lslide{from{transform:translateX(24px);opacity:.5}to{transform:none;opacity:1}}
+@keyframes lfade{from{opacity:0}to{opacity:1}}
+.logdrawer-head{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--bd)}
+.logdrawer-title{font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.logdrawer-spacer{flex:1}
+.logdrawer-follow{font-size:12.5px;color:var(--mut);display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}
+.logdrawer-btn{background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:4px 9px;font:inherit;font-size:12.5px;cursor:pointer}
+.logdrawer-btn:hover{border-color:var(--accent)}
+.logdrawer-status{font-size:11.5px;color:var(--mut);padding:4px 14px;flex:none}
+.logdrawer-body{flex:1;margin:0;padding:10px 14px;overflow:auto;background:#0b0e14;color:#cdd9e5;
+  font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -966,6 +985,21 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
     </div>
   </div>
 </div>
+<!-- Container logs side drawer (issue #28) -->
+<div class="logdrawer" id="logdrawer" hidden>
+  <div class="logdrawer-scrim" id="logdrawer-scrim"></div>
+  <aside class="logdrawer-panel" role="dialog" aria-label="Container logs" aria-modal="true">
+    <header class="logdrawer-head">
+      <span class="logdrawer-title">📜&nbsp;<b id="logdrawer-name"></b></span>
+      <span class="logdrawer-spacer"></span>
+      <label class="logdrawer-follow"><input type="checkbox" id="logdrawer-follow" checked> Follow</label>
+      <button class="logdrawer-btn" id="logdrawer-copy" title="Copy all logs">Copy all</button>
+      <button class="logdrawer-btn" id="logdrawer-close" title="Close (Esc)" aria-label="Close">✕</button>
+    </header>
+    <div class="logdrawer-status" id="logdrawer-status"></div>
+    <pre class="logdrawer-body" id="logdrawer-body"></pre>
+  </aside>
+</div>
 <script>
 // ── Tab registry. Add a monitor: append one entry here + a matching <section
 //    data-tab="..."> above + a render in renderData()/renderHealth(). ──────────
@@ -1491,7 +1525,7 @@ function renderHealth(){
     // keep only the trailing health/exit detail (if any).
     const stext = c.status_text || '';
     const upStripped = stext.replace(/^Up\s+[^()]+\s*/i,'').trim() || (stext.startsWith('Up ') ? '' : stext);
-    return `<tr><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.name)}</td>
+    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="Click to tail logs"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.name)}</td>
      <td><span class="badge ${c.status}">${esc(c.label)}</span></td>
      <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
@@ -1509,6 +1543,10 @@ function renderHealth(){
         <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
         <td></td></tr>` : '')
     || (dk.available?'<tr><td colspan="9" class="muted">No containers found.</td></tr>':'');
+  // Click any container row to tail its logs in the side drawer (issue #28).
+  document.getElementById('cttbl').onclick = e => {
+    const tr = e.target.closest('.ctrow'); if(tr && tr.dataset.ct) openLogDrawer(tr.dataset.ct);
+  };
 
   // Services — local-only branch; when remote, renderServicesTab() drives it.
   if(CURRENT_HOST === 'local') renderServicesBlock(HH.systemd);
@@ -3291,4 +3329,41 @@ function burstSparkles(){
     if(!wasStarred) burstSparkles();   // reward the first click only
   });
 })();
+// ── Container logs side drawer (issue #28) ───────────────────────────────────
+let LOG_ES=null, LOG_NAME=null;
+function openLogDrawer(name){
+  LOG_NAME=name;
+  document.getElementById('logdrawer-name').textContent=name;
+  document.getElementById('logdrawer-follow').checked=true;
+  document.getElementById('logdrawer').hidden=false;
+  startLogStream(name, true);
+}
+function stopLogStream(){ if(LOG_ES){ try{ LOG_ES.close(); }catch(e){} LOG_ES=null; } }
+function closeLogDrawer(){ stopLogStream(); document.getElementById('logdrawer').hidden=true; LOG_NAME=null; }
+function startLogStream(name, follow){
+  stopLogStream();
+  const body=document.getElementById('logdrawer-body'), status=document.getElementById('logdrawer-status');
+  body.textContent=''; status.textContent = follow ? 'streaming live…' : 'last 200 lines';
+  let atBottom=true;
+  body.onscroll=()=>{ atBottom = body.scrollTop+body.clientHeight >= body.scrollHeight-30; };
+  const es=new EventSource('/api/containers/'+encodeURIComponent(name)+'/logs?tail=200&follow='+(follow?1:0));
+  LOG_ES=es;
+  es.onmessage=ev=>{ body.textContent += (body.textContent?'\n':'')+ev.data; if(atBottom) body.scrollTop=body.scrollHeight; };
+  es.addEventListener('end', ()=>{ status.textContent='— end of logs —'; stopLogStream(); });
+  es.addEventListener('srverror', ev=>{ status.textContent='error: '+(ev.data||'could not read logs'); stopLogStream(); });
+  es.onerror=()=>{ if(LOG_ES!==es) return; status.textContent = follow ? 'connection lost — retrying…' : 'stream closed'; };
+}
+function copyLogs(){
+  const txt=document.getElementById('logdrawer-body').textContent, btn=document.getElementById('logdrawer-copy');
+  const done=()=>{ const o=btn.textContent; btn.textContent='Copied ✓'; setTimeout(()=>{btn.textContent=o;},1200); };
+  const fallback=()=>{ const ta=document.createElement('textarea'); ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); done(); }catch(e){} document.body.removeChild(ta); };
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
+  else fallback();
+}
+document.getElementById('logdrawer-close').onclick=closeLogDrawer;
+document.getElementById('logdrawer-scrim').onclick=closeLogDrawer;
+document.getElementById('logdrawer-copy').onclick=copyLogs;
+document.getElementById('logdrawer-follow').onchange=e=>{ if(LOG_NAME) startLogStream(LOG_NAME, e.target.checked); };
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !document.getElementById('logdrawer').hidden) closeLogDrawer(); });
 </script></body></html>
