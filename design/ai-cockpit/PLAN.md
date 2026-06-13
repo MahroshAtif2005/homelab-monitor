@@ -47,10 +47,12 @@ Must-haves if the night runs short: **A (requested), B, C.** D–F are high-valu
 - GPU-dependent behavior verified live on `ardi:9801` after Watchtower redeploys (~210–315 s).
 - Issues stay open until shipped to `main` (maintainer convention).
 
-## Status log
-- [ ] A  Cost dual-tariff
-- [ ] B  GPU telemetry
-- [ ] C  Model intelligence
-- [ ] D  Overview AI band + efficiency
-- [ ] E  Experiments/Training tab
-- [ ] F  Notebooks/Endpoints tab
+## Status log — ALL SHIPPED to `next` ✅
+- [x] A  Cost dual-tariff + country prefill — PR #113
+- [x] B  GPU telemetry (throttle/mem-BW/clocks/headroom) — PR #114 *(verified live on real GPU)*
+- [x] C  Model intelligence (Ollama meta + vLLM/TGI serving) — PR #115
+- [x] D  Overview AI band + tokens-per-Joule — PR #116
+- [x] E  Experiments/Training tab (runs + sessions + stall) — PR #117
+- [x] F  Notebooks/Tools discovery + idle-VRAM squatter — PR #118
+
+94 unit tests green. See `MORNING-REPORT.md` for the full account and `RELEASE-DRAFT.md` for the launch copy.
