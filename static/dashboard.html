@@ -144,6 +144,16 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .logdrawer-status{font-size:11.5px;color:var(--mut);padding:4px 14px;flex:none}
 .logdrawer-body{flex:1;margin:0;padding:10px 14px;overflow:auto;background:#0b0e14;color:#cdd9e5;
   font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+/* Per-GPU cards (issue #95) */
+.gpucard{border:1px solid var(--bd);border-radius:9px;padding:11px 13px;margin-bottom:10px;background:rgba(127,127,127,.04)}
+.gpucard:last-child{margin-bottom:0}
+.gpucard-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px;font-size:13.5px}
+.gpucard-stats{margin-left:auto;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+.gpucard-row{display:flex;align-items:center;gap:9px;margin-top:5px;font-size:12.5px}
+.gpucard-lbl{flex:none;width:42px;color:var(--mut)}
+.gpucard-bar{flex:1;height:8px;border-radius:5px;background:var(--bd);overflow:hidden}
+.gpucard-bar>span{display:block;height:100%;border-radius:5px}
+.gpucard-val{flex:none;min-width:158px;text-align:right;font-variant-numeric:tabular-nums}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -661,6 +671,10 @@ a{color:var(--info)}
     <div class="card"><h2>📋 Services on the GPU (selected range)</h2>
       <table><thead><tr><th>Service</th><th>Peak</th><th>Avg</th><th>% time</th></tr></thead><tbody id="sumtbl"></tbody></table>
     </div>
+  </div>
+  <div class="card" id="pergpu-card" hidden><h2>🎮 Per-GPU</h2>
+    <div id="pergpu"></div>
+    <p class="cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
   </div>
   <div class="card"><h2>📊 VRAM by service over time</h2>
     <div class="chartbox"><canvas id="vram"></canvas></div>
@@ -1214,6 +1228,7 @@ function renderData(){
     {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:'VRAM in use',s:memPct+'% full'},
     {v:Math.round(n.util)+'%',l:'GPU util',s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  renderPerGpu(n.gpus);
   const bar=document.getElementById('vrambar'); bar.innerHTML='';
   n.procs.forEach(p=>{const s=document.createElement('div');s.style.width=(p.mem/tot*100)+'%';s.style.background=colorFor(p.service);s.title=p.service+': '+fmtMB(p.mem);bar.appendChild(s);});
   document.getElementById('nowtbl').innerHTML = n.procs.length? n.procs.map(p=>
@@ -1252,6 +1267,31 @@ function renderData(){
   if(TAB==='security') renderSecurity();
 
   buildCharts();
+}
+
+// Per-GPU cards (issue #95): one card per physical GPU with live util/VRAM/power/
+// temp. Shown only when there's more than one card — single-GPU rigs already see
+// everything in the "GPU right now" panel, which pools across cards.
+function renderPerGpu(gpus){
+  const card=document.getElementById('pergpu-card'), box=document.getElementById('pergpu');
+  if(!card||!box) return;
+  if(!gpus || gpus.length<2){ card.hidden=true; return; }
+  card.hidden=false;
+  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
+  box.innerHTML = gpus.map(g=>{
+    const memPct = g.mem_total? Math.round(g.mem_used/g.mem_total*100):0;
+    const util = Math.round(g.util||0);
+    return `<div class="gpucard">
+      <div class="gpucard-h"><b>GPU ${g.idx}</b> <span class="muted">${esc(g.name||'')}</span>
+        <span class="gpucard-stats">${util}% util · ${Math.round(g.power||0)} W · ${Math.round(g.temp||0)}°C</span></div>
+      <div class="gpucard-row"><span class="gpucard-lbl">VRAM</span>
+        <span class="gpucard-bar"><span style="width:${memPct}%;background:${tint(memPct)}"></span></span>
+        <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${memPct}%</span></div>
+      <div class="gpucard-row"><span class="gpucard-lbl">Util</span>
+        <span class="gpucard-bar"><span style="width:${Math.min(100,util)}%;background:${tint(util)}"></span></span>
+        <span class="gpucard-val">${util}%</span></div>
+    </div>`;
+  }).join('');
 }
 
 // Mini-htop card (issue #32): top processes by CPU% and by RAM, from /api/health

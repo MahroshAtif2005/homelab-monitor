@@ -90,6 +90,7 @@ LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS hosts(
   last_check_at INTEGER,
   last_check_json TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_gpus_ts   ON gpu_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
@@ -170,7 +172,7 @@ except sqlite3.OperationalError as e:
 _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -3229,24 +3231,40 @@ def sample_once():
     # a GPU-less host). Now a GPU failure just degrades the GPU panel to "absent"
     # while temperature & friends keep refreshing.
     util = mem_used = mem_total = power = temp = 0.0
+    gpus = []
     procs = {}
     gpu_avail = False
     try:
-        g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-                 "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
-        # Parse each field defensively: nvidia-smi emits the literal "[N/A]" /
-        # "[Not Supported]" for power.draw/temperature.gpu on many consumer/laptop
-        # GPUs and inside containers, even with `nounits`. The old all-or-nothing
-        # float() unpack raised ValueError on that, which the except below caught
-        # and reported the (present, working) GPU as ABSENT. Degrade just the bad
-        # field to 0 instead.
-        util, mem_used, mem_total, power, temp = (_gpu_num(x) for x in g)
+        # One CSV row per card (issue #95). Parse each field defensively: nvidia-smi
+        # emits the literal "[N/A]" / "[Not Supported]" for power.draw/temperature
+        # on many consumer/laptop GPUs and inside containers, even with `nounits` —
+        # so degrade just the bad field to 0 rather than dropping the whole card.
+        rows = smi(["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                    "--format=csv,noheader,nounits"]).splitlines()
+        for line in rows:
+            if not line.strip():
+                continue
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 7:
+                continue
+            u, mu, mt, pw, tp = (_gpu_num(x) for x in p[2:7])
+            gpus.append({"idx": int(_gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
+                         "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp})
+        if not gpus:
+            raise ValueError("nvidia-smi returned no GPU rows")
+        gpu_avail = True
+        # Aggregate across cards for the existing single-GPU views: VRAM + power are
+        # the pool, utilisation is averaged, temperature is the hottest card.
+        mem_used  = sum(g["mem_used"] for g in gpus)
+        mem_total = sum(g["mem_total"] for g in gpus)
+        power     = sum(g["power"] for g in gpus)
+        util      = round(sum(g["util"] for g in gpus) / len(gpus))
+        temp      = max(g["temp"] for g in gpus)
         for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
             if line.strip():
                 pid, mem = (p.strip() for p in line.split(","))
                 svc = service_for_pid(pid, nm)
                 procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
-        gpu_avail = True
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if LATEST.get("gpu_avail"):
@@ -3296,12 +3314,19 @@ def sample_once():
                 DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
         for (caller, server), n in edges.items():
             DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
+        # Per-GPU history only when there's more than one card (single-GPU rigs are
+        # already covered by the aggregate `samples` table) — keeps storage lean.
+        if gpu_avail and len(gpus) > 1:
+            for g in gpus:
+                DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
+                           "VALUES(?,?,?,?,?,?,?)",
+                           (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "edges", "events"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
-                  gpu_avail=gpu_avail,
+                  gpu_avail=gpu_avail, gpus=gpus,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
@@ -3694,7 +3719,8 @@ def api_health():
     now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
                    "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
                    "power": LATEST["power"], "temp": LATEST["temp"],
-                   "available": bool(gpu_avail)},
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or []},   # per-card detail (issue #95)
            "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
