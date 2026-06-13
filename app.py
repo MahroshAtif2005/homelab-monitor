@@ -109,6 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL")
+# Per-host adaptive poll-timeout state (issue #99); added to the hosts table.
+_HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -131,6 +133,11 @@ def _apply_schema_migrations(conn):
     for col in _SAMPLE_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _HOST_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE hosts ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     conn.commit()
@@ -2027,17 +2034,20 @@ def _parse_ssh_target(t):
 
 def list_hosts():
     with LOCK:
-        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json "
-                          "FROM hosts ORDER BY added_at").fetchall()
+        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json, "
+                          "poll_timeout, poll_calibrated_at FROM hosts ORDER BY added_at").fetchall()
     out = []
-    for name, target, tags, added, checked, blob in rows:
+    for name, target, tags, added, checked, blob, ptimeout, pcal in rows:
         try:
             check = json.loads(blob) if blob else None
         except Exception:
             check = None
         out.append({"name": name, "ssh_target": target,
                     "tags": [t for t in (tags or "").split(",") if t],
-                    "added_at": added, "last_check_at": checked, "last_check": check})
+                    "added_at": added, "last_check_at": checked, "last_check": check,
+                    # Adaptive poll budget (#99): None until a host is calibrated.
+                    "poll_timeout": int(ptimeout) if ptimeout else None,
+                    "poll_calibrated_at": pcal})
     return out
 
 def add_host(name, ssh_target, tags=""):
@@ -2249,33 +2259,43 @@ _WIN_PS_CMD = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Co
 
 HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
 HOST_DATA_LOCK = threading.Lock()
-HOST_POLL_TIMEOUT = 15
+HOST_POLL_TIMEOUT = 15           # default per-host probe budget (seconds)
+# Adaptive per-host poll timeout (issue #99): a host that keeps timing out at its
+# current budget is recalibrated once with a high ceiling to learn how long its
+# probe actually needs, then that learned budget is persisted and reused. Fast
+# hosts never leave the 15s default.
+POLL_TIMEOUT_TRIPWIRE   = 2      # consecutive timeouts before we recalibrate
+POLL_CALIBRATION_CEILING = 120   # safety ceiling for the learning probe (seconds)
+POLL_TIMEOUT_MAX        = 90      # cap on any learned budget
+POLL_TIMEOUT_HEADROOM   = 1.5     # learned = measured * headroom (+ a few seconds)
 
-def probe_host_metrics(user, host, port, family="linux"):
-    """Run the right probe on the remote via SSH stdin, return (data, error).
-    Windows hosts get the PowerShell probe; everything else gets probe.py. Both
-    emit the same JSON shape, so the caller and the UI don't branch on OS."""
+def probe_host_metrics(user, host, port, family="linux", timeout=HOST_POLL_TIMEOUT):
+    """Run the right probe on the remote via SSH stdin. Returns
+    (data, error, elapsed_ms, timed_out). Windows hosts get the PowerShell probe;
+    everything else gets probe.py — both emit the same JSON shape, so the caller
+    and the UI don't branch on OS. `timed_out` is True only when ssh hit the
+    timeout (rc 124), which is what the adaptive calibration keys off (#99)."""
     if family == "windows":
         if not _PROBE_PS_SCRIPT:
-            return None, "probe.ps1 not packaged in this image"
-        rc, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-                                          _PROBE_PS_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+            return None, "probe.ps1 not packaged in this image", 0, False
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                           _PROBE_PS_SCRIPT, timeout=timeout)
     else:
         if not _PROBE_SCRIPT:
-            return None, "probe.py not packaged in this image"
-        rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
-                                          _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+            return None, "probe.py not packaged in this image", 0, False
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, "python3 -",
+                                           _PROBE_SCRIPT, timeout=timeout)
     if rc != 0:
-        return None, _clean_ssh_err(err, out, rc)
+        return None, _clean_ssh_err(err, out, rc), ms, rc == 124
     # lstrip a UTF-8 BOM: PowerShell over SSH can prepend one, which str.strip()
     # won't remove and which would otherwise make json.loads choke on char 0.
     out = (out or "").lstrip("﻿").strip()
     if not out:
-        return None, "empty response from probe"
+        return None, "empty response from probe", ms, False
     try:
-        return json.loads(out), None
+        return json.loads(out), None, ms, False
     except Exception as e:
-        return None, f"bad JSON from probe: {e}"
+        return None, f"bad JSON from probe: {e}", ms, False
 
 def _local_now_snapshot():
     """Build a 'host' block for the hub itself, matching the probe shape so
@@ -2316,10 +2336,70 @@ def _local_now_snapshot():
         }
     return out
 
+# ── Adaptive per-host poll timeout (issue #99) ────────────────────────────────
+def _host_poll_state(name):
+    """(timeout, fails) for a host — timeout falls back to the global default."""
+    try:
+        with LOCK:
+            row = DB.execute("SELECT poll_timeout, poll_fails FROM hosts WHERE name=?", (name,)).fetchone()
+    except Exception:
+        return HOST_POLL_TIMEOUT, 0
+    t = row[0] if row and row[0] else None
+    return (int(t) if t else HOST_POLL_TIMEOUT), (int(row[1]) if row and row[1] else 0)
+
+def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
+    sets, params = [], []
+    if timeout is not None:   sets.append("poll_timeout=?");       params.append(int(timeout))
+    if fails is not None:      sets.append("poll_fails=?");          params.append(int(fails))
+    if calibrated:             sets.append("poll_calibrated_at=?");  params.append(int(time.time()))
+    if not sets:
+        return
+    params.append(name)
+    try:
+        with LOCK:
+            DB.execute(f"UPDATE hosts SET {','.join(sets)} WHERE name=?", params)
+            DB.commit()
+    except Exception as e:
+        print("host poll-state save error:", e, flush=True)
+
+def _learned_timeout(measured_ms):
+    """Turn a measured probe time into a budget: headroom over the real cost,
+    floored at the default and capped at the ceiling."""
+    secs = (measured_ms or 0) / 1000.0
+    return max(HOST_POLL_TIMEOUT, min(POLL_TIMEOUT_MAX, int(secs * POLL_TIMEOUT_HEADROOM) + 3))
+
+def _poll_and_adapt(name, u, host, port, fam):
+    """Probe one host at its learned budget. On a *timeout* (not other errors),
+    count it; once a host trips the wire, recalibrate once with a high ceiling to
+    learn the budget it actually needs, persist it, and use that probe's data.
+    Returns (data, error). Pure of the cache so it's unit-testable."""
+    timeout, fails = _host_poll_state(name)
+    data, err, _ms, timed_out = probe_host_metrics(u, host, port, fam, timeout=timeout)
+    if data:
+        if fails:
+            _host_poll_save(name, fails=0)
+        return data, None
+    if not timed_out:
+        return None, err                      # genuine error — don't touch tuning
+    fails += 1
+    _host_poll_save(name, fails=fails)
+    if fails < POLL_TIMEOUT_TRIPWIRE:
+        return None, err
+    # Recalibrate: one probe with the safety ceiling to learn the real cost.
+    cdata, cerr, cms, _ct = probe_host_metrics(u, host, port, fam, timeout=POLL_CALIBRATION_CEILING)
+    if cdata:
+        learned = _learned_timeout(cms)
+        _host_poll_save(name, timeout=learned, fails=0, calibrated=True)
+        print(f"host '{name}': calibrated poll timeout to {learned}s "
+              f"(probe took {round((cms or 0)/1000,1)}s)", flush=True)
+        return cdata, None
+    return None, cerr or err                  # too slow even at the ceiling / down
+
 def host_poller():
-    """Loop: probe every registered host whose last Test was healthy. Per-host
-    timeouts isolate slow remotes so the loop never stalls. Errors are kept on
-    the cache row so the UI can show a 'last error' instead of just going dark."""
+    """Loop: probe every registered host whose last Test was healthy. A per-host
+    adaptive timeout (issue #99) isolates slow remotes — they self-calibrate to a
+    working budget instead of going permanently dark, while fast hosts stay at the
+    15s default. Errors are kept on the cache row so the UI can show a last error."""
     # Stagger the first run a touch so we don't fire before the app is fully up.
     time.sleep(2)
     while True:
@@ -2333,7 +2413,7 @@ def host_poller():
                     continue
                 u, host, port = parsed
                 fam = ((check.get("os") or {}).get("family")) or "linux"
-                data, err = probe_host_metrics(u, host, port, fam)
+                data, err = _poll_and_adapt(h["name"], u, host, port, fam)
                 with HOST_DATA_LOCK:
                     entry = HOST_DATA.get(h["name"], {})
                     if data:
