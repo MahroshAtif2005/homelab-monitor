@@ -3497,6 +3497,82 @@ def api_cost():
         "series": {"labels": labels, "cost_cum": cost_cum},
     })
 
+# ── Container logs over SSE (issue #28) ───────────────────────────────────────
+_CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+def _docker_log_stream(name, tail, follow):
+    """Yield Server-Sent Events of a container's logs over the Docker socket.
+    Demuxes Docker's 8-byte stream framing (skipped for TTY containers); for
+    follow=1 it keeps the connection open and emits a heartbeat every ~20s so a
+    closed browser EventSource is noticed and the socket torn down cleanly."""
+    c = http.client.HTTPConnection("localhost", timeout=None)
+    c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.sock.connect(DOCKER_SOCK)
+    if follow:
+        c.sock.settimeout(20)
+    path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
+            f"&tail={tail}&follow={'1' if follow else '0'}")
+    text = ""
+    def lines_from(s):
+        nonlocal text
+        text += s
+        out = []
+        while "\n" in text:
+            line, text = text.split("\n", 1)
+            out.append(line)
+        return out
+    try:
+        c.request("GET", path)
+        r = c.getresponse()
+        if r.status != 200:
+            yield f"event: srverror\ndata: {r.status} {r.reason}\n\n"
+            return
+        framed, buf = None, b""
+        while True:
+            try:
+                chunk = r.read(4096)
+            except socket.timeout:
+                yield ": keep-alive\n\n"          # heartbeat → Flask sees a gone client
+                continue
+            if not chunk:
+                break
+            if framed is None:
+                framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
+            if framed:
+                buf += chunk
+                while len(buf) >= 8:
+                    size = int.from_bytes(buf[4:8], "big")
+                    if len(buf) < 8 + size:
+                        break
+                    payload, buf = buf[8:8 + size], buf[8 + size:]
+                    for line in lines_from(payload.decode("utf-8", "replace")):
+                        yield f"data: {line}\n\n"
+            else:
+                for line in lines_from(chunk.decode("utf-8", "replace")):
+                    yield f"data: {line}\n\n"
+        if text:
+            yield f"data: {text}\n\n"
+        yield "event: end\ndata: done\n\n"
+    finally:
+        try: c.close()
+        except Exception: pass
+
+@app.route("/api/containers/<name>/logs")
+def api_container_logs(name):
+    """Last `tail` log lines for a container; with follow=1, streams new lines as
+    SSE. Read-only — `docker logs` needs no extra socket permissions."""
+    if not _CT_NAME_RE.match(name or ""):
+        return jsonify({"error": "invalid container name"}), 400
+    try:
+        tail = max(1, min(2000, int(request.args.get("tail", 200))))
+    except (TypeError, ValueError):
+        tail = 200
+    follow = request.args.get("follow") == "1"
+    return Response(_docker_log_stream(name, tail, follow),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "Connection": "keep-alive"})
+
 @app.route("/healthz")
 def healthz():
     """Cheap liveness probe for Docker's HEALTHCHECK and any uptime monitor.
