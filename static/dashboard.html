@@ -708,6 +708,22 @@ a{color:var(--info)}
   <p class="cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
 </section>
 
+<!-- ───────── Experiments / Training ───────── -->
+<section data-tab="experiments" hidden>
+  <div class="card" id="train-card">
+    <h2>🔬 Training runs <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— detected on the hub right now</span></h2>
+    <div id="train-body"></div>
+  </div>
+  <div class="card">
+    <h2>📈 GPU activity sessions</h2>
+    <div class="grid" id="sess-kpis"></div>
+    <table style="margin-top:12px"><thead><tr>
+      <th>Started</th><th>Duration</th><th>Peak util</th><th>Peak VRAM</th><th>Avg power</th><th>Energy</th><th>Cost</th>
+    </tr></thead><tbody id="sess-tbl"></tbody></table>
+    <p class="cap" id="sess-cap">Contiguous GPU-busy periods reconstructed from power &amp; utilisation history — each is a training run, batch job or inference burst. Energy is integrated from GPU power; cost uses your kWh price.</p>
+  </div>
+</section>
+
 <!-- ───────── Containers ───────── -->
 <section data-tab="containers" hidden>
   <div class="card"><h2>📦 Docker containers</h2>
@@ -1089,6 +1105,7 @@ const TABS = [
   {id:'overview',   label:'Overview',   charts:false},
   {id:'gpu',        label:'GPU',        charts:true},
   {id:'models',     label:'AI Models',  charts:false},
+  {id:'experiments',label:'Experiments', charts:false},
   {id:'containers', label:'Containers', charts:false},
   {id:'services',   label:'Services',   charts:false},
   {id:'host',       label:'System',     charts:true},
@@ -1120,6 +1137,7 @@ let HOST_DATA = null; // current host's /api/host_data response when remote
 const SC = {crit:'var(--crit)',warn:'var(--warn)',ok:'var(--ok)',info:'var(--mut)'};
 const fmtMB = v => v>=1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
 const fmtUp = s => {const d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0; return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;};
+const fmtDur = s => {s=Math.max(0,Math.round(s)); if(s<60)return s+'s'; const m=s/60|0; if(m<60)return m+'m '+(s%60)+'s'; const h=m/60|0; if(h<24)return h+'h '+(m%60)+'m'; const d=h/24|0; return d+'d '+(h%24)+'h';};
 const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const ICON={critical:'⛔',warning:'⚠️',ok:'✅',info:'ℹ️'};
@@ -1233,6 +1251,7 @@ function showTab(id){
     else renderLocalOnlyNotice(id);
   }
   if(id==='overview'){ renderFleet(); renderAiBand(); }
+  if(id==='experiments') renderExperiments(true);
   if(id==='host')     renderHostTab();
   if(id==='disks')    renderDisksTab();
   if(id==='network')  renderNetwork();
@@ -1596,6 +1615,7 @@ function renderHealth(){
   document.getElementById('ver').textContent='v'+HH.version;
   renderTopProcs();   // mini-htop card refreshes on every health poll (issue #32)
   renderAiBand();     // overview AI band uses fresh GPU/throttle data from /api/health
+  if(TAB==='experiments') renderExperiments(false);   // throttled live refresh of training cards
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};
@@ -2458,7 +2478,7 @@ async function deleteHost(name){
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
 const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','containers']);  // tabs not yet probed per-host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','containers']);  // tabs not yet probed per-host
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -2602,6 +2622,55 @@ function paintAiBand(g,x,loaded,serving){
   if(cap) cap.textContent = g.available
     ? 'Live snapshot of this hub’s GPU + model servers. Tokens/sec and efficiency come from vLLM/TGI /metrics when present.'
     : 'No GPU detected on the hub — showing model servers only.';
+}
+
+// ── Experiments / Training tab ───────────────────────────────────────────────
+// Live training-run cards (auto-detected from /proc on the hub) + a table of GPU
+// activity sessions reconstructed from power/util history, with energy and cost.
+let EXP_AT=0;
+async function renderExperiments(force){
+  if(CURRENT_HOST!=='local'){ renderLocalOnlyNotice('experiments'); return; }
+  clearLocalOnlyNotice('experiments');
+  if(!force && Date.now()-EXP_AT < 15000) return;   // throttle the live refresh
+  EXP_AT=Date.now();
+  let j; try{ j=await(await fetch('/api/sessions?range='+encodeURIComponent(R))).json(); }catch(e){ return; }
+  const cur=j.currency||'$';
+  // Training runs detected right now
+  const tr=j.training||[], tb=document.getElementById('train-body');
+  if(tb){
+    if(!tr.length){
+      tb.innerHTML='<div class="muted">No training or fine-tuning process detected on the hub. Launch one '
+        +'(<code>torchrun</code>, <code>accelerate</code>, <code>deepspeed</code>, a <code>train.py</code> / SFT / LoRA script…) '
+        +'and it appears here automatically — no agent inside the job.</div>';
+    } else {
+      const gutil=(HH&&HH.now&&HH.now.gpu&&HH.now.gpu.util)||0;
+      tb.innerHTML=tr.map(t=>{
+        const stall=t.on_gpu && gutil<8;
+        return `<div class="gpucard">
+          <div class="gpucard-h"><b>${esc(t.label)}</b> <span class="muted">pid ${t.pid}</span>
+            ${t.on_gpu?'<span class="badge ok">on GPU</span>':'<span class="badge info">no GPU yet</span>'}
+            ${stall?'<span class="badge crit" title="Holds VRAM but GPU util ~0 — possible stall (dead dataloader / checkpoint / deadlock)">⚠ possible stall</span>':''}
+            <span class="gpucard-stats">${fmtDur(t.elapsed)} elapsed${t.vram?' · '+fmtMB(t.vram)+' VRAM':''}</span></div>
+          <div class="cap" style="margin-top:6px;word-break:break-all">${esc(t.cmd)}</div></div>`;
+      }).join('');
+    }
+  }
+  // GPU activity sessions
+  const T=j.totals||{};
+  const k=document.getElementById('sess-kpis');
+  if(k) k.innerHTML=[
+    {v:String(T.count||0),l:'Sessions'},
+    {v:(T.active_hours||0)+' h',l:'GPU-active time'},
+    {v:(T.energy_kwh||0).toFixed(2)+' kWh',l:'Energy'},
+    {v:j.price>0?cur+(T.cost||0).toFixed(2):'—',l:'Cost'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
+  const fmtTs=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const rows=j.sessions||[], st=document.getElementById('sess-tbl');
+  if(st) st.innerHTML = rows.length? rows.map(s=>
+    `<tr><td>${fmtTs(s.start)}</td><td>${fmtDur(s.duration)}</td><td>${s.peak_util}%</td>
+      <td>${fmtMB(s.peak_vram)}</td><td>${s.avg_power} W</td><td>${s.energy_kwh.toFixed(3)} kWh</td>
+      <td>${j.price>0?cur+s.cost.toFixed(2):'—'}</td></tr>`).join('')
+    : `<tr><td class="muted" colspan="7">No GPU activity above ${j.active_pct||20}% util in this range yet.</td></tr>`;
 }
 
 function renderFleet(){
@@ -3289,7 +3358,8 @@ mountShell();
 buildNav();
 initTheme();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
-  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();});
+  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
+  if(TAB==='experiments') renderExperiments(true);});
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
 
 /* ════════ Snapshot + Share (#31 / #87) ════════
