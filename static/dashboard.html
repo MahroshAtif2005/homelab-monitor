@@ -166,6 +166,11 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .mchip.cap{border-color:#58a6ff66;color:#58a6ff}
 .serving-row{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:10px 0 2px}
 .serving-tag{font-size:10.5px;color:var(--ok);border:1px solid var(--ok);border-radius:9px;padding:2px 8px;opacity:.8}
+/* Notebooks & tools tiles on the Experiments tab */
+.tool-grid{display:flex;flex-wrap:wrap;gap:10px}
+.tool-tile{display:flex;align-items:center;gap:8px;border:1px solid var(--bd);border-radius:10px;padding:9px 13px;background:rgba(127,127,127,.04);text-decoration:none;color:var(--tx)}
+.tool-tile:hover{border-color:#58a6ff}
+.tool-ic{font-size:17px}.tool-nm{font-weight:600;font-size:13px}.tool-pt{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -713,6 +718,11 @@ a{color:var(--info)}
   <div class="card" id="train-card">
     <h2>🔬 Training runs <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— detected on the hub right now</span></h2>
     <div id="train-body"></div>
+  </div>
+  <div class="card" id="devtools-card" hidden>
+    <h2>🧰 Notebooks &amp; tools</h2>
+    <div id="devtools-body"></div>
+    <p class="cap">Auto-discovered DS/AI web tools running on the hub. A 🟡 VRAM tag means a kernel/process is holding GPU memory — often a forgotten notebook squatting on VRAM.</p>
   </div>
   <div class="card">
     <h2>📈 GPU activity sessions</h2>
@@ -2653,6 +2663,24 @@ async function renderExperiments(force){
             <span class="gpucard-stats">${fmtDur(t.elapsed)} elapsed${t.vram?' · '+fmtMB(t.vram)+' VRAM':''}</span></div>
           <div class="cap" style="margin-top:6px;word-break:break-all">${esc(t.cmd)}</div></div>`;
       }).join('');
+    }
+  }
+  // Notebooks & tools (auto-discovered DS/AI web apps)
+  const dv=j.devtools||[], dc=document.getElementById('devtools-card'), db=document.getElementById('devtools-body');
+  if(dc&&db){
+    if(!dv.length){ dc.hidden=true; }
+    else{
+      dc.hidden=false;
+      const ICONS={jupyter:'📓',tensorboard:'📊',mlflow:'🧪',wandb:'🐝',streamlit:'🎈',ray:'⚡'};
+      db.innerHTML='<div class="tool-grid">'+dv.map(d=>{
+        const href=`//${location.hostname}:${d.port}`;
+        return `<a class="tool-tile" href="${href}" target="_blank" rel="noopener" title="Open ${esc(d.label)} on port ${d.port}">
+          <span class="tool-ic">${ICONS[d.kind]||'🔗'}</span>
+          <span class="tool-nm">${esc(d.label)}</span>
+          <span class="tool-pt">:${d.port}</span>
+          ${d.idle_vram?`<span class="badge warn" title="Holding ${fmtMB(d.vram)} of GPU VRAM">🟡 ${fmtMB(d.vram)}</span>`:''}
+        </a>`;
+      }).join('')+'</div>';
     }
   }
   // GPU activity sessions

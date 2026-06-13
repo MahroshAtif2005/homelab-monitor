@@ -175,7 +175,7 @@ _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
-          "model_meta": {}, "serving": [], "training": []}
+          "model_meta": {}, "serving": [], "training": [], "devtools": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -2229,6 +2229,63 @@ def collect_training(gpu_pids, now=None):
         _TRAIN_SEEN.pop(dead, None)
     return sorted(out, key=lambda r: -r["elapsed"])
 
+# Data-science tooling that runs as a local web app — discovered from /proc cmdline
+# so the dashboard links straight to your notebooks & experiment trackers, and can
+# flag a notebook kernel quietly squatting on VRAM (the "my GPU is full but nothing
+# is running" culprit). (kind, label, default_port, cmdline regex).
+_DEVTOOLS = [
+    ("jupyter",     "Jupyter",     8888, re.compile(r"jupyter[-_ ]?(lab|notebook|server)|jupyterlab", re.I)),
+    ("tensorboard", "TensorBoard", 6006, re.compile(r"tensorboard", re.I)),
+    ("mlflow",      "MLflow",      5000, re.compile(r"\bmlflow\b", re.I)),
+    ("wandb",       "W&B",         8080, re.compile(r"\bwandb\b", re.I)),
+    ("streamlit",   "Streamlit",   8501, re.compile(r"\bstreamlit\b", re.I)),
+    ("ray",         "Ray",         8265, re.compile(r"raylet|ray\.dashboard|ray start", re.I)),
+]
+_PORT_RE = re.compile(r"^--?port(?:=(\d{2,5}))?$")
+
+def _extract_port(argv):
+    """Pull an explicit --port N / --port=N from a cmdline, else None."""
+    for i, a in enumerate(argv):
+        m = _PORT_RE.match(a)
+        if m:
+            if m.group(1):
+                return int(m.group(1))
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                return int(argv[i + 1])
+    return None
+
+def collect_devtools(gpu_pids):
+    """Discover running DS/AI tools (Jupyter, TensorBoard, MLflow, W&B, …) from /proc
+    and tag any that are holding GPU VRAM. Returns [] where /proc is unavailable."""
+    out, seen = [], set()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        argv = [t for t in raw.decode("utf-8", "replace").split("\x00") if t]
+        low = " ".join(argv).lower()
+        for kind, label, dport, rx in _DEVTOOLS:
+            if not rx.search(low):
+                continue
+            port = _extract_port(argv) or dport
+            key = (kind, port)
+            if key in seen:
+                break
+            seen.add(key)
+            vram = gpu_pids.get(int(pid), 0)
+            out.append({"kind": kind, "label": label, "port": port, "pid": int(pid),
+                        "vram": round(vram), "idle_vram": bool(vram)})
+            break
+    return sorted(out, key=lambda r: r["label"])
+
 _ACTIVE_UTIL = 20    # GPU util % at/above which a sample counts as a "busy" session sample
 
 def _gpu_sessions(rows, interval, active_util=_ACTIVE_UTIL, max_gap=3, min_len=2, price=0.0):
@@ -3707,6 +3764,10 @@ def sample_once():
         training = collect_training(gpu_pids)
     except Exception:
         training = []
+    try:
+        devtools = collect_devtools(gpu_pids)
+    except Exception:
+        devtools = []
 
     host = read_host()
     ts = int(time.time())
@@ -3745,7 +3806,7 @@ def sample_once():
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
-                  model_meta=model_meta, serving=serving, training=training,
+                  model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
 
@@ -4044,6 +4105,7 @@ def api_sessions():
                    "cost": round(tot_energy * price, 2),
                    "active_hours": round(sum(x["duration"] for x in sessions) / 3600.0, 1)},
         "training": LATEST.get("training") or [],
+        "devtools": LATEST.get("devtools") or [],
     })
 
 # ── Container logs over SSE (issue #28) ───────────────────────────────────────
