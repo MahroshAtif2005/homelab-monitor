@@ -584,11 +584,19 @@ def _read_net_dev(path):
         pass
     return out
 
+# Per-container veth pairs and the dynamic docker-network bridges are internal
+# plumbing — on a busy host there are dozens, and their traffic is already shown
+# per-container in the Top-talkers table. Keep the host throughput view to real
+# uplinks (eth*, en*, wl*, bond*, docker0, tailscale*, wg* …).
+_HOST_NIC_SKIP = re.compile(r"^(veth|br-)")
+
 def _net_rows(ts, nm):
     """Rows for net_samples this tick: host NICs from /proc/net/dev plus one row
     per container (its netns totals, read via a representative PID) tagged '@name'."""
     rows = []
     for iface, (rx, tx) in _read_net_dev("/proc/net/dev").items():
+        if _HOST_NIC_SKIP.match(iface):
+            continue
         rows.append((ts, iface, rx, tx))
     try:
         for name, pid in container_pids(nm).items():
@@ -3671,7 +3679,7 @@ def api_network():
             s = aout.setdefault(b, [0, 0]); s[0] += do / dt; s[1] += 1
         return ain, aout
 
-    host_ifaces = sorted(i for i in series if not i.startswith("@"))
+    host_ifaces = sorted(i for i in series if not i.startswith("@") and not _HOST_NIC_SKIP.match(i))
     labels = sorted({(t // bk) * bk for i in host_ifaces for t, _, _ in series[i]})
     ifaces_out = []
     for iface in host_ifaces:

@@ -32,6 +32,23 @@ class TestNetwork(unittest.TestCase):
         self.assertEqual(oll["bytes_in"], 5000)
         self.assertEqual(oll["total"], 6000)
 
+    def test_veth_and_bridges_excluded_from_host_nics(self):
+        now = int(time.time())
+        t0, t1 = now - 40, now - 30
+        with app.LOCK:
+            app.DB.execute("DELETE FROM net_samples")
+            app.DB.executemany(
+                "INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
+                [(t0, "eth0", 0, 0), (t1, "eth0", 1000, 500),
+                 (t0, "veth1234", 0, 0), (t1, "veth1234", 9000, 9000),
+                 (t0, "br-abcdef", 0, 0), (t1, "br-abcdef", 9000, 9000)])
+            app.DB.commit()
+        j = app.app.test_client().get("/api/network?range=1h").get_json()
+        names = [x["iface"] for x in j["ifaces"]]
+        self.assertIn("eth0", names)
+        self.assertNotIn("veth1234", names)   # per-container plumbing filtered out
+        self.assertNotIn("br-abcdef", names)
+
     def test_counter_reset_is_ignored(self):
         now = int(time.time())
         with app.LOCK:
