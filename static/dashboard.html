@@ -781,10 +781,30 @@ a{color:var(--info)}
         </div>
       </div>
 
+      <div class="card-sub" style="margin-top:6px;font-weight:600">💰 Electricity cost</div>
+
+      <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
+      <div>
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Don't know your rates? Pick your country</div>
+        <select id="al_country" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+          <option value="">— Select to prefill a typical estimate —</option>
+        </select>
+        <div class="cap" id="al_tariff_src" style="margin-top:4px">Indicative estimate — always edit to match your own bill.</div>
+      </div>
+
+      <!-- Mode toggle: Single average / Day & Night -->
+      <div style="margin-top:4px">
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Tariff</div>
+        <div class="seg" role="tablist" style="display:inline-flex;border:1px solid var(--bd);border-radius:7px;overflow:hidden">
+          <button type="button" id="al_mode_single" class="rb on" style="border:0;border-radius:0">Single average</button>
+          <button type="button" id="al_mode_dual"   class="rb"    style="border:0;border-radius:0;border-left:1px solid var(--bd)">Day &amp; Night</button>
+        </div>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Electricity price (per kWh)</div>
-          <input type="number" id="al_kwh" min="0" step="0.01" placeholder="e.g. 0.30"
+          <div class="muted" id="al_kwh_label" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Price (per kWh)</div>
+          <input type="number" id="al_kwh" min="0" step="0.0001" placeholder="e.g. 0.30"
                  style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div>
@@ -793,7 +813,26 @@ a{color:var(--info)}
                  style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
       </div>
-      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Power &amp; cost</b> card on the Host tab from the GPU power history. Leave the price blank to hide the card.</p>
+
+      <!-- Night fields: shown only in Day & Night mode -->
+      <div id="al_night_wrap" hidden style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night price (per kWh)</div>
+          <input type="number" id="al_kwh_night" min="0" step="0.0001" placeholder="e.g. 0.15"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night starts</div>
+          <input type="time" id="al_night_start" value="22:00"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night ends</div>
+          <input type="time" id="al_night_end" value="06:00"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+      </div>
+      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Power &amp; cost</b> card on the System tab from the GPU power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the card.</p>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
         <button class="rb on" id="al_save">Save</button>
@@ -1357,14 +1396,19 @@ async function renderCost(){
   dis.hidden = true; body.hidden = false;
   const cur = j.currency || '$';
   const money = v => cur + (v || 0).toFixed(2);
+  const dual = j.tariff && j.tariff.mode === 'dual';
+  const sp = j.split || {};
+  // In dual mode each cost KPI gains a muted "day X · night Y" breakdown line.
+  const split2 = w => { const x = sp[w]; if(!dual || !x) return '';
+    return `<div class="s s2" style="opacity:.8">☀ ${money(x.day_cost)} · 🌙 ${money(x.night_cost)}</div>`; };
   document.getElementById('cost-kpis').innerHTML = [
     {v: j.current_w + ' W', l: 'Current draw'},
     {v: j.avg_24h_w + ' W', l: '24h average'},
     {v: j.avg_7d_w + ' W',  l: '7d average'},
-    {v: money(j.cost.today), l: 'Cost today',   s: (j.kwh.today||0).toFixed(2) + ' kWh'},
-    {v: money(j.cost.d7),    l: 'Last 7 days',   s: (j.kwh.d7||0).toFixed(1) + ' kWh'},
-    {v: money(j.cost.d30),   l: 'Last 30 days',  s: (j.kwh.d30||0).toFixed(1) + ' kWh'},
-  ].map(t => `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+    {v: money(j.cost.today), l: 'Cost today',   s: (j.kwh.today||0).toFixed(2) + ' kWh', x: split2('today')},
+    {v: money(j.cost.d7),    l: 'Last 7 days',   s: (j.kwh.d7||0).toFixed(1) + ' kWh',   x: split2('d7')},
+    {v: money(j.cost.d30),   l: 'Last 30 days',  s: (j.kwh.d30||0).toFixed(1) + ' kWh',  x: split2('d30')},
+  ].map(t => `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div>${t.x||''}</div>`).join('');
   const labels = fmtLabels(j.series.labels);
   mk('costchart', {type:'line', data:{labels, datasets:[
     {label:'Cumulative cost ('+cur+')', data:j.series.cost_cum, borderColor:'#3fb950',
@@ -1374,7 +1418,12 @@ async function renderCost(){
        y:{min:0, grid:{color:cv('--free')}, ticks:{color:cv('--mut'), callback:v=>cur+(+v).toFixed(2)}}},
       plugins:{legend:{labels:{color:cv('--tx'), boxWidth:12}}}}, plugins:[areaBg]});
   const cap = document.getElementById('cost_cap');
-  if(cap) cap.textContent = `At ${cur}${j.kwh_price}/kWh · integrated from GPU power samples · ${j.range} range`;
+  if(cap){
+    const t = j.tariff || {};
+    cap.textContent = dual
+      ? `At ${cur}${t.price_day}/kWh day · ${cur}${t.price_night}/kWh night ${t.night_start}–${t.night_end} · integrated from GPU power samples · ${j.range} range`
+      : `At ${cur}${j.kwh_price}/kWh · integrated from GPU power samples · ${j.range} range`;
+  }
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
@@ -1771,6 +1820,45 @@ function dualOpts(labels,ymax){const grid=cv('--free'),tick=cv('--mut'),leg=cv('
   plugins:{legend:{labels:{color:leg,boxWidth:12}}}};}
 function mk(id,cfg){ if(charts[id])charts[id].destroy(); charts[id]=new Chart(document.getElementById(id),cfg); }
 
+// ── Tariff helper (day/night cost + country prefill) ──────────────────────────
+let TARIFF_DUAL=false, TARIFFS=null;
+function setTariffMode(dual){
+  TARIFF_DUAL=!!dual;
+  const ns=document.getElementById('al_mode_single'), nd=document.getElementById('al_mode_dual');
+  const wrap=document.getElementById('al_night_wrap'), lbl=document.getElementById('al_kwh_label');
+  if(ns) ns.classList.toggle('on', !TARIFF_DUAL);
+  if(nd) nd.classList.toggle('on', TARIFF_DUAL);
+  if(wrap) wrap.hidden = !TARIFF_DUAL;
+  if(lbl) lbl.textContent = TARIFF_DUAL ? 'Day price (per kWh)' : 'Price (per kWh)';
+}
+// Load the bundled tariff dataset once and fill the country <select>.
+async function buildCountrySelect(){
+  const sel=document.getElementById('al_country'); if(!sel) return;
+  if(sel.dataset.built==='1') return;
+  if(!TARIFFS){ try{ TARIFFS=await(await fetch('/static/tariffs.json')).json(); }catch(e){ return; } }
+  const rows=(TARIFFS&&TARIFFS.tariffs)||[];
+  rows.slice().sort((a,b)=>a.country_name.localeCompare(b.country_name)).forEach(r=>{
+    const o=document.createElement('option');
+    o.value=r.country_code; o.textContent=`${r.country_name} (${r.currency})`;
+    sel.appendChild(o);
+  });
+  sel.dataset.built='1';
+}
+// On country pick, prefill the price fields from the dataset as an editable estimate.
+function applyCountryPrefill(){
+  const sel=document.getElementById('al_country'), cap=document.getElementById('al_tariff_src');
+  if(!sel||!TARIFFS) return;
+  const r=(TARIFFS.tariffs||[]).find(x=>x.country_code===sel.value);
+  if(!r){ if(cap) cap.textContent='Indicative estimate — always edit to match your own bill.'; return; }
+  document.getElementById('al_currency').value  = r.currency||'$';
+  document.getElementById('al_kwh').value       = r.price_day;
+  document.getElementById('al_kwh_night').value = r.price_night;
+  document.getElementById('al_night_start').value = r.night_start||'22:00';
+  document.getElementById('al_night_end').value   = r.night_end||'06:00';
+  setTariffMode(!!r.dual_common);
+  if(cap) cap.textContent = `Indicative — ${r.country_name}, ${r.source} (${r.year}). Edit to match your own bill.`;
+}
+
 // ── Alerts (settings) tab ─────────────────────────────────────────────────────
 let ALERTS_LOADED=false;
 async function loadAlerts(){
@@ -1784,6 +1872,11 @@ async function loadAlerts(){
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
   document.getElementById('al_currency').value    = s.currency||'$';
+  document.getElementById('al_kwh_night').value   = s.kwh_price_night||'';
+  document.getElementById('al_night_start').value = s.night_start||'22:00';
+  document.getElementById('al_night_end').value   = s.night_end||'06:00';
+  buildCountrySelect().then(()=>{ document.getElementById('al_country').value = s.country||''; });
+  setTariffMode(s.tariff_mode==='dual');
   // The webhook is a secret — server only returns whether one is set.
   const inp=document.getElementById('al_discord');
   if(!ALERTS_LOADED){ inp.value=''; inp.placeholder = s.discord_webhook_url_set
@@ -1816,6 +1909,11 @@ async function saveAlerts(){
     disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
     currency:         document.getElementById('al_currency').value.trim()||'$',
+    tariff_mode:      TARIFF_DUAL ? 'dual' : 'single',
+    kwh_price_night:  document.getElementById('al_kwh_night').value.trim(),
+    night_start:      document.getElementById('al_night_start').value || '22:00',
+    night_end:        document.getElementById('al_night_end').value   || '06:00',
+    country:          document.getElementById('al_country').value,
   };
   // Only send the webhook field if the user actually typed in it — empty means
   // "no change" when one is already saved (matching the placeholder hint),
@@ -3326,6 +3424,9 @@ async function maybeWhatsNew(curVersion){
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
+document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
+document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);
+document.getElementById('al_country').onchange    = applyCountryPrefill;
 document.getElementById('bk_download').onclick = downloadBackup;
 document.getElementById('bk_restore_btn').onclick = () => document.getElementById('bk_file').click();
 document.getElementById('bk_file').onchange = e => { const f=e.target.files&&e.target.files[0]; if(f) restoreBackup(f); };

@@ -2943,8 +2943,14 @@ SETTING_DEFAULTS = {
     "telegram_chat_id":    "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
-    "kwh_price":           "",         # electricity price per kWh; empty hides the cost card (#25)
+    "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
     "currency":            "$",        # symbol shown next to costs
+    # ── dual (day/night) tariff — revamp ──────────────────────────────────────
+    "tariff_mode":         "single",   # "single" | "dual"  (default = original flat behaviour)
+    "kwh_price_night":     "",         # night price per kWh; blank => silently behaves as single
+    "night_start":         "22:00",    # local time-of-day "HH:MM"; window may wrap midnight
+    "night_end":           "06:00",    # local time-of-day "HH:MM"
+    "country":             "",         # ISO-3166 alpha-2 — UI prefill memo only; backend never resolves it
 }
 SETTING_SECRETS = {"discord_webhook_url", "telegram_token"}   # never round-tripped to the UI in full
 
@@ -3523,18 +3529,63 @@ def api_data():
                     "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
+def _hhmm_to_min(s, default):
+    """'HH:MM' -> minutes since midnight [0,1440). Falls back to `default` on junk."""
+    try:
+        h, m = str(s).split(":")
+        v = int(h) * 60 + int(m)
+        return v if 0 <= v < 1440 else default
+    except Exception:
+        return default
+
+def _make_is_night(night_start, night_end):
+    """Predicate is_night(ts) in the SERVER's local time. Handles a window that
+    wraps midnight (start > end) and the degenerate start == end (no night)."""
+    ns = _hhmm_to_min(night_start, 22 * 60)
+    ne = _hhmm_to_min(night_end,    6 * 60)
+    if ns == ne:
+        return lambda ts: False                       # empty window => everything is day
+    if ns < ne:                                        # same-day window, e.g. 01:00–05:00
+        def is_night(ts):
+            lt = time.localtime(ts)
+            mins = lt.tm_hour * 60 + lt.tm_min
+            return ns <= mins < ne
+    else:                                              # wraps midnight, e.g. 22:00–06:00
+        def is_night(ts):
+            lt = time.localtime(ts)
+            mins = lt.tm_hour * 60 + lt.tm_min
+            return mins >= ns or mins < ne
+    return is_night
+
 @app.route("/api/cost")
 def api_cost():
-    """Power → kWh → money (#25). Integrates the GPU `power` samples we already
-    collect over the requested range. Each sample stands for INTERVAL seconds, so
-    energy(kWh) = sum(power_W) * INTERVAL / 3_600_000. Cost = energy * kwh_price.
-    The card stays hidden until a price is set, so `enabled` gates the UI."""
+    """Power → kWh → money (#25), now tariff-aware. Integrates the GPU `power`
+    samples we already collect; each sample stands for INTERVAL seconds, so
+    energy(kWh) = sum(power_W) * INTERVAL / 3_600_000.
+
+    Single mode (default): cost = energy * kwh_price — byte-for-byte the original
+    behaviour. Dual mode: each sample is billed at the night price inside the
+    (possibly midnight-wrapping) night window and the day price otherwise, split
+    per window. A blank night price silently degrades to single, so a user who
+    doesn't know their rates keeps the simple average. The card stays hidden until
+    a day price is set (`enabled`)."""
     s = get_settings()
-    try:
-        price = float(s.get("kwh_price") or 0)
-    except (TypeError, ValueError):
-        price = 0.0
+    def fnum(key):
+        v = (s.get(key) or "").strip()
+        if v == "":
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    day_price   = fnum("kwh_price") or 0.0
+    night_price = fnum("kwh_price_night")
+    mode = "dual" if (s.get("tariff_mode") == "dual" and night_price is not None
+                      and day_price > 0) else "single"
     currency = s.get("currency") or "$"
+    is_night = _make_is_night(s.get("night_start", "22:00"), s.get("night_end", "06:00"))
+
     rng = request.args.get("range", "7d")
     span = RANGES.get(rng, 604800)
     now = int(time.time())
@@ -3544,31 +3595,63 @@ def api_cost():
         cur = DB.cursor()
         def avg_w(since):
             return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
-        def kwh(since):
+        def total_kwh(since):
             tot = cur.execute("SELECT SUM(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0
             return tot * kwh_per_wsample
+        def split_kwh(since):
+            """One pass over (ts,power) >= since -> (day_kwh, night_kwh)."""
+            day_w = night_w = 0.0
+            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL", (since,)):
+                if is_night(ts):
+                    night_w += p
+                else:
+                    day_w += p
+            return day_w * kwh_per_wsample, night_w * kwh_per_wsample
+
         lt = time.localtime(now)
         midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
-        windows = {"today": kwh(midnight), "d7": kwh(now - 604800), "d30": kwh(now - 2592000)}
+        wins = {"today": midnight, "d7": now - 604800, "d30": now - 2592000}
+        kwh, cost, split = {}, {}, {}
+        for w, since in wins.items():
+            if mode == "dual":
+                dk, nk = split_kwh(since)
+            else:
+                dk, nk = total_kwh(since), 0.0       # single: one SUM, no per-row loop
+            dc, nc = dk * day_price, nk * (night_price or 0.0)
+            kwh[w]  = round(dk + nk, 3)
+            cost[w] = round(dc + nc, 2)
+            split[w] = {"day_kwh": round(dk, 3), "night_kwh": round(nk, 3),
+                        "day_cost": round(dc, 2), "night_cost": round(nc, 2)}
 
         # Cumulative-cost series across the selected range (mirrors api_data buckets).
         since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
         bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-        rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
-                           (bk, bk, since)).fetchall()
-    labels, cost_cum, running = [], [], 0.0
-    for b, p in rows:
-        running += (p or 0) * kwh_per_wsample * price
-        labels.append(int(b)); cost_cum.append(round(running, 4))
+        labels, cost_cum, running = [], [], 0.0
+        if mode == "dual":                            # stream + classify per bucket (one pass)
+            acc = {}
+            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
+                b = (ts // bk) * bk
+                price = night_price if is_night(ts) else day_price
+                acc[b] = acc.get(b, 0.0) + (p or 0) * kwh_per_wsample * price
+            for b in sorted(acc):
+                running += acc[b]
+                labels.append(int(b)); cost_cum.append(round(running, 4))
+        else:                                         # single: cheap SQL-bucketed path (unchanged)
+            rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
+                               (bk, bk, since)).fetchall()
+            for b, p in rows:
+                running += (p or 0) * kwh_per_wsample * day_price
+                labels.append(int(b)); cost_cum.append(round(running, 4))
 
-    fmt = lambda k: round(k * price, 2)
     return jsonify({
-        "enabled": price > 0, "kwh_price": price, "currency": currency,
+        "enabled": day_price > 0, "kwh_price": day_price, "currency": currency,
         "range": rng, "bucket_sec": bk,
         "current_w": round(LATEST.get("power") or 0),
         "avg_24h_w": avg_w(now - 86400), "avg_7d_w": avg_w(now - 604800),
-        "kwh": {k: round(v, 3) for k, v in windows.items()},
-        "cost": {k: fmt(v) for k, v in windows.items()},
+        "kwh": kwh, "cost": cost, "split": split,
+        "tariff": {"mode": mode, "price_day": day_price, "price_night": night_price,
+                   "night_start": s.get("night_start", "22:00"),
+                   "night_end": s.get("night_end", "06:00")},
         "series": {"labels": labels, "cost_cum": cost_cum},
     })
 

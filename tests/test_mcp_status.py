@@ -69,7 +69,10 @@ class TestBuildMcpStatus(unittest.TestCase):
     @patch.object(app, "_mcp_probe", return_value=True)
     @patch.object(app, "_mcp_enabled", return_value=True)
     @patch.object(app, "_mcp_port", return_value=9810)
-    @patch.object(ms, "read_status", return_value={"last_activity_ts": time.time() - 10})
+    # side_effect (not return_value) so time.time() is evaluated when the test
+    # runs, not once at import — otherwise a long suite ages the stamp past the
+    # "active" threshold and this flakes.
+    @patch.object(ms, "read_status", side_effect=lambda *a, **k: {"last_activity_ts": time.time() - 10})
     def test_recent_activity_is_active(self, *_mocks):
         out = app.build_mcp_status()
         self.assertEqual(out["state"], "active")
