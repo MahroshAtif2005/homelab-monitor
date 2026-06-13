@@ -113,6 +113,18 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .tg{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
 .cap{color:var(--mut);font-size:12px;margin-top:9px}.pill{font-size:11px;color:var(--mut);border:1px solid var(--bd);border-radius:5px;padding:1px 6px}
+/* Top-processes mini-htop (issue #32) */
+.topproc-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:560px){.topproc-grid{grid-template-columns:1fr}}
+.topproc-col h3{font-size:11px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin:0 0 6px}
+.topproc-row{display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:7px;font-size:12.5px}
+.topproc-row:nth-child(odd){background:rgba(127,127,127,.06)}
+.topproc-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.topproc-badge{flex:none;font-size:10px;color:var(--mut);border:1px solid var(--bd);border-radius:5px;padding:0 5px;line-height:1.5}
+.topproc-bar{flex:none;width:42px;height:6px;border-radius:4px;background:var(--bd);overflow:hidden}
+.topproc-bar>span{display:block;height:100%;border-radius:4px}
+.topproc-val{flex:none;font-variant-numeric:tabular-nums;font-weight:600;min-width:52px;text-align:right}
+.topproc-empty{color:var(--mut);font-size:12.5px;padding:6px 2px}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -837,6 +849,10 @@ a{color:var(--info)}
     <div id="disks" style="margin-top:14px"></div>
     <div id="sysinfo" style="margin-top:16px"></div>
   </div>
+  <div class="card" id="topproc-card" hidden><h2>🧠 Top processes</h2>
+    <div class="topproc-grid" id="topproc"></div>
+    <p class="cap" id="topproc_cap"></p>
+  </div>
   <div class="card"><h2>🧠 Memory map — containers &amp; services</h2>
     <div id="ramtree" class="treemap"></div>
     <p class="cap" id="ramtree_cap"></p>
@@ -1169,6 +1185,7 @@ function renderData(){
        <span>💾 ${esc(dk.mount)}</span><span class="muted">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
        <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
     renderSysInfo();
+    renderTopProcs();
   }
   // Network/Security read the active host block; re-render them on each data
   // refresh (and on first load) when one of them is the visible tab.
@@ -1176,6 +1193,39 @@ function renderData(){
   if(TAB==='security') renderSecurity();
 
   buildCharts();
+}
+
+// Mini-htop card (issue #32): top processes by CPU% and by RAM, from /api/health
+// (HH.processes), aggregated by command on the hub. Local hub only — /proc is
+// the hub's; remote hosts don't ship process tables yet, so the card hides.
+function renderTopProcs(){
+  const card = document.getElementById('topproc-card');
+  const box  = document.getElementById('topproc');
+  if(!card || !box) return;
+  const p = HH && HH.processes;
+  const cpu = (p && p.by_cpu) || [], mem = (p && p.by_mem) || [];
+  if(CURRENT_HOST !== 'local' || !p || (!cpu.length && !mem.length)){ card.hidden = true; return; }
+  card.hidden = false;
+  const ncpu = p.ncpu || 1;
+  const ramTotal = (HH.now && HH.now.host && HH.now.host.ram_total) || 0;
+  const tint = v => v>70 ? '#f85149' : v>35 ? '#d29922' : '#3fb950';
+  const row = (r, isCpu) => {
+    const pct   = isCpu ? Math.min(100, (r.cpu_pct||0)/ncpu)
+                        : (ramTotal ? Math.min(100, (r.mem_mb||0)*100/ramTotal) : 0);
+    const label = isCpu ? ((r.cpu_pct>=10?Math.round(r.cpu_pct):(r.cpu_pct||0).toFixed(1))+'%')
+                        : fmtMB(r.mem_mb||0);
+    const badge = r.count>1 ? `<span class="topproc-badge" title="${r.count} processes">×${r.count}</span>` : '';
+    return `<div class="topproc-row"><span class="topproc-name" title="${esc(r.name)}">${esc(r.name)}</span>${badge}`
+         + `<span class="topproc-bar"><span style="width:${pct}%;background:${tint(pct)}"></span></span>`
+         + `<span class="topproc-val">${label}</span></div>`;
+  };
+  const col = (title, arr, isCpu) =>
+    `<div class="topproc-col"><h3>${title}</h3>`
+    + (arr.length ? arr.map(r=>row(r,isCpu)).join('') : '<div class="topproc-empty">No data yet.</div>')
+    + '</div>';
+  box.innerHTML = col('By CPU', cpu, true) + col('By RAM', mem, false);
+  const cap = document.getElementById('topproc_cap');
+  if(cap) cap.textContent = `Grouped by command across ${ncpu} cores · CPU% is per-core · refreshes every 15s`;
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
@@ -1252,6 +1302,7 @@ function modelSpark(service,tot){
 function renderHealth(){
   if(!HH) return;
   document.getElementById('ver').textContent='v'+HH.version;
+  renderTopProcs();   // mini-htop card refreshes on every health poll (issue #32)
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};

@@ -166,7 +166,7 @@ LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "te
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
-HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
+HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
 WATCH_SERVICES = [s.strip() for s in os.environ.get("WATCH_SERVICES", "").split(",") if s.strip()]
 SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authored (vs vendor)
 _ct_cache = {"list": [], "at": 0}
@@ -1899,10 +1899,70 @@ def local_diagnostics():
         _diag(checks, "host_metrics", "Host metrics", "warn", "/proc not readable — host metrics limited")
     return {"checks": checks, "summary": _summarize(checks)}
 
+# ── Top processes (issue #32): a psutil-free /proc reader for the Host tab's
+# mini-htop. Aggregates by command so N workers of one exe collapse into a single
+# row, and derives CPU% from the jiffy delta between two health scans (~15s
+# apart) against /proc/stat's total. The first scan after boot has no delta, so
+# CPU% reads 0 until the next cycle. Builds on the /proc parsing seeded in #34
+# (thanks @samkelomncwabe63-svg).
+_PROC_PREV = {"total": None, "pids": {}}
+_PROC_PAGE_KB = (os.sysconf("SC_PAGE_SIZE") // 1024) if hasattr(os, "sysconf") else 4
+
+def _total_cpu_jiffies():
+    with open("/proc/stat") as f:
+        parts = f.readline().split()[1:]   # cpu  user nice system idle iowait …
+    return sum(int(x) for x in parts)
+
+def collect_top_processes(top_n=10):
+    """Top-N processes by CPU% and by RAM, aggregated by command. Reads /proc
+    directly (no psutil); returns None where /proc isn't available (e.g. a
+    Windows hub) so the card simply hides rather than erroring."""
+    try:
+        total = _total_cpu_jiffies()
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return None
+    prev_total = _PROC_PREV["total"]
+    prev_pids  = _PROC_PREV["pids"]
+    cur_pids, agg = {}, {}
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            rp = stat.rfind(")")                 # comm can hold spaces/parens
+            comm = stat[stat.find("(") + 1:rp]
+            rest = stat[rp + 2:].split()         # fields from 'state' onward
+            jiff = int(rest[11]) + int(rest[12]) # utime + stime
+            with open(f"/proc/{pid}/statm") as f:
+                rss_kb = int(f.read().split()[1]) * _PROC_PAGE_KB
+        except (OSError, ValueError, IndexError):
+            continue
+        cur_pids[pid] = jiff
+        a = agg.setdefault(comm, {"mem_kb": 0, "dcpu": 0, "count": 0})
+        a["mem_kb"] += rss_kb
+        a["count"]  += 1
+        if pid in prev_pids:
+            d = jiff - prev_pids[pid]
+            if d > 0:
+                a["dcpu"] += d
+    _PROC_PREV["total"] = total
+    _PROC_PREV["pids"]  = cur_pids
+    ncpu = os.cpu_count() or 1
+    span = (total - prev_total) if prev_total else 0
+    rows = []
+    for comm, a in agg.items():
+        cpu = (100.0 * a["dcpu"] / span * ncpu) if span > 0 else 0.0
+        rows.append({"name": comm, "cpu_pct": round(cpu, 1),
+                     "mem_mb": round(a["mem_kb"] / 1024), "count": a["count"]})
+    return {"by_cpu": sorted(rows, key=lambda r: -r["cpu_pct"])[:top_n],
+            "by_mem": sorted(rows, key=lambda r: -r["mem_mb"])[:top_n],
+            "ncpu": ncpu}
+
 def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
+    HEALTH["processes"] = collect_top_processes()
     collect_os_releases()
     HEALTH["at"]      = int(time.time())
 
@@ -3436,6 +3496,7 @@ def api_health():
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
+                    "processes": HEALTH["processes"],
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
                     "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
