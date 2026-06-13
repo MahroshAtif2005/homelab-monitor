@@ -635,6 +635,12 @@ a{color:var(--info)}
 
 <!-- ───────── Overview = All hosts (fleet table) ───────── -->
 <section data-tab="overview">
+  <div class="card" id="ai-band" hidden>
+    <h2 style="display:flex;align-items:center;gap:8px">🧠 AI workload <span class="muted" id="ai-band-sub" style="font-size:12px;font-weight:400;text-transform:none"></span></h2>
+    <div id="ai-band-throttle" class="ins crit" style="display:none;margin:8px 0"></div>
+    <div class="grid" id="ai-band-kpis"></div>
+    <p class="cap" id="ai-band-cap"></p>
+  </div>
   <div class="card" id="diagcard" hidden>
     <h2>🩺 Setup &amp; requirements</h2>
     <div class="fleet-meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
@@ -1226,7 +1232,7 @@ function showTab(id){
     if(CURRENT_HOST==='local') clearLocalOnlyNotice(id);
     else renderLocalOnlyNotice(id);
   }
-  if(id==='overview') renderFleet();
+  if(id==='overview'){ renderFleet(); renderAiBand(); }
   if(id==='host')     renderHostTab();
   if(id==='disks')    renderDisksTab();
   if(id==='network')  renderNetwork();
@@ -1304,6 +1310,7 @@ function renderData(){
 
   // AI models — expandable rows + per-model VRAM timeline (see renderModels)
   renderModels();
+  renderAiBand();   // overview hero refreshes when new /api/data lands (guarded to that tab)
 
   // Host KPIs + disks — only when local is the active host. Otherwise
   // renderHostTab() owns these panels with the remote's polled data.
@@ -1588,6 +1595,7 @@ function renderHealth(){
   if(!HH) return;
   document.getElementById('ver').textContent='v'+HH.version;
   renderTopProcs();   // mini-htop card refreshes on every health poll (issue #32)
+  renderAiBand();     // overview AI band uses fresh GPU/throttle data from /api/health
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};
@@ -2534,6 +2542,66 @@ function refreshCurrentTab(){
   if(TAB === 'security')  { renderSecurity(); return; }
   if(TAB === 'services')  { renderServicesTab(); return; }
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
+}
+
+// ── AI workload band (Overview hero) ─────────────────────────────────────────
+// At-a-glance cockpit strip for the hub's AI work: loaded models + VRAM committed,
+// GPU util + mem-bandwidth, live throughput (tok/s) and efficiency (tokens/Joule),
+// today's GPU energy cost, and a throttle banner. Sources already on the page:
+// HH.now.gpu(+extra), D.now.models / D.now.serving, plus a throttled /api/cost fetch.
+let AI_COST=null, AI_COST_AT=0;
+async function refreshAiCost(){
+  if(Date.now()-AI_COST_AT < 30000 && AI_COST!==null) return;
+  AI_COST_AT=Date.now();
+  try{ AI_COST = await (await fetch('/api/cost?range=24h')).json(); }catch(e){ AI_COST=null; }
+}
+function renderAiBand(){
+  const card=document.getElementById('ai-band'); if(!card) return;
+  if(TAB!=='overview') return;
+  const g=(HH&&HH.now&&HH.now.gpu)||{}, x=g.extra||{};
+  const models=(D&&D.now&&D.now.models)||[], serving=(D&&D.now&&D.now.serving)||[];
+  const loaded=models.filter(m=>m.vram!=null);
+  const hasGpu=!!g.available, hasAI=loaded.length>0 || serving.length>0;
+  if(!hasGpu && !hasAI){ card.hidden=true; return; }
+  card.hidden=false;
+  refreshAiCost().then(()=>paintAiBand(g,x,loaded,serving));
+  paintAiBand(g,x,loaded,serving);
+}
+function paintAiBand(g,x,loaded,serving){
+  const sub=document.getElementById('ai-band-sub');
+  if(sub) sub.textContent = serving.length ? '· live serving telemetry active' : (loaded.length?'· models resident':'');
+  // throttle banner mirrors the GPU tab so it's visible from the landing page
+  const tb=document.getElementById('ai-band-throttle');
+  if(tb){ if(x.throttled && (x.throttle||[]).length){ tb.style.display='flex';
+      tb.innerHTML=`<div class="ic">🔥</div><div><div class="t">GPU throttling — ${(x.throttle||[]).map(esc).join(', ')}</div><div class="d">Real throughput is below what the util % implies.</div></div>`;
+    } else tb.style.display='none'; }
+  const tokS=serving.reduce((a,s)=>a+(s.tok_per_s||0),0);
+  const running=serving.reduce((a,s)=>a+(s.running||0),0);
+  const waiting=serving.reduce((a,s)=>a+(s.waiting||0),0);
+  const vramCommit=loaded.reduce((a,m)=>a+(m.vram||0),0);
+  const memTot=g.mem_total||0, memUsed=g.mem_used||0, power=Math.round(g.power||0);
+  const cur=(AI_COST&&AI_COST.currency)||'$';
+  const tiles=[];
+  tiles.push({v:String(loaded.length), l:'Models loaded', s:vramCommit?fmtMB(vramCommit)+' VRAM':''});
+  if(g.available){
+    tiles.push({v:Math.round(g.util||0)+'%', l:'GPU util', s:(x.mem_util!=null?'mem-BW '+Math.round(x.mem_util)+'%':'')});
+    tiles.push({v:fmtMB(memUsed), l:'VRAM in use', s:memTot?fmtMB(Math.max(0,memTot-memUsed))+' free':''});
+    tiles.push({v:power+' W', l:'GPU power', s:x.power_limit?Math.round(power/x.power_limit*100)+'% of cap':''});
+  }
+  if(serving.length){
+    tiles.push({v:tokS?tokS.toFixed(0):'0', l:'Tokens / sec', s:(running||waiting)?`${running} running · ${waiting} queued`:'idle'});
+    if(tokS>0 && power>0) tiles.push({v:(tokS/power).toFixed(1), l:'Tokens / Joule', s:'efficiency @ '+power+' W'});
+  }
+  if(AI_COST && AI_COST.enabled){
+    tiles.push({v:cur+(AI_COST.cost&&AI_COST.cost.today!=null?AI_COST.cost.today.toFixed(2):'0.00'), l:'GPU cost today',
+                s:(AI_COST.kwh&&AI_COST.kwh.today!=null?AI_COST.kwh.today.toFixed(2)+' kWh':'')});
+  }
+  document.getElementById('ai-band-kpis').innerHTML = tiles.map(t=>
+    `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const cap=document.getElementById('ai-band-cap');
+  if(cap) cap.textContent = g.available
+    ? 'Live snapshot of this hub’s GPU + model servers. Tokens/sec and efficiency come from vLLM/TGI /metrics when present.'
+    : 'No GPU detected on the hub — showing model servers only.';
 }
 
 function renderFleet(){
