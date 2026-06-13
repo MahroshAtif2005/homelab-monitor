@@ -154,6 +154,12 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .gpucard-bar{flex:1;height:8px;border-radius:5px;background:var(--bd);overflow:hidden}
 .gpucard-bar>span{display:block;height:100%;border-radius:5px}
 .gpucard-val{flex:none;min-width:158px;text-align:right;font-variant-numeric:tabular-nums}
+/* GPU telemetry chips (mem-bw util, clocks, power headroom, p-state, mem temp) */
+.gpu-detail{display:flex;flex-wrap:wrap;gap:7px;margin-top:13px}
+.gpu-chip{display:flex;flex-direction:column;gap:1px;border:1px solid var(--bd);border-radius:8px;padding:6px 10px;background:rgba(127,127,127,.04);min-width:96px}
+.gpu-chip .v{font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.gpu-chip .l{font-size:10.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.02em}
+.gpu-chip.bad{border-color:var(--crit)} .gpu-chip.warn{border-color:var(--warn)}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -661,9 +667,11 @@ a{color:var(--info)}
 
 <!-- ───────── GPU ───────── -->
 <section data-tab="gpu" hidden>
+  <div id="gpu-throttle" class="ins crit" style="display:none;margin-bottom:14px"></div>
   <div class="cols">
     <div class="card"><h2>🎮 GPU right now</h2>
       <div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
+      <div id="gpu-detail" class="gpu-detail"></div>
       <div style="margin:14px 0 6px" class="muted" >VRAM allocation</div>
       <div class="bar" id="vrambar"></div>
       <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
@@ -1276,6 +1284,7 @@ function renderData(){
     {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:'VRAM in use',s:memPct+'% full'},
     {v:Math.round(n.util)+'%',l:'GPU util',s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  renderGpuDetail(n.gpu_extra||{}, n.power);
   renderPerGpu(n.gpus);
   const bar=document.getElementById('vrambar'); bar.innerHTML='';
   n.procs.forEach(p=>{const s=document.createElement('div');s.style.width=(p.mem/tot*100)+'%';s.style.background=colorFor(p.service);s.title=p.service+': '+fmtMB(p.mem);bar.appendChild(s);});
@@ -1319,6 +1328,40 @@ function renderData(){
 
 // Per-GPU cards (issue #95): one card per physical GPU with live util/VRAM/power/
 // temp. Shown only when there's more than one card — single-GPU rigs already see
+// GPU telemetry detail (issue: GPU truth-telling). Throttle banner + a chip row
+// of the things AI/DS engineers actually debug with: memory-bandwidth utilisation
+// (mem-bound vs compute-bound), core/mem clocks, power draw vs limit (headroom),
+// performance state, and memory-junction temp. Chips hide individually when the
+// driver/card reports the field as unsupported, so consumer GPUs degrade cleanly.
+function renderGpuDetail(x, powerNow){
+  const banner=document.getElementById('gpu-throttle');
+  if(banner){
+    if(x.throttled && (x.throttle||[]).length){
+      banner.style.display='flex';
+      banner.innerHTML=`<div class="ic">🔥</div><div><div class="t">GPU is throttling — running below rated clocks</div>`
+        +`<div class="d">Reason: <b>${(x.throttle||[]).map(esc).join(', ')}</b>. `
+        +`Your real throughput is lower than the util % suggests — check cooling or the power limit.</div></div>`;
+    } else { banner.style.display='none'; }
+  }
+  const box=document.getElementById('gpu-detail'); if(!box) return;
+  const chips=[];
+  if(x.mem_util!=null && (x.mem_util>0 || x.clk_sm>0)){
+    const mb = x.mem_util>=70 ? 'warn' : '';
+    chips.push({v:Math.round(x.mem_util)+'%', l:'Mem-BW util', c:mb,
+                t:'Memory-bandwidth utilisation. High here with low GPU util = memory-bound (the usual LLM-inference bottleneck).'});
+  }
+  if(x.clk_sm>0) chips.push({v:Math.round(x.clk_sm)+' MHz', l:'Core clock'});
+  if(x.clk_mem>0) chips.push({v:Math.round(x.clk_mem)+' MHz', l:'Mem clock'});
+  if(x.power_limit>0){
+    const head=Math.round((powerNow||0)/x.power_limit*100);
+    chips.push({v:`${Math.round(powerNow||0)} / ${Math.round(x.power_limit)} W`, l:`Power · ${head}% of cap`,
+                c: head>=98?'bad':head>=90?'warn':'', t:'Draw vs the card power limit. Pinned at ~100% = power-capped.'});
+  }
+  if(x.pstate) chips.push({v:x.pstate, l:'Perf state', t:'P0 = max performance; higher P-numbers = lower clocks.'});
+  if(x.temp_mem>0) chips.push({v:Math.round(x.temp_mem)+'°C', l:'Mem temp', c:x.temp_mem>=95?'bad':x.temp_mem>=85?'warn':''});
+  box.innerHTML = chips.map(c=>`<div class="gpu-chip ${c.c||''}"${c.t?` title="${esc(c.t)}"`:''}><div class="v">${esc(c.v)}</div><div class="l">${esc(c.l)}</div></div>`).join('');
+}
+
 // everything in the "GPU right now" panel, which pools across cards.
 function renderPerGpu(gpus){
   const card=document.getElementById('pergpu-card'), box=document.getElementById('pergpu');
@@ -1329,15 +1372,23 @@ function renderPerGpu(gpus){
   box.innerHTML = gpus.map(g=>{
     const memPct = g.mem_total? Math.round(g.mem_used/g.mem_total*100):0;
     const util = Math.round(g.util||0);
+    const memUtil = Math.round(g.mem_util||0);
+    const thr = (g.throttled && (g.throttle||[]).length)
+      ? `<span class="badge crit" title="Throttling: ${esc((g.throttle||[]).join(', '))}">🔥 throttling</span>` : '';
+    const clk = g.clk_sm>0 ? ` · ${Math.round(g.clk_sm)} MHz` : '';
+    const cap = g.power_limit>0 ? `/${Math.round(g.power_limit)} W cap` : '';
     return `<div class="gpucard">
-      <div class="gpucard-h"><b>GPU ${g.idx}</b> <span class="muted">${esc(g.name||'')}</span>
-        <span class="gpucard-stats">${util}% util · ${Math.round(g.power||0)} W · ${Math.round(g.temp||0)}°C</span></div>
+      <div class="gpucard-h"><b>GPU ${g.idx}</b> <span class="muted">${esc(g.name||'')}</span> ${thr}
+        <span class="gpucard-stats">${util}% util · ${Math.round(g.power||0)} W${cap}${clk} · ${Math.round(g.temp||0)}°C${g.pstate?' · '+esc(g.pstate):''}</span></div>
       <div class="gpucard-row"><span class="gpucard-lbl">VRAM</span>
         <span class="gpucard-bar"><span style="width:${memPct}%;background:${tint(memPct)}"></span></span>
         <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${memPct}%</span></div>
       <div class="gpucard-row"><span class="gpucard-lbl">Util</span>
         <span class="gpucard-bar"><span style="width:${Math.min(100,util)}%;background:${tint(util)}"></span></span>
         <span class="gpucard-val">${util}%</span></div>
+      <div class="gpucard-row"><span class="gpucard-lbl" title="Memory-bandwidth utilisation — high here with low Util = memory-bound">Mem-BW</span>
+        <span class="gpucard-bar"><span style="width:${Math.min(100,memUtil)}%;background:${tint(memUtil)}"></span></span>
+        <span class="gpucard-val">${memUtil}%</span></div>
     </div>`;
   }).join('');
 }

@@ -174,7 +174,7 @@ except sqlite3.OperationalError as e:
 _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": []}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {}}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -3189,6 +3189,89 @@ def _gpu_num(x):
     except ValueError:
         return 0.0
 
+# Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
+# utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for
+# headroom), performance state, memory-junction temp, and the *throttle reasons*
+# that explain a card quietly running below its rated clocks. All best-effort —
+# many consumer GPUs report "[N/A]" for some of these and very old drivers may not
+# know a field name at all — so enrichment runs in its own guard and never blocks
+# the core GPU sample. `clocks_throttle_reasons.active` is a hex bitmask; the
+# field prefix was renamed `clocks_event_reasons` in newer drivers, so we try both.
+_THROTTLE_BITS = [
+    (0x0000000000000004, "Power cap"),    # SW_POWER_CAP — hitting the power limit
+    (0x0000000000000008, "HW slowdown"),  # HW_SLOWDOWN (thermal/power/other, generic)
+    (0x0000000000000020, "SW thermal"),   # SW_THERMAL_SLOWDOWN
+    (0x0000000000000040, "HW thermal"),   # HW_THERMAL_SLOWDOWN — too hot
+    (0x0000000000000080, "Power brake"),  # HW_POWER_BRAKE_SLOWDOWN — external power brake
+]
+
+def _decode_throttle(hexstr):
+    """nvidia-smi throttle bitmask → list of *meaningful* reasons. Idle / app-clocks
+    / sync-boost / display bits are normal and intentionally ignored."""
+    try:
+        mask = int(str(hexstr).strip(), 16)
+    except (TypeError, ValueError):
+        return []
+    return [label for bit, label in _THROTTLE_BITS if mask & bit]
+
+def _enrich_gpus(gpus):
+    """Best-effort: attach mem_util/clocks/power_limit/pstate/temp_mem and throttle
+    reasons to each card dict in `gpus` (matched by index). Mutates in place."""
+    by_idx = {g["idx"]: g for g in gpus}
+    try:
+        rows = smi(["--query-gpu=index,utilization.memory,clocks.current.sm,clocks.current.memory,"
+                    "power.limit,temperature.memory,pstate", "--format=csv,noheader,nounits"]).splitlines()
+        for line in rows:
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 7:
+                continue
+            g = by_idx.get(int(_gpu_num(p[0])))
+            if not g:
+                continue
+            g["mem_util"]    = _gpu_num(p[1])
+            g["clk_sm"]      = _gpu_num(p[2])
+            g["clk_mem"]     = _gpu_num(p[3])
+            g["power_limit"] = _gpu_num(p[4])
+            g["temp_mem"]    = _gpu_num(p[5])
+            g["pstate"]      = p[6] if (p[6] and not p[6].startswith("[")) else ""
+    except Exception:
+        pass
+    for field in ("clocks_throttle_reasons.active", "clocks_event_reasons.active"):
+        try:
+            rows = smi(["--query-gpu=index," + field, "--format=csv,noheader,nounits"]).splitlines()
+        except Exception:
+            continue
+        ok = False
+        for line in rows:
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 2 or not p[1] or p[1].startswith("["):
+                continue
+            g = by_idx.get(int(_gpu_num(p[0])))
+            if g is None:
+                continue
+            g["throttle"] = _decode_throttle(p[1])
+            g["throttled"] = bool(g["throttle"])
+            ok = True
+        if ok:
+            break
+
+def _gpu_extra(gpus):
+    """Aggregate the enriched per-card telemetry into one representative dict for the
+    always-visible 'GPU right now' panel (single-GPU rigs never see the per-card cards)."""
+    if not gpus:
+        return {}
+    g0 = gpus[0]
+    return {
+        "mem_util":  round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus)),
+        "clk_sm":    round(g0.get("clk_sm", 0)),
+        "clk_mem":   round(g0.get("clk_mem", 0)),
+        "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
+        "pstate":    g0.get("pstate", ""),
+        "temp_mem":  round(max((g.get("temp_mem", 0) for g in gpus), default=0)),
+        "throttled": any(g.get("throttled") for g in gpus),
+        "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
+    }
+
 def service_for_pid(pid, nm):
     try:
         with open(f"/proc/{pid}/cgroup") as f:
@@ -3286,6 +3369,7 @@ def sample_once():
     # while temperature & friends keep refreshing.
     util = mem_used = mem_total = power = temp = 0.0
     gpus = []
+    gpu_extra = {}
     procs = {}
     gpu_avail = False
     try:
@@ -3314,6 +3398,8 @@ def sample_once():
         power     = sum(g["power"] for g in gpus)
         util      = round(sum(g["util"] for g in gpus) / len(gpus))
         temp      = max(g["temp"] for g in gpus)
+        _enrich_gpus(gpus)                 # mem-bw util, clocks, power limit, throttle reasons (best-effort)
+        gpu_extra = _gpu_extra(gpus)
         for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
             if line.strip():
                 pid, mem = (p.strip() for p in line.split(","))
@@ -3382,7 +3468,7 @@ def sample_once():
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
-                  gpu_avail=gpu_avail, gpus=gpus,
+                  gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
@@ -3910,7 +3996,8 @@ def api_health():
                    "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
                    "power": LATEST["power"], "temp": LATEST["temp"],
                    "available": bool(gpu_avail),
-                   "gpus": LATEST.get("gpus") or []},   # per-card detail (issue #95)
+                   "gpus": LATEST.get("gpus") or [],    # per-card detail (issue #95)
+                   "extra": LATEST.get("gpu_extra") or {}},  # mem-bw/clocks/throttle (telemetry)
            "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
