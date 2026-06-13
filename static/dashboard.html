@@ -924,6 +924,15 @@ a{color:var(--info)}
 
 <!-- ───────── Network ───────── -->
 <section data-tab="network" hidden>
+  <div class="card" id="netio-card" hidden><h2>📶 Throughput</h2>
+    <div class="grid" id="netio-kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
+    <div class="chartbox short" style="margin-top:12px"><canvas id="netchart"></canvas></div>
+    <p class="cap" id="netio_cap"></p>
+  </div>
+  <div class="card" id="nettalkers-card" hidden><h2>📊 Top talkers — containers</h2>
+    <table><thead><tr><th>Container</th><th>In</th><th>Out</th><th>Total</th></tr></thead><tbody id="nettalkers"></tbody></table>
+    <p class="cap">Total bytes each container moved over the selected range (its own network namespace).</p>
+  </div>
   <div class="card"><h2>🌐 Network</h2>
     <div id="netbody"></div>
   </div>
@@ -2743,7 +2752,49 @@ function fmtIO(b){
   return (n>=10||i===0?Math.round(n):n.toFixed(1))+u[i];
 }
 
+// Network I/O panel (issue #30): host NIC throughput + per-container top talkers
+// from /api/network. Local hub only — built from the hub's /proc/net/dev and the
+// containers' own netns counters.
+function fmtRate(bps){
+  if(bps>=1048576) return (bps/1048576).toFixed(1)+' MB/s';
+  if(bps>=1024)    return (bps/1024).toFixed(0)+' KB/s';
+  return Math.round(bps)+' B/s';
+}
+async function renderNetIO(){
+  const card=document.getElementById('netio-card'), tcard=document.getElementById('nettalkers-card');
+  if(!card||!tcard) return;
+  if(CURRENT_HOST!=='local'){ card.hidden=true; tcard.hidden=true; return; }
+  let j; try{ j=await(await fetch('/api/network?range='+encodeURIComponent(R))).json(); }
+  catch(e){ card.hidden=true; tcard.hidden=true; return; }
+  const nics=j.ifaces||[];
+  card.hidden = nics.length===0;
+  if(nics.length){
+    document.getElementById('netio-kpis').innerHTML=[
+      {v:fmtRate(j.current.in),  l:'Download now'},
+      {v:fmtRate(j.current.out), l:'Upload now'},
+      {v:nics.length,            l:'Active NICs'},
+    ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
+    const labels=fmtLabels(j.labels), palette=['#4dabf7','#3fb950','#e3b341','#a371f7','#f783ac','#ff922b'];
+    const ds=[];
+    nics.forEach((nic,i)=>{
+      const c=palette[i%palette.length];
+      ds.push({label:nic.iface+' ↓',data:nic.in.map(v=>v/1024),borderColor:c,backgroundColor:c+'30',fill:true,pointRadius:0,tension:.25});
+      ds.push({label:nic.iface+' ↑',data:nic.out.map(v=>-v/1024),borderColor:c,borderDash:[4,3],backgroundColor:c+'18',fill:true,pointRadius:0,tension:.25});
+    });
+    mk('netchart',{type:'line',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10,autoSkip:true}},
+       y:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>fmtRate(Math.abs(v)*1024)}}},
+      plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmtRate(Math.abs(c.parsed.y)*1024)}}}},plugins:[areaBg]});
+    document.getElementById('netio_cap').textContent='↓ download / ↑ upload per NIC (upload mirrored below the axis) · '+j.range+' range';
+  }
+  const talk=j.talkers||[];
+  tcard.hidden = talk.length===0;
+  document.getElementById('nettalkers').innerHTML = talk.map(t=>
+    `<tr><td>${esc(t.name)}</td><td>${fmtBytes(t.bytes_in)}</td><td>${fmtBytes(t.bytes_out)}</td><td><b>${fmtBytes(t.total)}</b></td></tr>`).join('');
+}
 async function renderNetwork(){
+  renderNetIO();
   if(CURRENT_HOST !== 'local') await loadHostData(CURRENT_HOST);
   const el = document.getElementById('netbody');
   if(!el) return;

@@ -91,6 +91,7 @@ _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB wr
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+CREATE TABLE IF NOT EXISTS net_samples(ts INTEGER, iface TEXT, bytes_in INTEGER, bytes_out INTEGER);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS hosts(
   last_check_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_gpus_ts   ON gpu_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_net_ts    ON net_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
@@ -560,6 +562,44 @@ def _cpu_temp_c():
     except Exception:
         pass
     return round(best, 1) if best is not None else None
+
+# ── Network I/O sampling (issue #30) ──────────────────────────────────────────
+def _read_net_dev(path):
+    """Parse a /proc/net/dev file → {iface: (rx_bytes, tx_bytes)}, excluding lo
+    and virtual veth/bridge churn we don't want as 'host' NICs. Cumulative byte
+    counters; rates are derived on read so a missed sample never invents traffic."""
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f.read().splitlines()[2:]:   # skip the two header rows
+                if ":" not in line:
+                    continue
+                iface, rest = line.split(":", 1)
+                iface = iface.strip()
+                cols = rest.split()
+                if iface == "lo" or len(cols) < 9:
+                    continue
+                out[iface] = (int(cols[0]), int(cols[8]))   # rx_bytes, tx_bytes
+    except Exception:
+        pass
+    return out
+
+def _net_rows(ts, nm):
+    """Rows for net_samples this tick: host NICs from /proc/net/dev plus one row
+    per container (its netns totals, read via a representative PID) tagged '@name'."""
+    rows = []
+    for iface, (rx, tx) in _read_net_dev("/proc/net/dev").items():
+        rows.append((ts, iface, rx, tx))
+    try:
+        for name, pid in container_pids(nm).items():
+            dev = _read_net_dev(f"/proc/{pid}/net/dev")
+            if not dev:
+                continue
+            rx = sum(v[0] for v in dev.values()); tx = sum(v[1] for v in dev.values())
+            rows.append((ts, "@" + name, rx, tx))
+    except Exception:
+        pass
+    return rows
 
 def read_host():
     h = {"cores": os.cpu_count() or 1}
@@ -3321,8 +3361,10 @@ def sample_once():
                 DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
                            "VALUES(?,?,?,?,?,?,?)",
                            (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
+        DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
+                       _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
@@ -3597,6 +3639,63 @@ def api_container_logs(name):
                     mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                              "Connection": "keep-alive"})
+
+@app.route("/api/network")
+def api_network():
+    """Host NIC throughput + per-container top talkers over a range (#30). Rates
+    are derived from the cumulative byte counters in net_samples, so a missed
+    sample or a counter reset (reboot) never invents a spike."""
+    rng = request.args.get("range", "1h")
+    span = RANGES.get(rng, 3600)
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        since = (cur.execute("SELECT MIN(ts) FROM net_samples").fetchone()[0] or now) if span is None else now - span
+        rows = cur.execute("SELECT ts,iface,bytes_in,bytes_out FROM net_samples WHERE ts>=? ORDER BY iface,ts",
+                           (since,)).fetchall()
+    bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+    series = {}
+    for ts, iface, bi, bo in rows:
+        series.setdefault(iface, []).append((ts, bi, bo))
+
+    def rate_buckets(samples):
+        """Consecutive cumulative samples → {bucket: [sum_rate, count]} for in/out."""
+        ain, aout = {}, {}
+        for (t0, i0, o0), (t1, i1, o1) in zip(samples, samples[1:]):
+            dt = t1 - t0
+            di, do = i1 - i0, o1 - o0
+            if dt <= 0 or di < 0 or do < 0:        # gap or counter reset → skip
+                continue
+            b = (t1 // bk) * bk
+            s = ain.setdefault(b, [0, 0]);  s[0] += di / dt; s[1] += 1
+            s = aout.setdefault(b, [0, 0]); s[0] += do / dt; s[1] += 1
+        return ain, aout
+
+    host_ifaces = sorted(i for i in series if not i.startswith("@"))
+    labels = sorted({(t // bk) * bk for i in host_ifaces for t, _, _ in series[i]})
+    ifaces_out = []
+    for iface in host_ifaces:
+        ain, aout = rate_buckets(series[iface])
+        ins  = [round(ain[b][0] / ain[b][1]) if ain.get(b, [0, 0])[1] else 0 for b in labels]
+        outs = [round(aout[b][0] / aout[b][1]) if aout.get(b, [0, 0])[1] else 0 for b in labels]
+        if any(ins) or any(outs):
+            ifaces_out.append({"iface": iface, "in": ins, "out": outs})
+
+    talkers = []
+    for iface, samples in series.items():
+        if not iface.startswith("@") or len(samples) < 2:
+            continue
+        di = max(0, samples[-1][1] - samples[0][1])
+        do = max(0, samples[-1][2] - samples[0][2])
+        if di + do > 0:
+            talkers.append({"name": iface[1:], "bytes_in": di, "bytes_out": do, "total": di + do})
+    talkers.sort(key=lambda x: -x["total"])
+
+    cur_in  = sum(s["in"][-1] for s in ifaces_out) if labels else 0
+    cur_out = sum(s["out"][-1] for s in ifaces_out) if labels else 0
+    return jsonify({"range": rng, "bucket_sec": bk, "labels": labels,
+                    "ifaces": ifaces_out, "talkers": talkers[:10],
+                    "current": {"in": cur_in, "out": cur_out}})
 
 @app.route("/healthz")
 def healthz():
