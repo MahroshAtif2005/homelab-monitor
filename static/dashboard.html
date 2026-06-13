@@ -160,6 +160,12 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .gpu-chip .v{font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums}
 .gpu-chip .l{font-size:10.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.02em}
 .gpu-chip.bad{border-color:var(--crit)} .gpu-chip.warn{border-color:var(--warn)}
+.gpu-chip.live{border-color:var(--ok)}
+/* model metadata badges + live-serving row on the AI Models tab */
+.mchip{display:inline-block;font-size:10.5px;padding:1px 6px;margin-left:4px;border:1px solid var(--bd);border-radius:9px;color:var(--mut);vertical-align:middle;font-variant-numeric:tabular-nums}
+.mchip.cap{border-color:#58a6ff66;color:#58a6ff}
+.serving-row{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:10px 0 2px}
+.serving-tag{font-size:10.5px;color:var(--ok);border:1px solid var(--ok);border-radius:9px;padding:2px 8px;opacity:.8}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -1503,7 +1509,7 @@ function renderModels(){
     const models=bySvc[svc].slice().sort((a,b)=>(b.peak||0)-(a.peak||0));
     const rows=models.map(m=>{
       const pW=m.peak!=null?Math.max(2,m.peak/maxV*100):0, aW=m.avg!=null?Math.max(2,m.avg/maxV*100):0;
-      return `<tr><td><span class="dot" style="background:${c}"></span>${esc(m.model)}</td>
+      return `<tr><td><span class="dot" style="background:${c}"></span>${esc(m.model)}${modelMetaChips(m.model)}</td>
         <td>${m.vram!=null?'<span class="badge ok">Loaded</span>':'<span class="badge info">Idle</span>'}</td>
         <td>${m.vram!=null?fmtMB(m.vram):'—'}</td>
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
@@ -1515,11 +1521,41 @@ function renderModels(){
       <h2 style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--tx)">
         <span class="dot" style="background:${c}"></span>${esc(svc)}
         <span class="pill" style="margin-left:auto;text-transform:none">resident ${ss.present!=null?ss.present+'%':'—'} · server peak ${ss.peak!=null?fmtMB(ss.peak):'—'}</span></h2>
+      ${servingFor(svc)}
       ${modelSpark(svc,tot)}
       ${callersFor(svc)}
       <table style="margin-top:12px"><thead><tr><th>Model</th><th>Status</th><th>Now</th><th>Peak</th><th>Avg</th><th>Peak·Avg</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }).join('');
+}
+// Model metadata badges (Ollama /api/show): param size, quantization, context
+// length, capabilities. From D.now.model_meta, keyed by model name. Cheap polish
+// that makes the panel feel authoritative — hidden when metadata isn't available.
+function fmtCtx(n){ n=+n||0; return n>=1000 ? (n%1000?(n/1000).toFixed(1):n/1000)+'K' : (n||''); }
+function modelMetaChips(model){
+  const m=((D.now&&D.now.model_meta)||{})[model]; if(!m) return '';
+  const out=[];
+  if(m.param_size) out.push(`<span class="mchip" title="Parameters">${esc(m.param_size)}</span>`);
+  if(m.quant)      out.push(`<span class="mchip" title="Quantization">${esc(m.quant)}</span>`);
+  if(m.ctx)        out.push(`<span class="mchip" title="Context length">${esc(fmtCtx(m.ctx))} ctx</span>`);
+  (m.caps||[]).forEach(c=>{ if(c==='vision'||c==='tools'||c==='embedding')
+    out.push(`<span class="mchip cap" title="Capability">${c==='vision'?'👁 vision':c==='tools'?'🛠 tools':'🔢 embed'}</span>`); });
+  return out.length ? ' '+out.join('') : '';
+}
+// Live serving telemetry (vLLM / TGI /metrics): requests running/waiting, KV-cache
+// fill, tokens/sec, TTFT. From D.now.serving. Only shown for servers that expose it.
+function servingFor(svc){
+  const s=((D.now&&D.now.serving)||[]).find(x=>x.service===svc); if(!s) return '';
+  const chips=[];
+  if(s.tok_per_s!=null)   chips.push({v:s.tok_per_s+' tok/s', l:'Throughput', hot:s.tok_per_s>0});
+  if(s.running!=null)     chips.push({v:s.running, l:'Running', hot:s.running>0});
+  if(s.waiting!=null)     chips.push({v:s.waiting, l:'Queued', warn:s.waiting>0});
+  if(s.kv_cache_pct!=null)chips.push({v:s.kv_cache_pct+'%', l:'KV-cache', warn:s.kv_cache_pct>=90});
+  if(s.ttft_avg_s!=null)  chips.push({v:(s.ttft_avg_s*1000).toFixed(0)+' ms', l:'Avg TTFT'});
+  if(!chips.length) return '';
+  return `<div class="serving-row">${chips.map(c=>
+    `<div class="gpu-chip ${c.warn?'warn':''}${c.hot?' live':''}"><div class="v">${esc(String(c.v))}</div><div class="l">${esc(c.l)}</div></div>`
+  ).join('')}<span class="serving-tag" title="Scraped live from the server's Prometheus /metrics endpoint">live serving</span></div>`;
 }
 // Caller attribution — "who is driving this server", from connection-seconds (D.callers).
 function callersFor(svc){
