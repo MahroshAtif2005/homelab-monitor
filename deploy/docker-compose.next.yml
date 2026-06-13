@@ -1,0 +1,77 @@
+# Preview / staging deployment of the `next` channel on the hub (ardi).
+#
+# Runs the moving `sikamikaniko123/homelab-monitor:next` image — published by
+# .github/workflows/ci.yml on every push to the `next` branch — as a SECOND
+# instance alongside the released prod one, on its own ports + data dir so the
+# two never collide:
+#
+#   prod : dashboard :9800  · MCP :9810  · ./data        (docker-compose.yml)
+#   next : dashboard :9801  · MCP :9811  · ./data-next    (this file)
+#
+# Watchtower (scoped to opted-in containers via the enable label) polls Docker
+# Hub and redeploys this container whenever the `:next` digest changes — so the
+# loop is: merge to `next` → CI publishes `:next` → Watchtower auto-redeploys
+# here. Hands-off.
+#
+# Bring it up on ardi:
+#   docker compose -f docker-compose.next.yml up -d
+# Then open http://ardi:9801 (MCP at http://ardi:9811/mcp).
+#
+# Rollback / pin: set the image to an immutable tag, e.g.
+#   image: sikamikaniko123/homelab-monitor:next-<shortsha>
+# and remove the watchtower enable label so it stops auto-updating.
+#
+# If ardi ALREADY runs a global Watchtower, delete the `watchtower` service
+# below and just keep the enable label on homelab-monitor-next.
+
+services:
+  homelab-monitor-next:
+    image: sikamikaniko123/homelab-monitor:next
+    container_name: homelab-monitor-next
+    pull_policy: always          # `up -d` always grabs the freshest :next
+    restart: unless-stopped
+    # Same host-privileged shape as the prod compose so the preview behaves
+    # identically (host networking, GPU PID->container mapping, ptrace ports).
+    network_mode: host
+    pid: host
+    cgroup: host
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor=unconfined
+    labels:
+      # Opt THIS container in to the label-scoped Watchtower below. Prod and
+      # everything else on ardi stay untouched because they lack this label.
+      com.centurylinklabs.watchtower.enable: "true"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
+      PORT: "9801"               # preview dashboard  -> http://ardi:9801
+      MCP_PORT: "9811"           # preview MCP server -> http://ardi:9811/mcp
+      SAMPLE_INTERVAL: "10"
+      RETENTION_DAYS: "180"
+      PRESSURE_FREE_MB: "2048"
+      HOST_ROOT: "/rootfs"
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # container health, names & model APIs
+      - /:/rootfs:ro                                    # read-only host fs for disk usage
+      - ./data-next:/data                               # separate history DB — never touches prod's ./data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+
+  # Label-scoped Watchtower: only manages containers carrying the enable label
+  # above, so it redeploys the preview instance and nothing else. Drop this
+  # service if ardi already has a global Watchtower.
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower-next
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >-
+      --label-enable
+      --cleanup
+      --interval 60
+    # --label-enable : only touch containers with com.centurylinklabs.watchtower.enable=true
+    # --cleanup      : delete the superseded image after a successful pull
+    # --interval 60  : poll Docker Hub every 60s
