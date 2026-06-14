@@ -1,4 +1,4 @@
-# 🛰️ HomeLab Monitor
+# 📡 HomeLab Monitor
 
 [![GitHub stars](https://img.shields.io/github/stars/SikamikanikoBG/homelab-monitor?style=social)](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)
 [![version](https://img.shields.io/github/v/release/SikamikanikoBG/homelab-monitor?color=blue&label=version)](CHANGELOG.md)
