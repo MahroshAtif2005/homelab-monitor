@@ -105,14 +105,19 @@ CREATE TABLE IF NOT EXISTS hosts(
   last_check_at INTEGER,
   last_check_json TEXT
 );
+CREATE TABLE IF NOT EXISTS power_proc(ts INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, watts REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_gpus_ts   ON gpu_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_net_ts    ON net_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
+CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
+CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """
-_SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL")
+# cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
+_SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
+                      "cpu_power REAL", "dram_power REAL")
 # Per-host adaptive poll-timeout state (issue #99); added to the hosts table.
 _HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
 
@@ -826,6 +831,105 @@ def _rt_dt(*paths):
         except Exception:
             continue
     return None
+
+# ── CPU package power via RAPL (Intel/AMD powercap) ───────────────────────────
+# Cumulative energy counters under /sys/class/powercap/intel-rapl turn into watts
+# via per-interval deltas. AMD (Zen/EPYC) registers under the SAME intel-rapl path.
+# Best-effort: a missing tree / permission-denied energy_uj / frozen counter degrades
+# that domain to "unavailable" (None) rather than raising or inventing a zero.
+# MEASURED, package only (cores+uncore+iGPU+memctl) — NOT wall power.
+RAPL_ROOT = os.environ.get("RAPL_ROOT", "/sys/class/powercap")
+_RAPL_PREV = {}   # domain-path -> (energy_uj, monotonic_ts)
+
+def _rapl_read_uj(path):
+    """(energy_uj, max_range_uj) for a powercap domain dir, or None on any failure."""
+    try:
+        with open(os.path.join(path, "energy_uj")) as f:
+            e = int(f.read().strip())
+        with open(os.path.join(path, "max_energy_range_uj")) as f:
+            m = int(f.read().strip())
+        return e, m
+    except (OSError, ValueError):
+        return None
+
+def _rapl_domains():
+    """Discover powercap domains -> {path: name}. package-*/psys are top-level;
+    core/dram/uncore are nested intel-rapl:*:* dirs. The mmio mirror is skipped."""
+    out = {}
+    try:
+        for top in sorted(glob.glob(os.path.join(RAPL_ROOT, "intel-rapl:*"))):
+            if os.path.basename(top).startswith("intel-rapl-mmio"):
+                continue
+            nm = _rt(os.path.join(top, "name"))
+            if nm:
+                out[top] = nm.strip()
+            for sub in sorted(glob.glob(os.path.join(top, "intel-rapl:*:*"))):
+                snm = _rt(os.path.join(sub, "name"))
+                if snm:
+                    out[sub] = snm.strip()
+    except Exception:
+        pass
+    return out
+
+def read_rapl_power():
+    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_w (psys if present
+    else sum of package-* domains), dram_w (sum of dram sub-domains), domains{name:w}.
+    First call after start seeds state and returns {} (no prior delta)."""
+    domains = _rapl_domains()
+    if not domains:
+        return {}
+    now = time.monotonic()
+    per = {}
+    for path, name in domains.items():
+        rd = _rapl_read_uj(path)
+        if rd is None:
+            continue
+        e, mrange = rd
+        prev = _RAPL_PREV.get(path)
+        _RAPL_PREV[path] = (e, now)
+        if not prev:
+            continue
+        e0, t0 = prev
+        dt = now - t0
+        if dt <= 0:
+            continue
+        de = e - e0
+        if de < 0:                      # uint wraparound: add one modulus
+            de += mrange
+        per[name] = max(0.0, de / 1e6 / dt)
+    if not per:
+        return {}
+    psys = per.get("psys")
+    pkgs = [w for n, w in per.items() if n.startswith("package")]
+    cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
+    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
+    dram_w = round(sum(drams), 1) if drams else None
+    return {"cpu_w": (round(cpu_w, 1) if cpu_w is not None else None),
+            "dram_w": dram_w, "domains": {n: round(w, 1) for n, w in per.items()}}
+
+_POWER_PROC_TOPN  = 8
+_POWER_PROC_MIN_W = 0.5
+
+def _attribute_power_rows(ts, gpu_power, procs_vram, cpu_power, top_cpu):
+    """Build (ts, kind, name, watts) rows for power_proc: GPU watts split across
+    services by VRAM share, CPU package watts split across commands by CPU-time
+    share (each entity's watts sums into the measured machine total)."""
+    rows = []
+    vtot = sum(procs_vram.values())
+    if gpu_power and vtot > 0:
+        for svc, mb in procs_vram.items():
+            w = gpu_power * (mb / vtot)
+            if w >= _POWER_PROC_MIN_W:
+                rows.append((ts, "gpu", svc, round(w, 2)))
+    if cpu_power and top_cpu:
+        ncpu = top_cpu.get("ncpu") or 1
+        ranked = sorted(top_cpu.get("by_cpu", []), key=lambda r: -r.get("cpu_pct", 0))[:_POWER_PROC_TOPN]
+        for r in ranked:
+            frac = (r.get("cpu_pct", 0) / 100.0) / ncpu
+            w = cpu_power * frac
+            if w >= _POWER_PROC_MIN_W:
+                rows.append((ts, "cpu", r["name"], round(w, 2)))
+    return rows
 
 _INV_CACHE, _INV_LOCK = {}, threading.Lock()
 def _cached_inv(key, ttl, fn):
@@ -2329,7 +2433,9 @@ def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
-    HEALTH["processes"] = collect_top_processes()
+    # Top-processes is refreshed by sample_once (10s cadence) and cached on
+    # HEALTH["processes"] — calling it here too would double-step the _PROC_PREV
+    # jiffy deltas across two cadences and corrupt both. Reuse the cached value.
     collect_os_releases()
     HEALTH["at"]      = int(time.time())
 
@@ -3261,6 +3367,7 @@ SETTING_DEFAULTS = {
     "night_start":         "22:00",    # local time-of-day "HH:MM"; window may wrap midnight
     "night_end":           "06:00",    # local time-of-day "HH:MM"
     "country":             "",         # ISO-3166 alpha-2 — UI prefill memo only; backend never resolves it
+    "system_idle_watts":   "",         # optional operator baseline (mainboard/fans/PSU/disks); blank => "other" omitted, never a guessed wall figure
 }
 SETTING_SECRETS = {"discord_webhook_url", "telegram_token"}   # never round-tripped to the UI in full
 
@@ -3770,6 +3877,20 @@ def sample_once():
         devtools = []
 
     host = read_host()
+    # Measured CPU/DRAM watts (RAPL) + per-process CPU breakdown — both best-effort.
+    # Call collect_top_processes ONCE here (the sampler cadence) and cache it so the
+    # Top-processes card + the cost attribution share one delta (health_scan reuses it).
+    rapl = {}
+    try:
+        rapl = read_rapl_power()
+    except Exception:
+        rapl = {}
+    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    try:
+        top_cpu = collect_top_processes()
+    except Exception:
+        top_cpu = None
+    HEALTH["processes"] = top_cpu
     ts = int(time.time())
     if _DB_MAINTENANCE:
         return
@@ -3778,12 +3899,15 @@ def sample_once():
         # history charts skip the gap via AVG() instead of showing a fake 0 dip;
         # the host columns are always real.
         gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
-        DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp)"
-                   " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)"
+                   " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (ts, *gcols, host["cpu"], host["ram_used"],
-                    host["ram_total"], host["load1"], host["ctemp"]))
+                    host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power))
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
+        pp_rows = _attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
+        if pp_rows:
+            DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
         for svc, mdl, vram in models:
             if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
                 DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
@@ -3799,10 +3923,11 @@ def sample_once():
         DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
                        _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
         DB.commit()
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
+                  cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
@@ -4075,6 +4200,158 @@ def api_cost():
                    "night_start": s.get("night_start", "22:00"),
                    "night_end": s.get("night_end", "06:00")},
         "series": {"labels": labels, "cost_cum": cost_cum},
+    })
+
+# ── Costs page: per-machine → per-component → per-process (with drilldown) ─────
+_TOTAL_W_EXPR = "COALESCE(power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0)"
+
+def _cost_ctx():
+    """Shared tariff context for the costs endpoints. Returns a dict with the
+    day/night prices, mode, currency and an is_night(ts) predicate."""
+    s = get_settings()
+    def fnum(key):
+        v = (s.get(key) or "").strip()
+        try:
+            return float(v) if v != "" else None
+        except ValueError:
+            return None
+    day = fnum("kwh_price") or 0.0
+    night = fnum("kwh_price_night")
+    mode = "dual" if (s.get("tariff_mode") == "dual" and night is not None and day > 0) else "single"
+    return {"day": day, "night": night, "mode": mode, "currency": s.get("currency") or "$",
+            "is_night": _make_is_night(s.get("night_start", "22:00"), s.get("night_end", "06:00")),
+            "night_start": s.get("night_start", "22:00"), "night_end": s.get("night_end", "06:00"),
+            "idle_w": fnum("system_idle_watts")}
+
+def _price_at(ctx, ts):
+    return ctx["night"] if (ctx["mode"] == "dual" and ctx["is_night"](ts)) else ctx["day"]
+
+@app.route("/api/costs")
+def api_costs():
+    """Richer power+cost view for the Costs page: per-machine totals, a stacked
+    component breakdown (GPU measured, CPU/DRAM measured via RAPL, optional operator
+    'other' baseline) and a ranked per-process/service/model breakdown — all over a
+    selectable range and tariff-aware. /api/cost (GPU-only) is left untouched."""
+    ctx = _cost_ctx()
+    cur = ctx["currency"]
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    with LOCK:
+        c = DB.cursor()
+        since = (c.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        comp = c.execute(f"SELECT (ts/?)*? b, AVG(power), AVG(cpu_power), AVG(dram_power) "
+                         f"FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
+        # component energy + cost over the range (tariff-aware, one streaming pass)
+        comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
+        cost_range = 0.0
+        nticks = 0
+        for ts, p, cp, dp in c.execute("SELECT ts,power,cpu_power,dram_power FROM samples WHERE ts>=?", (since,)):
+            nticks += 1
+            price = _price_at(ctx, ts)
+            tot = (p or 0) + (cp or 0) + (dp or 0)
+            comp_kwh["gpu"] += (p or 0) * kwh_per
+            comp_kwh["cpu"] += (cp or 0) * kwh_per
+            comp_kwh["dram"] += (dp or 0) * kwh_per
+            cost_range += tot * kwh_per * price
+        # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
+        def win_cost(start):
+            tot = 0.0
+            for ts, w in c.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=?", (start,)):
+                tot += (w or 0) * kwh_per * _price_at(ctx, ts)
+            return round(tot, 2)
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
+        # ranked per-entity breakdown from power_proc (tariff-aware day/night split)
+        acc = {}
+        for ts, kind, name, watts in c.execute("SELECT ts,kind,name,watts FROM power_proc WHERE ts>=?", (since,)):
+            a = acc.setdefault((kind, name), [0.0, 0.0])
+            if ctx["mode"] == "dual" and ctx["is_night"](ts):
+                a[1] += watts
+            else:
+                a[0] += watts
+    hours = max(1e-9, (now - since) / 3600.0)
+    idle_w = ctx["idle_w"]
+    labels = [int(r[0]) for r in comp]
+    series = {"labels": labels,
+              "gpu":  [round(r[1] or 0) for r in comp],
+              "cpu":  [round(r[2] or 0) if r[2] is not None else 0 for r in comp],
+              "dram": [round(r[3] or 0) if r[3] is not None else 0 for r in comp]}
+    have_cpu = any(r[2] is not None for r in comp)
+    have_dram = any(r[3] is not None for r in comp)
+    if not have_cpu: series.pop("cpu")
+    if not have_dram: series.pop("dram")
+    if idle_w:
+        series["other"] = [round(idle_w)] * len(labels)
+    breakdown = []
+    for (kind, name), (dayw, nightw) in acc.items():
+        energy = (dayw + nightw) * kwh_per
+        cost = (dayw * ctx["day"] + nightw * (ctx["night"] if ctx["night"] is not None else ctx["day"])) * kwh_per
+        breakdown.append({"kind": kind, "name": name, "energy_kwh": round(energy, 4),
+                          "cost": round(cost, 4), "avg_w": round((dayw + nightw) / max(1, nticks))})
+    breakdown.sort(key=lambda x: -x["energy_kwh"])
+    now_gpu = round(LATEST.get("power") or 0)
+    now_cpu = round(LATEST.get("cpu_power") or 0) if LATEST.get("cpu_power") is not None else None
+    now_dram = round(LATEST.get("dram_power") or 0) if LATEST.get("dram_power") is not None else None
+    now_total = now_gpu + (now_cpu or 0) + (now_dram or 0) + (round(idle_w) if idle_w else 0)
+    measured = ["gpu"] + (["cpu"] if have_cpu else []) + (["dram"] if have_dram else [])
+    machine = {"name": "local",
+               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram, "total": now_total},
+               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items() if (k != "dram" or have_dram)},
+               "cost": cost_win, "cost_range": round(cost_range, 2),
+               "measured": measured, "estimated": (["other"] if idle_w else [])}
+    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"][k] for k in machine["energy_kwh"] if k != "total"), 3)
+    return jsonify({
+        "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": cur,
+        "rapl_available": have_cpu,
+        "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
+                   "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
+        "machines": [machine], "components": series, "breakdown": breakdown[:40],
+    })
+
+@app.route("/api/costs/entity")
+def api_costs_entity():
+    """Per-entity drilldown: a power + cumulative-cost time-series for one
+    process/service/model over the range, plus what resources it used."""
+    ctx = _cost_ctx()
+    name = request.args.get("name", "")
+    kind = request.args.get("kind", "")
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    with LOCK:
+        c = DB.cursor()
+        since = (c.execute("SELECT MIN(ts) FROM power_proc").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        q = "SELECT (ts/?)*? b, AVG(watts), MAX(watts) FROM power_proc WHERE name=? AND ts>=?"
+        args = [bk, bk, name, since]
+        if kind:
+            q += " AND kind=?"; args.append(kind)
+        q += " GROUP BY b ORDER BY b"
+        rows = c.execute(q, args).fetchall()
+        # cumulative tariff-aware cost needs per-bucket price; classify by bucket start ts
+        vram_peak = None
+        if kind != "cpu":
+            vram_peak = c.execute("SELECT MAX(mem) FROM proc WHERE service=? AND ts>=?", (name, since)).fetchone()[0]
+    labels, watts, cost_cum, running, energy = [], [], [], 0.0, 0.0
+    peak = 0.0
+    for b, avgw, maxw in rows:
+        labels.append(int(b)); watts.append(round(avgw or 0))
+        peak = max(peak, maxw or 0)
+        e = (avgw or 0) * kwh_per * (bk / INTERVAL)   # energy this bucket (avg W over bk seconds)
+        energy += e
+        running += e * _price_at(ctx, int(b))
+        cost_cum.append(round(running, 4))
+    return jsonify({
+        "name": name, "kind": kind, "range": rng, "bucket_sec": bk, "currency": ctx["currency"],
+        "energy_kwh": round(energy, 4), "cost": round(running, 2),
+        "avg_w": round(sum(watts) / len(watts)) if watts else 0, "peak_w": round(peak),
+        "series": {"labels": labels, "watts": watts, "cost_cum": cost_cum},
+        "resources": {"gpu_vram_peak_mb": round(vram_peak) if vram_peak else None},
     })
 
 @app.route("/api/sessions")
