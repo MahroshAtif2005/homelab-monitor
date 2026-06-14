@@ -973,8 +973,25 @@ a{color:var(--info)}
     <div id="set-pane-integrations" hidden>
       <p class="cap" style="margin:2px 0 12px">Push run/session data from Jupyter, Colab or Kaggle (or mirror MLflow) — each run comes back priced with the real GPU energy it used. Writes need the API key; the dashboard reads are open on your LAN.</p>
 
-      <div class="card-sub" style="font-weight:600">🔑 API key</div>
-      <div id="intg_key_state" class="cap" style="margin:4px 0">…</div>
+      <div class="card-sub" style="font-weight:600">🔑 API keys</div>
+      <div class="cap" style="margin:4px 0">Create one key per machine/notebook so you can track and revoke each independently. Keys are stored hashed — the secret is shown once, at creation.</div>
+
+      <!-- Create a key -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:8px 0">
+        <div style="flex:2;min-width:160px">
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">New key name</div>
+          <input type="text" id="intg_key_name" placeholder="e.g. colab-laptop" autocomplete="off"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div style="flex:1;min-width:120px">
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Expires in</div>
+          <select id="intg_key_exp" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+            <option value="">Never</option><option value="7">7 days</option><option value="30">30 days</option>
+            <option value="90">90 days</option><option value="365">1 year</option>
+          </select>
+        </div>
+        <button class="rb on" id="intg_key_create">Create key</button>
+      </div>
       <div id="intg_key_reveal" hidden style="margin:6px 0">
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Your new key — copy it now, it won't be shown again</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -982,8 +999,13 @@ a{color:var(--info)}
           <button class="rb" id="intg_key_copy">Copy</button>
         </div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <button class="rb" id="intg_key_gen">Generate / regenerate key</button>
+
+      <!-- Existing keys -->
+      <table style="margin-top:6px"><thead><tr>
+        <th>Name</th><th>Key</th><th>Created</th><th>Expires</th><th>Last used</th><th>Runs</th><th></th>
+      </tr></thead><tbody id="intg_key_tbody"></tbody></table>
+
+      <div style="margin-top:8px">
         <a class="rb" id="intg_client_dl" href="/static/homelab_run.py" download>Download client (homelab_run.py)</a>
       </div>
       <div class="cap" style="margin-top:8px">Quickstart in a notebook:</div>
@@ -3970,22 +3992,42 @@ function setSettingsPane(name){
 }
 document.querySelectorAll('#set-subtabs .subtab').forEach(b=>b.onclick=()=>setSettingsPane(b.dataset.sp));
 
-// ── Integrations settings (API key + MLflow) ──────────────────────────────────
+// ── Integrations settings (API keys + MLflow) ─────────────────────────────────
 async function loadIntegrations(){
-  let j; try{ j=await(await fetch('/api/integration/key')).json(); }catch(e){ return; }
-  const st=document.getElementById('intg_key_state');
-  if(st) st.innerHTML = j.has_key
-    ? 'A key is set: <code>'+esc(j.key_masked)+'</code>. Regenerating invalidates the old one.'
-    : 'No API key yet — generate one so notebooks can push runs (ingest is disabled until you do).';
+  let j; try{ j=await(await fetch('/api/integration/keys')).json(); }catch(e){ return; }
+  const tb=document.getElementById('intg_key_tbody'); if(tb){
+    const keys=j.keys||[];
+    const fmtD=ts=>ts?new Date(ts*1000).toLocaleDateString([], {year:'numeric',month:'short',day:'numeric'}):'—';
+    const fmtU=ts=>ts?fmtMcpAge(Math.max(0,Math.floor(Date.now()/1000)-ts)):'never';
+    tb.innerHTML = keys.length ? keys.map(k=>`<tr>
+      <td><b>${esc(k.name)}</b></td>
+      <td><code>${esc(k.prefix)}…</code></td>
+      <td>${fmtD(k.created_at)}</td>
+      <td>${k.expires_at?(k.expired?'<span class="badge crit">expired</span> ':'')+fmtD(k.expires_at):'never'}</td>
+      <td>${fmtU(k.last_used_at)}</td>
+      <td>${k.runs}</td>
+      <td><button class="rb" data-del="${esc(k.id)}" style="padding:3px 9px">Revoke</button></td></tr>`).join('')
+      : '<tr><td colspan="7" class="muted">No keys yet — create one above so notebooks can push runs (ingest is disabled until you do).</td></tr>';
+    tb.querySelectorAll('button[data-del]').forEach(b=>b.onclick=()=>deleteKey(b.dataset.del));
+  }
   const snip=document.getElementById('intg_snippet');
   if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)`;
 }
+async function deleteKey(id){
+  if(!confirm('Revoke this API key? Any client still using it will stop working immediately.')) return;
+  try{ await fetch('/api/integration/keys/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){ intgStatus('err','Failed: '+e); return; }
+  intgStatus('ok','Key revoked.'); loadIntegrations();
+}
 function intgStatus(level,msg){ const el=document.getElementById('intg_status'); if(el){ el.textContent=msg; el.style.color = level==='ok'?'var(--ok)':level==='err'?'var(--crit)':'var(--mut)'; } }
 (function wireIntegrations(){
-  const gen=document.getElementById('intg_key_gen');
-  if(gen) gen.onclick=async()=>{ if(!confirm('Generate a new API key? Any client using the old key will stop working.')) return;
-    let j; try{ j=await(await fetch('/api/integration/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({regenerate:true})})).json(); }catch(e){ intgStatus('err','Failed: '+e); return; }
-    if(j.key){ document.getElementById('intg_key_reveal').hidden=false; document.getElementById('intg_key_value').value=j.key; loadIntegrations(); intgStatus('ok','New key generated — copy it now.'); } };
+  const cr=document.getElementById('intg_key_create');
+  if(cr) cr.onclick=async()=>{
+    const name=(document.getElementById('intg_key_name').value||'').trim();
+    const exp=document.getElementById('intg_key_exp').value;
+    let j; try{ j=await(await fetch('/api/integration/keys',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:name||'key', expires_in_days: exp?parseInt(exp,10):null})})).json(); }catch(e){ intgStatus('err','Failed: '+e); return; }
+    if(j.key){ document.getElementById('intg_key_reveal').hidden=false; document.getElementById('intg_key_value').value=j.key;
+      document.getElementById('intg_key_name').value=''; loadIntegrations(); intgStatus('ok','Key created — copy it now, it won’t be shown again.'); } };
   const cp=document.getElementById('intg_key_copy');
   if(cp) cp.onclick=()=>{ const v=document.getElementById('intg_key_value').value; copyText(v); intgStatus('ok','Key copied to clipboard.'); };
   const si=document.getElementById('al_save_intg');

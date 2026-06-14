@@ -18,14 +18,14 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, Response, send_file, after_this_request
+from flask import Flask, request, jsonify, Response, send_file, after_this_request, g
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS runs(
   notes TEXT, heartbeat_at INTEGER, ext_id TEXT, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS run_metrics(run_id TEXT NOT NULL, ts INTEGER NOT NULL,
   step INTEGER DEFAULT 0, key TEXT NOT NULL, value REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS api_keys(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
 CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
 CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
@@ -130,6 +133,8 @@ _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL
                       "cpu_power REAL", "dram_power REAL")
 # Per-host adaptive poll-timeout state (issue #99); added to the hosts table.
 _HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
+# Which API key pushed a run (for per-key attribution); added to the runs table.
+_RUNS_MIGRATIONS = ("key_id TEXT",)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -159,6 +164,26 @@ def _apply_schema_migrations(conn):
             conn.execute(f"ALTER TABLE hosts ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    for col in _RUNS_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    # Migrate a legacy single instance-wide api_key (the previous design) into the
+    # api_keys table as a named key, then clear the setting — so existing clients
+    # keep working under the new multi-key model.
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()
+        legacy = (row[0] if row else "") or ""
+        if legacy:
+            h = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+            if not conn.execute("SELECT 1 FROM api_keys WHERE key_hash=?", (h,)).fetchone():
+                conn.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
+                             "VALUES(?,?,?,?,?,?,?)",
+                             (uuid.uuid4().hex, "default (migrated)", h, legacy[:12], int(time.time()), None, None))
+            conn.execute("UPDATE settings SET value='' WHERE key='api_key'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 def reopen_db():
@@ -4417,19 +4442,46 @@ MAX_RUN_FIELD, MAX_RUN_JSON, MAX_METRICS_REQ = 4096, 64 * 1024, 1000
 RUN_SOURCES = {"jupyter", "colab", "kaggle", "mlflow", "api", "cli"}
 RUN_STATUS  = {"running", "finished", "failed", "killed"}
 
-def _get_api_key():
-    return get_settings().get("api_key") or ""
+# Multiple named API keys, each optionally with an expiry, stored HASHED (sha256 —
+# the plaintext is shown once at creation and never persisted). Runs are attributed
+# to the key that pushed them, so you can track per-key usage and revoke individually.
+def _hash_key(k):
+    return hashlib.sha256(k.encode("utf-8")).hexdigest()
 
-def _gen_api_key():
+def _create_api_key(name, expires_in_days=None):
+    """Mint a key: persist its hash + metadata, return (id, plaintext). The plaintext
+    is the only time it's available."""
     key = "hlm_" + secrets.token_urlsafe(32)
-    save_settings({"api_key": key})
-    return key
+    kid, now = uuid.uuid4().hex, int(time.time())
+    exp = (now + int(expires_in_days) * 86400) if expires_in_days else None
+    with LOCK:
+        DB.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
+                   "VALUES(?,?,?,?,?,?,?)", (kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None))
+        DB.commit()
+    return kid, key
 
-def _key_ok(presented):
-    real = _get_api_key()
-    if not real or not presented:
-        return False                       # fail-closed: no key set => ingest disabled
-    return hmac.compare_digest(presented, real)
+def _gen_api_key(name="default", expires_in_days=None):
+    """Back-compat shim (used by tests): mint a key and return the plaintext."""
+    return _create_api_key(name, expires_in_days)[1]
+
+def _key_lookup(presented):
+    """Return the id of a live (non-expired) key matching `presented`, else None,
+    and stamp its last_used_at. Stored value is a hash, so the lookup never exposes
+    a usable secret. Fail-closed: no keys => all ingest rejected."""
+    if not presented:
+        return None
+    now = int(time.time())
+    with LOCK:
+        row = DB.execute("SELECT id, expires_at FROM api_keys WHERE key_hash=?",
+                         (_hash_key(presented),)).fetchone()
+        if not row:
+            return None
+        kid, exp = row
+        if exp and exp < now:
+            return None
+        DB.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, kid))
+        DB.commit()
+    return kid
 
 def _presented_key():
     auth = request.headers.get("Authorization", "")
@@ -4440,8 +4492,10 @@ def _presented_key():
 def require_api_key(fn):
     @wraps(fn)
     def wrapper(*a, **kw):
-        if not _key_ok(_presented_key()):
-            return jsonify({"ok": False, "error": "missing or invalid API key"}), 401
+        kid = _key_lookup(_presented_key())
+        if not kid:
+            return jsonify({"ok": False, "error": "missing, invalid, or expired API key"}), 401
+        g.api_key_id = kid
         return fn(*a, **kw)
     return wrapper
 
@@ -4479,15 +4533,41 @@ def _run_cost_window(cur, started, ended, ctx):
         cost += p * kwh_per * (_price_at(ctx, ts) or 0.0)
     return round(e_kwh, 4), round(cost, 4), (round(sum_p / n) if n else 0), round(peak_u)
 
-@app.route("/api/integration/key", methods=["GET", "POST"])
-def api_integration_key():
-    """GET -> {has_key, key_masked}. POST {regenerate:true} -> {key} (revealed once)."""
+@app.route("/api/integration/keys", methods=["GET", "POST"])
+def api_keys_route():
+    """GET -> {keys:[{id,name,prefix,created_at,expires_at,last_used_at,expired,runs}]}
+    (never the secret). POST {name, expires_in_days?} -> {id, key} (key revealed once)."""
     if request.method == "POST":
-        if (request.get_json(silent=True) or {}).get("regenerate"):
-            return jsonify({"ok": True, "key": _gen_api_key()})
-        return jsonify({"ok": False, "error": "nothing to do"}), 400
-    k = _get_api_key()
-    return jsonify({"has_key": bool(k), "key_masked": (k[:8] + "…" + k[-4:]) if k else ""})
+        body = request.get_json(silent=True) or {}
+        days = body.get("expires_in_days")
+        try:
+            days = int(days) if days not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            days = None
+        if days is not None and days <= 0:
+            days = None
+        kid, key = _create_api_key(_clip(body.get("name") or "key", 128), days)
+        return jsonify({"ok": True, "id": kid, "key": key})
+    now = int(time.time())
+    with LOCK:
+        rows = DB.execute("SELECT id,name,prefix,created_at,expires_at,last_used_at "
+                          "FROM api_keys ORDER BY created_at DESC").fetchall()
+        counts = dict(DB.execute("SELECT key_id, COUNT(*) FROM runs WHERE key_id IS NOT NULL "
+                                 "GROUP BY key_id").fetchall())
+    keys = [{"id": kid, "name": name, "prefix": prefix, "created_at": created,
+             "expires_at": exp, "last_used_at": used, "expired": bool(exp and exp < now),
+             "runs": counts.get(kid, 0)}
+            for (kid, name, prefix, created, exp, used) in rows]
+    return jsonify({"keys": keys, "has_key": bool(keys)})
+
+@app.route("/api/integration/keys/<kid>", methods=["DELETE"])
+def api_keys_delete(kid):
+    """Revoke (remove) a key. Runs it pushed are kept; they just lose live attribution."""
+    with LOCK:
+        cur = DB.execute("DELETE FROM api_keys WHERE id=?", (kid,))
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown key"}), 404))
 
 @app.route("/api/runs", methods=["POST"])
 @require_api_key
@@ -4505,11 +4585,12 @@ def api_runs_create():
         return jsonify({"ok": False, "error": str(e)}), 413
     with LOCK:
         DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,notes,"
-                   "heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                   "heartbeat_at,ext_id,created_at,key_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(id) DO NOTHING",
                    (rid, _clip(body.get("name") or "run", MAX_RUN_FIELD), source, "running",
                     int(body.get("started_at") or now), None, _clip(body.get("host"), 256),
-                    params, tags, _clip(body.get("notes"), MAX_RUN_FIELD), now, None, now))
+                    params, tags, _clip(body.get("notes"), MAX_RUN_FIELD), now, None, now,
+                    getattr(g, "api_key_id", None)))
         DB.commit()
     return jsonify({"ok": True, "id": rid})
 
@@ -4584,17 +4665,21 @@ def api_runs_list():
     ctx = _cost_ctx()
     rng = request.args.get("range", "7d"); span = RANGES.get(rng, 604800)
     status = request.args.get("status")
+    key_filter = request.args.get("key")
     now = int(time.time()); since = 0 if span is None else now - span
-    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
+    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes,key_id "
          "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
     args = [since, now]
     if status in RUN_STATUS:
         q += "AND status=? "; args.append(status)
+    if key_filter:
+        q += "AND key_id=? "; args.append(key_filter)
     q += "ORDER BY started_at DESC LIMIT 500"
     out = []
     with LOCK:
         cur = DB.cursor()
-        for (rid, name, source, st, started, ended, host, params, tags, notes) in cur.execute(q, args).fetchall():
+        key_names = dict(cur.execute("SELECT id, name FROM api_keys").fetchall())
+        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in cur.execute(q, args).fetchall():
             e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, ended, ctx)
             kv = {}
             # latest value per key = the last-logged row (max rowid), robust even when
@@ -4606,6 +4691,7 @@ def api_runs_list():
             out.append({"id": rid, "name": name, "source": source, "status": st,
                         "started_at": started, "ended_at": ended, "duration": (ended or now) - started,
                         "host": host, "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes,
+                        "key_id": key_id, "key_name": key_names.get(key_id),
                         "metrics_latest": kv, "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u})
     return jsonify({"range": rng, "currency": ctx["currency"], "tariff_mode": ctx["mode"], "runs": out})
 
