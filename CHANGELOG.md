@@ -8,7 +8,7 @@ release notes.
 ## [Unreleased] — `next`
 
 ### Changed
-- **New logo — radar, not satellite.** Swapped the satellite glyph for a radar mark everywhere it appeared: the dashboard UI (sidebar brand, page header, "All hosts" heading) and favicon, the README/CONTRIBUTING, and the docs site (logo + favicon, now unified with the app mark). Radar fits what the tool actually does — sweep the fleet, surface the blips — and reads cleaner at small sizes. Same amber-on-dark palette.
+- **New logo — radar, not satellite.** A single designed radar mark (one SVG, amber-on-dark) is now *the* logo everywhere: the dashboard sidebar brand and page header, the favicon, the README title, and the docs-site logo + favicon — all the same artwork instead of a generic line-icon. Radar fits what the tool actually does — sweep the fleet, surface the blips. The old satellite glyph is gone; section headings keep their own topical icons (e.g. "All hosts" now uses the monitor glyph) so the radar reads only as the brand.
 
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
