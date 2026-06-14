@@ -629,6 +629,9 @@ h2 .hic{ margin-right:8px } .card-sub .hic{ margin-right:6px; width:1em; height:
 .src-dot{ display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; margin-right:3px }
 /* Run-status colour-codes its icon + label together (icon inherits currentColor). */
 .st-running{ color:var(--info) } .st-finished{ color:var(--ok) } .st-failed{ color:var(--warn) } .st-killed{ color:var(--crit) }
+/* Per-row delete affordance on the Runs table — quiet until hovered, then red. */
+.run-del{ background:none; border:0; color:var(--mut); cursor:pointer; padding:3px 6px; border-radius:6px; opacity:.5; transition:opacity .15s, color .15s }
+.run-del:hover{ opacity:1; color:var(--crit) } .run-del .sic{ width:15px; height:15px; display:block }
 /* ── Layout + de-noise pass ──────────────────────────────────────────────────
    Quiet the secondary voice, unify the pill/badge shape, and align the sub-tab
    icons — calmer rhythm without touching the data density users came for. */
@@ -812,7 +815,7 @@ h2 .hic{ opacity:.9 }
       <a href="#" id="runs-settings-link">Settings → Integrations</a>.
     </div>
     <table id="runs-table" style="margin-top:6px"><thead><tr>
-      <th>Run</th><th>Source</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th><th>Energy</th><th>Cost</th>
+      <th>Run</th><th>Source</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th><th>Energy</th><th>Cost</th><th></th>
     </tr></thead><tbody id="runs-tbody"></tbody></table>
   </div>
   <div class="card" id="run-detail" hidden>
@@ -1407,6 +1410,7 @@ const SIC={
   streamlit:'<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
   ray:'<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
   link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  trash:'<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/>',
 };
 function sic(name){ const d=SIC[name]; return d ? `<svg class="sic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>` : ''; }
 const RUN_SRC_COLOR={jupyter:'#a371f7',colab:'#f59e0b',kaggle:'#4dabf7',mlflow:'#3fb950',api:'#8b949e',cli:'#6b7280'};
@@ -3028,11 +3032,25 @@ async function renderRuns(){
       <td>${fmtTs(r.started_at)}</td><td>${fmtDur(r.duration)}</td>
       <td class="muted">${mets||'—'}</td>
       <td>${(r.energy_kwh||0).toFixed(3)} kWh</td>
-      <td>${cur}${(r.cost||0).toFixed(2)}</td></tr>`;
+      <td>${cur}${(r.cost||0).toFixed(2)}</td>
+      <td><button class="run-del" data-del="${esc(r.id)}" title="Delete this run">${sic('trash')}</button></td></tr>`;
   }).join('');
+  tb.querySelectorAll('button[data-del]').forEach(btn=>btn.onclick=e=>{ e.stopPropagation(); deleteRun(btn.dataset.del, runs.find(x=>x.id===btn.dataset.del)); });
   tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openRun(tr.dataset.id));
 }
+async function deleteRun(id, run){
+  const nm=(run&&run.name)||'this run';
+  if(!confirm(`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`)) return;
+  try{ const r=await fetch('/api/runs/'+encodeURIComponent(id),{method:'DELETE'});
+    if(!r.ok && r.status!==404) throw new Error('HTTP '+r.status); }
+  catch(e){ alert('Could not delete the run: '+e); return; }
+  const det=document.getElementById('run-detail');           // close the detail if it was this run
+  if(det && !det.hidden && CURRENT_RUN===id){ det.hidden=true; }
+  renderRuns();
+}
+let CURRENT_RUN=null;
 async function openRun(id){
+  CURRENT_RUN=id;
   let j; try{ j=await(await fetch('/api/runs/'+encodeURIComponent(id))).json(); }catch(e){ return; }
   if(!j || j.error) return;
   const cur=j.currency||'$';
