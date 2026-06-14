@@ -712,6 +712,34 @@ a{color:var(--info)}
   <div class="card"><h2>⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
 </section>
 
+<!-- ───────── Costs ───────── -->
+<section data-tab="costs" hidden>
+  <div class="card" id="costs-card">
+    <div id="costs-disabled" class="topproc-empty" hidden>
+      Set an electricity price in <a href="#" id="costs-settings-link">Settings → Costs</a> to turn power into money.
+    </div>
+    <div id="costs-body" hidden>
+      <h2>💰 Power &amp; cost <span class="muted" style="font-size:12px;font-weight:400;text-transform:none" id="costs-sub"></span></h2>
+      <div class="grid" id="costs-kpis"></div>
+      <div class="chartbox short" style="margin-top:12px"><canvas id="costscomp"></canvas></div>
+      <p class="cap" id="costs-comp-cap">GPU power is measured (nvidia-smi); CPU/DRAM are measured via RAPL when readable. "Other" appears only if you set a baseline in Settings — wall power is never guessed.</p>
+    </div>
+  </div>
+  <div class="card" id="costs-breakdown-card" hidden>
+    <h2>🧾 Breakdown by process / container / model</h2>
+    <table><thead><tr>
+      <th data-sort="name">Name</th><th data-sort="kind">Kind</th>
+      <th data-sort="avg_w">Avg W</th><th data-sort="energy_kwh">Energy</th><th data-sort="cost">Cost</th>
+    </tr></thead><tbody id="costs-tbl"></tbody></table>
+    <p class="cap">Click a row to drill into its power &amp; cost over time. GPU split by VRAM share; CPU split by CPU-time share of the measured package power.</p>
+  </div>
+  <div class="card" id="costs-drill" hidden>
+    <h2 id="costs-drill-title">Drilldown</h2>
+    <div class="chartbox short"><canvas id="costsdrill"></canvas></div>
+    <p class="cap" id="costs-drill-res"></p>
+  </div>
+</section>
+
 <!-- ───────── AI Models ───────── -->
 <section data-tab="models" hidden>
   <div id="modelsbody"></div>
@@ -903,6 +931,13 @@ a{color:var(--info)}
         </div>
       </div>
       <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
+
+      <div style="max-width:340px">
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Rest-of-system baseline (W) — optional</div>
+        <input type="number" id="al_idle_w" min="0" step="1" placeholder="e.g. 60 (mainboard, fans, disks)"
+               style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        <div class="cap" style="margin-top:4px">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
+      </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
         <button class="rb on" id="al_save_costs">Save</button>
@@ -1135,6 +1170,7 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 const TABS = [
   {id:'overview',   label:'Overview',   charts:false, zone:'monitoring'},
   {id:'gpu',        label:'GPU',        charts:true,  zone:'monitoring'},
+  {id:'costs',      label:'Costs',      charts:true,  zone:'monitoring'},
   {id:'containers', label:'Containers', charts:false, zone:'monitoring'},
   {id:'services',   label:'Services',   charts:false, zone:'monitoring'},
   {id:'host',       label:'System',     charts:true,  zone:'monitoring'},
@@ -1288,6 +1324,7 @@ function showTab(id){
   }
   if(id==='overview'){ renderFleet(); renderAiBand(); }
   if(id==='experiments') renderExperiments(true);
+  if(id==='costs') renderCosts(true);
   if(id==='host')     renderHostTab();
   if(id==='disks')    renderDisksTab();
   if(id==='network')  renderNetwork();
@@ -1545,6 +1582,80 @@ async function renderCost(){
   }
 }
 
+// ── Costs page: per-machine → per-component → per-process, with drilldown ──────
+let COSTS_SORT={key:'energy_kwh',dir:-1}, COSTS_DATA=null, COSTS_AT=0;
+async function renderCosts(force){
+  const card=document.getElementById('costs-card'); if(!card) return;
+  if(CURRENT_HOST!=='local'){ renderLocalOnlyNotice('costs'); return; }
+  clearLocalOnlyNotice('costs');
+  if(!force && Date.now()-COSTS_AT < 20000) return;   // throttle live refresh
+  COSTS_AT=Date.now();
+  let j; try{ j=await(await fetch('/api/costs?range='+encodeURIComponent(R))).json(); }catch(e){ card.hidden=true; return; }
+  card.hidden=false;
+  const dis=document.getElementById('costs-disabled'), body=document.getElementById('costs-body');
+  const bcard=document.getElementById('costs-breakdown-card');
+  if(!j.enabled){
+    dis.hidden=false; body.hidden=true; bcard.hidden=true; document.getElementById('costs-drill').hidden=true;
+    const lk=document.getElementById('costs-settings-link');
+    if(lk) lk.onclick=e=>{e.preventDefault();showTab('alerts'); if(typeof setSettingsPane==='function') setSettingsPane('costs');};
+    return;
+  }
+  dis.hidden=true; body.hidden=false; COSTS_DATA=j;
+  const cur=j.currency||'$', money=v=>cur+(+v||0).toFixed(2);
+  const m=(j.machines||[])[0]||{}, nowW=m.now_w||{};
+  const sub=document.getElementById('costs-sub');
+  if(sub) sub.textContent = j.rapl_available ? '· GPU + CPU package measured' : '· GPU measured · CPU power unavailable (RAPL)';
+  document.getElementById('costs-kpis').innerHTML=[
+    {v:(nowW.total||0)+' W', l:'Total draw now', s:[nowW.gpu!=null?'gpu '+nowW.gpu+'W':'', nowW.cpu!=null?'cpu '+nowW.cpu+'W':''].filter(Boolean).join(' · ')},
+    {v:money(m.cost&&m.cost.today), l:'Cost today', s:(m.cost_range!=null?money(m.cost_range)+' this range':'')},
+    {v:money(m.cost&&m.cost.d7),  l:'Last 7 days'},
+    {v:money(m.cost&&m.cost.d30), l:'Last 30 days', s:((m.energy_kwh&&m.energy_kwh.total)||0).toFixed(1)+' kWh range'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const C=j.components||{}, labels=fmtLabels(C.labels||[]);
+  const ds=[];
+  const add=(key,label,col,dash)=>{ if(C[key]&&C[key].length) ds.push({label,data:C[key],backgroundColor:col+'59',borderColor:col,fill:true,pointRadius:0,tension:.2,borderDash:dash||[]}); };
+  add('gpu','GPU (measured)','#3fb950'); add('cpu','CPU (measured)','#4dabf7'); add('dram','DRAM (measured)','#e3b341');
+  add('other','Other (set)','#6b7280',[4,3]);
+  mk('costscomp',{type:'line',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+    scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10,autoSkip:true}},
+      y:{stacked:true,min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}}},
+    plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}},plugins:[areaBg]});
+  renderCostsTable();
+}
+function renderCostsTable(){
+  const j=COSTS_DATA; if(!j) return;
+  const bcard=document.getElementById('costs-breakdown-card'), tb=document.getElementById('costs-tbl');
+  const rows=(j.breakdown||[]).slice();
+  if(!rows.length){ if(bcard) bcard.hidden=true; return; }
+  if(bcard) bcard.hidden=false;
+  const cur=j.currency||'$', k=COSTS_SORT.key, d=COSTS_SORT.dir;
+  rows.sort((a,b)=>{ const av=a[k],bv=b[k]; return (typeof av==='string')? d*String(av).localeCompare(String(bv)) : d*((av||0)-(bv||0)); });
+  tb.innerHTML=rows.map(r=>`<tr data-name="${esc(r.name)}" data-kind="${esc(r.kind)}" style="cursor:pointer">
+    <td><span class="dot" style="background:${colorFor(r.name)}"></span>${esc(r.name)}</td>
+    <td><span class="badge ${r.kind==='gpu'?'ok':'info'}">${esc((r.kind||'').toUpperCase())}</span></td>
+    <td>${r.avg_w} W</td><td>${(r.energy_kwh||0).toFixed(3)} kWh</td><td>${cur}${(r.cost||0).toFixed(2)}</td></tr>`).join('');
+  tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>drillEntity(tr.dataset.name,tr.dataset.kind));
+}
+async function drillEntity(name,kind){
+  let j; try{ j=await(await fetch('/api/costs/entity?name='+encodeURIComponent(name)+'&kind='+encodeURIComponent(kind)+'&range='+encodeURIComponent(R))).json(); }catch(e){ return; }
+  const cur=j.currency||'$', labels=fmtLabels((j.series&&j.series.labels)||[]);
+  document.getElementById('costs-drill').hidden=false;
+  document.getElementById('costs-drill-title').textContent=`${name} — ${R}: ${(j.energy_kwh||0).toFixed(3)} kWh · ${cur}${(j.cost||0).toFixed(2)}`;
+  const res=document.getElementById('costs-drill-res');
+  if(res) res.textContent=(j.resources&&j.resources.gpu_vram_peak_mb)
+    ? 'Peak VRAM held '+fmtMB(j.resources.gpu_vram_peak_mb)+' · peak power '+j.peak_w+' W · avg '+j.avg_w+' W'
+    : 'Peak power '+j.peak_w+' W · avg '+j.avg_w+' W';
+  mk('costsdrill',{type:'line',data:{labels,datasets:[
+    {label:'Power (W)',data:j.series.watts,borderColor:'#a371f7',backgroundColor:'#a371f733',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
+    {label:'Cumulative '+cur,data:j.series.cost_cum,borderColor:'#3fb950',pointRadius:0,yAxisID:'y1',tension:.2}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10}},
+        y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
+        y1:{position:'right',min:0,grid:{display:false},ticks:{color:cv('--mut'),callback:v=>cur+(+v).toFixed(2)}}},
+      plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}}});
+  document.getElementById('costs-drill').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
 // Joins three existing sources (no new API): n.models (loaded now), D.model_summary
 // (peak per model over range), D.summary (per-service peak/avg/%time). The expanded
@@ -1652,6 +1763,7 @@ function renderHealth(){
   renderTopProcs();   // mini-htop card refreshes on every health poll (issue #32)
   renderAiBand();     // overview AI band uses fresh GPU/throttle data from /api/health
   if(TAB==='experiments') renderExperiments(false);   // throttled live refresh of training cards
+  if(TAB==='costs') renderCosts(false);               // throttled live refresh of the costs page
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};
@@ -2026,6 +2138,7 @@ async function loadAlerts(){
   document.getElementById('al_kwh_night').value   = s.kwh_price_night||'';
   document.getElementById('al_night_start').value = s.night_start||'22:00';
   document.getElementById('al_night_end').value   = s.night_end||'06:00';
+  const idleW=document.getElementById('al_idle_w'); if(idleW) idleW.value = s.system_idle_watts||'';
   buildCountrySelect().then(()=>{ document.getElementById('al_country').value = s.country||''; });
   setTariffMode(s.tariff_mode==='dual');
   // The webhook is a secret — server only returns whether one is set.
@@ -2064,6 +2177,7 @@ async function saveAlerts(){
     kwh_price_night:  document.getElementById('al_kwh_night').value.trim(),
     night_start:      document.getElementById('al_night_start').value || '22:00',
     night_end:        document.getElementById('al_night_end').value   || '06:00',
+    system_idle_watts: (document.getElementById('al_idle_w')||{}).value || '',
     country:          document.getElementById('al_country').value,
   };
   // Only send the webhook field if the user actually typed in it — empty means
@@ -2514,7 +2628,7 @@ async function deleteHost(name){
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
 const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','containers']);  // tabs not yet probed per-host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','costs','containers']);  // tabs not yet probed per-host
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -3413,7 +3527,10 @@ buildNav();
 initTheme();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
-  if(TAB==='experiments') renderExperiments(true);});
+  if(TAB==='experiments') renderExperiments(true);
+  if(TAB==='costs') renderCosts(true);});
+document.querySelectorAll('#costs-breakdown-card th[data-sort]').forEach(th=>{ th.style.cursor='pointer';
+  th.onclick=()=>{ const k=th.dataset.sort; COSTS_SORT.dir=(COSTS_SORT.key===k)?-COSTS_SORT.dir:-1; COSTS_SORT.key=k; renderCostsTable(); }; });
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
 
 /* ════════ Snapshot + Share (#31 / #87) ════════
