@@ -7,7 +7,8 @@ release notes.
 
 ## [Unreleased] — `next`
 
-_Nothing here yet — `next` is the preview branch; changes land here before the next tagged release._
+### Changed
+- **New logo — radar, not satellite.** Swapped the satellite glyph for a radar mark across the UI (sidebar brand, page header, "All hosts" heading) and the favicon. Radar fits what the tool actually does — sweep the fleet, surface the blips — and reads cleaner at small sizes. Same amber-on-dark palette.
 
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
