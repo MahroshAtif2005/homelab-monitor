@@ -28,6 +28,8 @@ COPY probe.py /app/probe.py
 COPY probe.ps1 /app/probe.ps1
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
+COPY static/tariffs.json   /app/static/tariffs.json
+COPY static/homelab_run.py /app/static/homelab_run.py
 
 # Built-in MCP server (read-only): the FastMCP wrapper + its pure-stdlib client,
 # plus the CHANGELOG it serves as a resource, and the process launcher that runs

@@ -6,13 +6,11 @@
 ![docker](https://img.shields.io/badge/deploy-docker--compose-2496ED?logo=docker&logoColor=white)
 [![docs](https://img.shields.io/badge/docs-website-d29922?logo=readthedocs&logoColor=white)](https://sikamikanikobg.github.io/homelab-monitor/)
 
-**One page for your whole home lab & AI rig — GPU, containers, services, disks. No agents, no Prometheus/Grafana, no cloud.**
+**One page for your whole home lab & AI rig — GPU truth, tokens/sec, power cost, training runs, containers, disks. No agents, no Prometheus/Grafana, no cloud.**
 
-<a href="https://youtu.be/5uf2rG-RzcU" title="Watch the HomeLab Monitor demo on YouTube">
-  <img src="docs/demo.gif" alt="HomeLab Monitor — a 65-second tour of the dashboard" width="820">
-</a>
+<img src="docs/screenshots/tour.gif" alt="HomeLab Monitor — a tour of the dashboard: Overview, GPU truth, Costs, AI Models and Experiments" width="860">
 
-Your home lab grew into a couple of machines, a Pi, and a GPU that's mysteriously always busy. HomeLab Monitor gives you one self-hosted page that answers the real questions: **which model is holding the GPU, which container is eating RAM, what's filling your disks**, and **is anything down** — across every box over SSH: Linux, a Pi, even Windows. Readable from your phone over the VPN.
+Your home lab grew into a couple of machines, a Pi, and a GPU that's mysteriously always busy — and lately it's running models too. HomeLab Monitor gives you one self-hosted page that answers the real questions: **what's that GPU actually doing, which model is holding it, what's it costing you to run, which container is eating RAM, what's filling your disks**, and **is anything down** — across every box over SSH: Linux, a Pi, even Windows. Readable from your phone over the VPN.
 
 ## Get started
 
@@ -24,18 +22,33 @@ docker compose up -d
 
 Open `http://<your-host>:9800` and you're done. Full options (from source, GPU toolkit, Windows/WSL2) → [**Install docs**](https://sikamikanikobg.github.io/homelab-monitor/install/).
 
-> 🆕 **v0.14.0** — a **built-in read-only MCP server**: connect Claude (or any MCP client) to your homelab and explore it with full dashboard parity, no extra container. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md) · [MCP docs](https://sikamikanikobg.github.io/homelab-monitor/mcp/).
+> 🆕 **v0.16 — the AI Lab Cockpit.** GPU throttle truth, live **tokens/sec**, a per-process **Costs** page, and **push your training runs** from Jupyter/Colab/MLflow — each one priced with the real GPU energy it burned. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md).
 
 ## What you get
 
-![Overview / All hosts](docs/overview.png)
+![The Overview — your whole fleet at a glance, with an AI-workload band up top](docs/screenshots/overview.png)
 
-- **GPU, demystified** — live VRAM/util/power/temp, and *which container is holding the card* (auto-mapped).
-- **Containers, honestly** — health plus **RAM and VRAM in separate columns** (real resident RAM, not page cache).
+One page, every box, the questions you actually have. The classics are all here — and 0.16 builds a whole **AI cockpit** on top of them.
+
+**Your GPU, demystified — and honest about it.** A card pinned at "100% util" can still be throttling, memory-bandwidth-bound, or quietly drooping its clocks. The GPU tab decodes `nvidia-smi`'s throttle reasons (a red banner the moment it's power-capped or too hot), and shows memory-bandwidth util, core/mem clocks, power-vs-limit and p-state — plus *which container is holding the card*.
+
+![The GPU tab — throttle reasons, memory-bandwidth, clocks and power headroom](docs/screenshots/gpu.png)
+
+**What it costs — down to the process.** Power becomes money: per machine, then per component (GPU measured via `nvidia-smi`, CPU/DRAM via RAPL), then **per process, container or model** — click any row to see what it drew and what it cost over any window. Day & night tariffs (Economy 7, Heures Creuses, …), or just pick your country for a sensible estimate. Every watt is measured or a baseline you set; wall power is never guessed.
+
+![The Costs page — per-component and per-process power & money](docs/screenshots/costs.png)
+
+**Your training runs, priced.** Push a run from Jupyter, Colab or Kaggle with a one-file client (or mirror it from MLflow), and it comes back with the loss curve *and* the real GPU energy it burned, on the same timeline. Create, name, expire and revoke API keys yourself.
+
+![A run pushed from a notebook — its loss curve and the GPU power it actually used](docs/screenshots/experiment-detail.png)
+
+And the rest of the lab, the way it always was:
+
+- **Containers, honestly** — health plus **RAM and VRAM in separate columns** (real resident RAM, not page cache), and click one to tail its logs in a side drawer.
 - **systemd services** — local or remote, your own units highlighted, failures first.
-- **WizTree-style disk treemaps** — scan a filesystem, drill into folders, find the space hogs.
+- **WizTree-style disk treemaps**, **network I/O with per-container top talkers**, and a **mini-htop** for who's eating CPU and RAM.
 - **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs.
-- **Push alerts** — **Discord** and **ntfy.sh**, edge-triggered so they don't spam.
+- **Push alerts** — **Discord**, **ntfy.sh** and **Telegram**, edge-triggered so they don't spam.
 
 Full tab-by-tab tour → [**Features**](https://sikamikanikobg.github.io/homelab-monitor/features/).
 

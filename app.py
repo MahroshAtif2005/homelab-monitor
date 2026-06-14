@@ -18,13 +18,14 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib
+from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, Response, send_file, after_this_request
+from flask import Flask, request, jsonify, Response, send_file, after_this_request, g
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -33,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.15.0"
+VERSION      = "0.16.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -90,6 +91,8 @@ LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+CREATE TABLE IF NOT EXISTS net_samples(ts INTEGER, iface TEXT, bytes_in INTEGER, bytes_out INTEGER);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
@@ -103,12 +106,35 @@ CREATE TABLE IF NOT EXISTS hosts(
   last_check_at INTEGER,
   last_check_json TEXT
 );
+CREATE TABLE IF NOT EXISTS power_proc(ts INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, watts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_gpus_ts   ON gpu_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_net_ts    ON net_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
+CREATE TABLE IF NOT EXISTS runs(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
+  started_at INTEGER NOT NULL, ended_at INTEGER, host TEXT, params TEXT, tags TEXT,
+  notes TEXT, heartbeat_at INTEGER, ext_id TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS run_metrics(run_id TEXT NOT NULL, ts INTEGER NOT NULL,
+  step INTEGER DEFAULT 0, key TEXT NOT NULL, value REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS api_keys(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
+CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
+CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_runmetrics_rid ON run_metrics(run_id, key, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_runs_ext ON runs(source, ext_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """
-_SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL")
+# cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
+_SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
+                      "cpu_power REAL", "dram_power REAL")
+# Per-host adaptive poll-timeout state (issue #99); added to the hosts table.
+_HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
+# Which API key pushed a run (for per-key attribution); added to the runs table.
+_RUNS_MIGRATIONS = ("key_id TEXT",)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -133,6 +159,31 @@ def _apply_schema_migrations(conn):
             conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    for col in _HOST_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE hosts ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _RUNS_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    # Migrate a legacy single instance-wide api_key (the previous design) into the
+    # api_keys table as a named key, then clear the setting — so existing clients
+    # keep working under the new multi-key model.
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()
+        legacy = (row[0] if row else "") or ""
+        if legacy:
+            h = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+            if not conn.execute("SELECT 1 FROM api_keys WHERE key_hash=?", (h,)).fetchone():
+                conn.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
+                             "VALUES(?,?,?,?,?,?,?)",
+                             (uuid.uuid4().hex, "default (migrated)", h, legacy[:12], int(time.time()), None, None))
+            conn.execute("UPDATE settings SET value='' WHERE key='api_key'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 def reopen_db():
@@ -163,10 +214,11 @@ except sqlite3.OperationalError as e:
 _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None}
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
+          "model_meta": {}, "serving": [], "training": [], "devtools": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
-HEALTH = {"docker": None, "systemd": None, "update": None, "at": 0}
+HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
 WATCH_SERVICES = [s.strip() for s in os.environ.get("WATCH_SERVICES", "").split(",") if s.strip()]
 SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authored (vs vendor)
 _ct_cache = {"list": [], "at": 0}
@@ -437,6 +489,160 @@ def probe_models(ct):
         idle = [(f"{len(idle)} models available", None)]
     return loaded + idle
 
+# ── Model intelligence: per-model metadata + live serving telemetry ───────────
+# Two passive, no-dep enrichments that make the AI Models tab authoritative:
+#   1. Ollama /api/show — param size, quantization, context length, capabilities
+#      (immutable per tag, so cached; only fetched for currently-loaded models).
+#   2. vLLM / TGI /metrics — running/waiting requests, KV-cache fill, tokens/sec
+#      (Prometheus text, parsed with stdlib regex; tok/s from a counter delta).
+def _http_post_json(ip, port, path, payload, timeout=2):
+    c = http.client.HTTPConnection(ip, port, timeout=timeout)
+    try:
+        body = json.dumps(payload).encode()
+        c.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        r = c.getresponse(); data = r.read(); status = r.status
+    finally:
+        c.close()
+    return json.loads(data) if status < 400 else None
+
+def _http_text(ip, port, path, timeout=2):
+    c = http.client.HTTPConnection(ip, port, timeout=timeout)
+    try:
+        c.request("GET", path); r = c.getresponse(); data = r.read(); status = r.status
+    finally:
+        c.close()
+    return data.decode("utf-8", "replace") if status < 400 else None
+
+_OLLAMA_META = {}   # model name -> {param_size, quant, ctx, caps}; immutable per tag, cached
+
+def _ollama_meta(ip, model):
+    """POST /api/show once per model and cache. Passive — triggers no inference."""
+    if model in _OLLAMA_META:
+        return _OLLAMA_META[model]
+    meta = {}
+    try:
+        d = _http_post_json(ip, 11434, "/api/show", {"model": model}) or {}
+        det = d.get("details") or {}
+        meta["param_size"] = det.get("parameter_size") or ""
+        meta["quant"] = det.get("quantization_level") or ""
+        ctx = ""
+        for k, v in (d.get("model_info") or {}).items():
+            if k.endswith(".context_length"):
+                ctx = int(v) if str(v).isdigit() else v; break
+        meta["ctx"] = ctx
+        meta["caps"] = [c for c in (d.get("capabilities") or []) if c != "completion"]
+    except Exception:
+        meta = {}
+    if any(meta.get(k) for k in ("param_size", "quant", "ctx", "caps")):
+        _OLLAMA_META[model] = meta
+    return meta
+
+def collect_model_meta(ai, models):
+    """{model_name: meta} for Ollama models. Cached metadata is returned for free;
+    a fresh /api/show is only paid for a currently-loaded model we haven't seen."""
+    ip_of = {ct["name"]: (ct.get("ip") or "127.0.0.1") for ct in ai}
+    is_ollama = {ct["name"] for ct in ai
+                 if "ollama" in (ct.get("name", "") + " " + ct.get("image", "")).lower()}
+    out = {}
+    for svc, mdl, vram in models:
+        if svc not in is_ollama or not mdl:
+            continue
+        if mdl in _OLLAMA_META:
+            out[mdl] = _OLLAMA_META[mdl]
+        elif vram is not None:                      # only pay /api/show for loaded models
+            meta = _ollama_meta(ip_of.get(svc, "127.0.0.1"), mdl)
+            if meta:
+                out[mdl] = meta
+    return out
+
+_PROM_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([0-9.eEnaN+-]+)\s*$")
+
+def _parse_prom(text):
+    """Prometheus exposition text -> {metric_name: value summed across label sets}.
+    Comments and non-finite values are skipped."""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] == "#":
+            continue
+        m = _PROM_RE.match(line)
+        if not m:
+            continue
+        try:
+            v = float(m.group(3))
+        except ValueError:
+            continue
+        if v != v or v in (float("inf"), float("-inf")):   # NaN / inf
+            continue
+        out[m.group(1)] = out.get(m.group(1), 0.0) + v
+    return out
+
+def _first_metric(metrics, *names):
+    for n in names:
+        if n in metrics:
+            return metrics[n]
+    return None
+
+def _serving_extract(metrics):
+    """Pull the serving KPIs out of a parsed /metrics dict (vLLM + TGI aliases).
+    Returns raw fields incl. the generation-tokens counter for rate calc upstream."""
+    out = {}
+    running = _first_metric(metrics, "vllm:num_requests_running", "tgi_batch_current_size")
+    waiting = _first_metric(metrics, "vllm:num_requests_waiting", "tgi_queue_size")
+    kv = _first_metric(metrics, "vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
+    gen = _first_metric(metrics, "vllm:generation_tokens_total", "tgi_request_generated_tokens_sum")
+    ts_sum = _first_metric(metrics, "vllm:time_to_first_token_seconds_sum")
+    ts_cnt = _first_metric(metrics, "vllm:time_to_first_token_seconds_count")
+    if running is not None: out["running"] = int(running)
+    if waiting is not None: out["waiting"] = int(waiting)
+    if kv is not None:      out["kv_cache_pct"] = round(kv * 100, 1) if kv <= 1.5 else round(kv, 1)
+    if gen is not None:     out["gen_tokens_total"] = gen
+    if ts_sum is not None and ts_cnt:
+        out["ttft_avg_s"] = round(ts_sum / ts_cnt, 3)
+    return out
+
+_METRICS_HINTS = ("vllm", "text-generation-inference", "tgi", "sglang", "aphrodite",
+                  "lorax", "mistral", "text-embeddings-inference", "infinity")
+_SERVE_PREV = {}    # svc -> (gen_tokens_total, ts), for tokens/sec from the counter delta
+
+def collect_serving(ai):
+    """Scrape /metrics from Prometheus-exposing inference servers and return a list of
+    live serving stats (running/waiting/KV-cache/tok-s/TTFT). Bounded: only hint-matched
+    containers, a few candidate ports at a short timeout, first hit wins."""
+    out, nowt = [], time.time()
+    for ct in ai:
+        name = ct.get("name", "")
+        if not any(h in (name + " " + ct.get("image", "")).lower() for h in _METRICS_HINTS):
+            continue
+        ip = ct.get("ip") or "127.0.0.1"
+        ports = []
+        for p in (list(ct.get("ports") or []) + [8000]):
+            if p and p not in ports:
+                ports.append(p)
+        text = None
+        for p in ports[:4]:
+            try:
+                t = _http_text(ip, p, "/metrics", timeout=1.0)
+            except Exception:
+                t = None
+            if t and ("vllm:" in t or "tgi_" in t):
+                text = t; break
+        if not text:
+            continue
+        st = _serving_extract(_parse_prom(text))
+        gen = st.pop("gen_tokens_total", None)
+        if gen is not None:
+            prev = _SERVE_PREV.get(name)
+            if prev and nowt > prev[1]:
+                rate = (gen - prev[0]) / (nowt - prev[1])
+                if rate >= 0:
+                    st["tok_per_s"] = round(rate, 1)
+            _SERVE_PREV[name] = (gen, nowt)
+        if st:
+            st["service"] = name
+            out.append(st)
+    return out
+
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
 def _cpu_pct():
     parts = list(map(int, open("/proc/stat").readline().split()[1:]))
@@ -552,6 +758,52 @@ def _cpu_temp_c():
         pass
     return round(best, 1) if best is not None else None
 
+# ── Network I/O sampling (issue #30) ──────────────────────────────────────────
+def _read_net_dev(path):
+    """Parse a /proc/net/dev file → {iface: (rx_bytes, tx_bytes)}, excluding lo
+    and virtual veth/bridge churn we don't want as 'host' NICs. Cumulative byte
+    counters; rates are derived on read so a missed sample never invents traffic."""
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f.read().splitlines()[2:]:   # skip the two header rows
+                if ":" not in line:
+                    continue
+                iface, rest = line.split(":", 1)
+                iface = iface.strip()
+                cols = rest.split()
+                if iface == "lo" or len(cols) < 9:
+                    continue
+                out[iface] = (int(cols[0]), int(cols[8]))   # rx_bytes, tx_bytes
+    except Exception:
+        pass
+    return out
+
+# Per-container veth pairs and the dynamic docker-network bridges are internal
+# plumbing — on a busy host there are dozens, and their traffic is already shown
+# per-container in the Top-talkers table. Keep the host throughput view to real
+# uplinks (eth*, en*, wl*, bond*, docker0, tailscale*, wg* …).
+_HOST_NIC_SKIP = re.compile(r"^(veth|br-)")
+
+def _net_rows(ts, nm):
+    """Rows for net_samples this tick: host NICs from /proc/net/dev plus one row
+    per container (its netns totals, read via a representative PID) tagged '@name'."""
+    rows = []
+    for iface, (rx, tx) in _read_net_dev("/proc/net/dev").items():
+        if _HOST_NIC_SKIP.match(iface):
+            continue
+        rows.append((ts, iface, rx, tx))
+    try:
+        for name, pid in container_pids(nm).items():
+            dev = _read_net_dev(f"/proc/{pid}/net/dev")
+            if not dev:
+                continue
+            rx = sum(v[0] for v in dev.values()); tx = sum(v[1] for v in dev.values())
+            rows.append((ts, "@" + name, rx, tx))
+    except Exception:
+        pass
+    return rows
+
 def read_host():
     h = {"cores": os.cpu_count() or 1}
     try: h["cpu"] = _cpu_pct()
@@ -614,6 +866,105 @@ def _rt_dt(*paths):
         except Exception:
             continue
     return None
+
+# ── CPU package power via RAPL (Intel/AMD powercap) ───────────────────────────
+# Cumulative energy counters under /sys/class/powercap/intel-rapl turn into watts
+# via per-interval deltas. AMD (Zen/EPYC) registers under the SAME intel-rapl path.
+# Best-effort: a missing tree / permission-denied energy_uj / frozen counter degrades
+# that domain to "unavailable" (None) rather than raising or inventing a zero.
+# MEASURED, package only (cores+uncore+iGPU+memctl) — NOT wall power.
+RAPL_ROOT = os.environ.get("RAPL_ROOT", "/sys/class/powercap")
+_RAPL_PREV = {}   # domain-path -> (energy_uj, monotonic_ts)
+
+def _rapl_read_uj(path):
+    """(energy_uj, max_range_uj) for a powercap domain dir, or None on any failure."""
+    try:
+        with open(os.path.join(path, "energy_uj")) as f:
+            e = int(f.read().strip())
+        with open(os.path.join(path, "max_energy_range_uj")) as f:
+            m = int(f.read().strip())
+        return e, m
+    except (OSError, ValueError):
+        return None
+
+def _rapl_domains():
+    """Discover powercap domains -> {path: name}. package-*/psys are top-level;
+    core/dram/uncore are nested intel-rapl:*:* dirs. The mmio mirror is skipped."""
+    out = {}
+    try:
+        for top in sorted(glob.glob(os.path.join(RAPL_ROOT, "intel-rapl:*"))):
+            if os.path.basename(top).startswith("intel-rapl-mmio"):
+                continue
+            nm = _rt(os.path.join(top, "name"))
+            if nm:
+                out[top] = nm.strip()
+            for sub in sorted(glob.glob(os.path.join(top, "intel-rapl:*:*"))):
+                snm = _rt(os.path.join(sub, "name"))
+                if snm:
+                    out[sub] = snm.strip()
+    except Exception:
+        pass
+    return out
+
+def read_rapl_power():
+    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_w (psys if present
+    else sum of package-* domains), dram_w (sum of dram sub-domains), domains{name:w}.
+    First call after start seeds state and returns {} (no prior delta)."""
+    domains = _rapl_domains()
+    if not domains:
+        return {}
+    now = time.monotonic()
+    per = {}
+    for path, name in domains.items():
+        rd = _rapl_read_uj(path)
+        if rd is None:
+            continue
+        e, mrange = rd
+        prev = _RAPL_PREV.get(path)
+        _RAPL_PREV[path] = (e, now)
+        if not prev:
+            continue
+        e0, t0 = prev
+        dt = now - t0
+        if dt <= 0:
+            continue
+        de = e - e0
+        if de < 0:                      # uint wraparound: add one modulus
+            de += mrange
+        per[name] = max(0.0, de / 1e6 / dt)
+    if not per:
+        return {}
+    psys = per.get("psys")
+    pkgs = [w for n, w in per.items() if n.startswith("package")]
+    cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
+    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
+    dram_w = round(sum(drams), 1) if drams else None
+    return {"cpu_w": (round(cpu_w, 1) if cpu_w is not None else None),
+            "dram_w": dram_w, "domains": {n: round(w, 1) for n, w in per.items()}}
+
+_POWER_PROC_TOPN  = 8
+_POWER_PROC_MIN_W = 0.5
+
+def _attribute_power_rows(ts, gpu_power, procs_vram, cpu_power, top_cpu):
+    """Build (ts, kind, name, watts) rows for power_proc: GPU watts split across
+    services by VRAM share, CPU package watts split across commands by CPU-time
+    share (each entity's watts sums into the measured machine total)."""
+    rows = []
+    vtot = sum(procs_vram.values())
+    if gpu_power and vtot > 0:
+        for svc, mb in procs_vram.items():
+            w = gpu_power * (mb / vtot)
+            if w >= _POWER_PROC_MIN_W:
+                rows.append((ts, "gpu", svc, round(w, 2)))
+    if cpu_power and top_cpu:
+        ncpu = top_cpu.get("ncpu") or 1
+        ranked = sorted(top_cpu.get("by_cpu", []), key=lambda r: -r.get("cpu_pct", 0))[:_POWER_PROC_TOPN]
+        for r in ranked:
+            frac = (r.get("cpu_pct", 0) / 100.0) / ncpu
+            w = cpu_power * frac
+            if w >= _POWER_PROC_MIN_W:
+                rows.append((ts, "cpu", r["name"], round(w, 2)))
+    return rows
 
 _INV_CACHE, _INV_LOCK = {}, threading.Lock()
 def _cached_inv(key, ttl, fn):
@@ -1899,10 +2250,227 @@ def local_diagnostics():
         _diag(checks, "host_metrics", "Host metrics", "warn", "/proc not readable — host metrics limited")
     return {"checks": checks, "summary": _summarize(checks)}
 
+# ── Top processes (issue #32): a psutil-free /proc reader for the Host tab's
+# mini-htop. Aggregates by command so N workers of one exe collapse into a single
+# row, and derives CPU% from the jiffy delta between two health scans (~15s
+# apart) against /proc/stat's total. The first scan after boot has no delta, so
+# CPU% reads 0 until the next cycle. Builds on the /proc parsing seeded in #34
+# (thanks @samkelomncwabe63-svg).
+_PROC_PREV = {"total": None, "pids": {}}
+_PROC_PAGE_KB = (os.sysconf("SC_PAGE_SIZE") // 1024) if hasattr(os, "sysconf") else 4
+
+def _total_cpu_jiffies():
+    with open("/proc/stat") as f:
+        parts = f.readline().split()[1:]   # cpu  user nice system idle iowait …
+    return sum(int(x) for x in parts)
+
+def collect_top_processes(top_n=10):
+    """Top-N processes by CPU% and by RAM, aggregated by command. Reads /proc
+    directly (no psutil); returns None where /proc isn't available (e.g. a
+    Windows hub) so the card simply hides rather than erroring."""
+    try:
+        total = _total_cpu_jiffies()
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return None
+    prev_total = _PROC_PREV["total"]
+    prev_pids  = _PROC_PREV["pids"]
+    cur_pids, agg = {}, {}
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            rp = stat.rfind(")")                 # comm can hold spaces/parens
+            comm = stat[stat.find("(") + 1:rp]
+            rest = stat[rp + 2:].split()         # fields from 'state' onward
+            jiff = int(rest[11]) + int(rest[12]) # utime + stime
+            with open(f"/proc/{pid}/statm") as f:
+                rss_kb = int(f.read().split()[1]) * _PROC_PAGE_KB
+        except (OSError, ValueError, IndexError):
+            continue
+        cur_pids[pid] = jiff
+        a = agg.setdefault(comm, {"mem_kb": 0, "dcpu": 0, "count": 0})
+        a["mem_kb"] += rss_kb
+        a["count"]  += 1
+        if pid in prev_pids:
+            d = jiff - prev_pids[pid]
+            if d > 0:
+                a["dcpu"] += d
+    _PROC_PREV["total"] = total
+    _PROC_PREV["pids"]  = cur_pids
+    ncpu = os.cpu_count() or 1
+    span = (total - prev_total) if prev_total else 0
+    rows = []
+    for comm, a in agg.items():
+        cpu = (100.0 * a["dcpu"] / span * ncpu) if span > 0 else 0.0
+        rows.append({"name": comm, "cpu_pct": round(cpu, 1),
+                     "mem_mb": round(a["mem_kb"] / 1024), "count": a["count"]})
+    return {"by_cpu": sorted(rows, key=lambda r: -r["cpu_pct"])[:top_n],
+            "by_mem": sorted(rows, key=lambda r: -r["mem_mb"])[:top_n],
+            "ncpu": ncpu}
+
+# ── Experiments: training-run detection + GPU activity sessions ────────────────
+# Auto-recognise training / fine-tuning jobs from /proc cmdline, and reconstruct
+# "GPU activity sessions" from the power/util history we already store — so the
+# Experiments tab works with zero config and no agent inside the job.
+TRAIN_LAUNCHERS = ("torchrun", "deepspeed", "torch.distributed.run",
+                   "torch.distributed.launch", "torch.distributed.elastic", "accelerate")
+_TRAIN_SCRIPT_RE = re.compile(r"(train|finetune|fine[_-]?tune|sft|dpo|grpo|ppo|pretrain|lora|qlora)", re.I)
+_ML_FRAMEWORK_RE = re.compile(r"(pytorch_lightning|lightning\.|transformers\.trainer|"
+                              r"axolotl|unsloth|trl|llama[_-]?factory|nanogpt|megatron)", re.I)
+
+def _classify_training(argv):
+    """argv: cmdline tokens. Return a short label if this looks like a training /
+    fine-tuning job, else None. Conservative — must not flag plain inference."""
+    if not argv:
+        return None
+    low = " ".join(argv).lower()
+    for l in TRAIN_LAUNCHERS:
+        if l in low:
+            return l.split(".")[-1]
+    for a in argv:
+        if a.endswith(".py") and _TRAIN_SCRIPT_RE.search(os.path.basename(a)):
+            return os.path.basename(a)
+    if "python" in low and _ML_FRAMEWORK_RE.search(low):
+        return "training"
+    return None
+
+_TRAIN_SEEN = {}   # pid -> first-seen ts (resets on restart; gives a live elapsed clock)
+
+def collect_training(gpu_pids, now=None):
+    """Scan /proc for training-like processes; annotate each with the VRAM its PID
+    holds on the GPU (from nvidia-smi compute-apps) and how long we've seen it.
+    `gpu_pids`: {int pid -> MB}. Returns [] where /proc is unavailable."""
+    now = now or int(time.time())
+    out, alive = [], set()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        argv = [t for t in raw.decode("utf-8", "replace").split("\x00") if t]
+        label = _classify_training(argv)
+        if not label:
+            continue
+        alive.add(pid)
+        first = _TRAIN_SEEN.setdefault(pid, now)
+        vram = gpu_pids.get(int(pid), 0)
+        out.append({"pid": int(pid), "label": label, "cmd": " ".join(argv)[:240],
+                    "elapsed": max(0, now - first), "vram": round(vram), "on_gpu": bool(vram)})
+    for dead in [p for p in _TRAIN_SEEN if p not in alive]:
+        _TRAIN_SEEN.pop(dead, None)
+    return sorted(out, key=lambda r: -r["elapsed"])
+
+# Data-science tooling that runs as a local web app — discovered from /proc cmdline
+# so the dashboard links straight to your notebooks & experiment trackers, and can
+# flag a notebook kernel quietly squatting on VRAM (the "my GPU is full but nothing
+# is running" culprit). (kind, label, default_port, cmdline regex).
+_DEVTOOLS = [
+    ("jupyter",     "Jupyter",     8888, re.compile(r"jupyter[-_ ]?(lab|notebook|server)|jupyterlab", re.I)),
+    ("tensorboard", "TensorBoard", 6006, re.compile(r"tensorboard", re.I)),
+    ("mlflow",      "MLflow",      5000, re.compile(r"\bmlflow\b", re.I)),
+    ("wandb",       "W&B",         8080, re.compile(r"\bwandb\b", re.I)),
+    ("streamlit",   "Streamlit",   8501, re.compile(r"\bstreamlit\b", re.I)),
+    ("ray",         "Ray",         8265, re.compile(r"raylet|ray\.dashboard|ray start", re.I)),
+]
+_PORT_RE = re.compile(r"^--?port(?:=(\d{2,5}))?$")
+
+def _extract_port(argv):
+    """Pull an explicit --port N / --port=N from a cmdline, else None."""
+    for i, a in enumerate(argv):
+        m = _PORT_RE.match(a)
+        if m:
+            if m.group(1):
+                return int(m.group(1))
+            if i + 1 < len(argv) and argv[i + 1].isdigit():
+                return int(argv[i + 1])
+    return None
+
+def collect_devtools(gpu_pids):
+    """Discover running DS/AI tools (Jupyter, TensorBoard, MLflow, W&B, …) from /proc
+    and tag any that are holding GPU VRAM. Returns [] where /proc is unavailable."""
+    out, seen = [], set()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except Exception:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        argv = [t for t in raw.decode("utf-8", "replace").split("\x00") if t]
+        low = " ".join(argv).lower()
+        for kind, label, dport, rx in _DEVTOOLS:
+            if not rx.search(low):
+                continue
+            port = _extract_port(argv) or dport
+            key = (kind, port)
+            if key in seen:
+                break
+            seen.add(key)
+            vram = gpu_pids.get(int(pid), 0)
+            out.append({"kind": kind, "label": label, "port": port, "pid": int(pid),
+                        "vram": round(vram), "idle_vram": bool(vram)})
+            break
+    return sorted(out, key=lambda r: r["label"])
+
+_ACTIVE_UTIL = 20    # GPU util % at/above which a sample counts as a "busy" session sample
+
+def _gpu_sessions(rows, interval, active_util=_ACTIVE_UTIL, max_gap=3, min_len=2, price=0.0):
+    """Reconstruct contiguous GPU-busy sessions from sample rows. `rows`: ascending
+    (ts, util, power, mem_used). A session is a run of samples with util>=active_util,
+    tolerating up to `max_gap` idle samples. Returns sessions newest-first with
+    duration, peak util/VRAM, average power, energy (kWh) and money."""
+    kwh_per = interval / 3_600_000.0
+    sessions, cur, gap = [], None, 0
+
+    def close():
+        nonlocal cur
+        if cur and cur["n"] >= min_len:
+            energy = cur["sum_power"] * kwh_per
+            sessions.append({
+                "start": cur["start"], "end": cur["end"],
+                "duration": cur["end"] - cur["start"] + interval,
+                "peak_util": round(cur["peak_util"]), "peak_vram": round(cur["peak_vram"]),
+                "avg_power": round(cur["sum_power"] / cur["n"]),
+                "energy_kwh": round(energy, 4), "cost": round(energy * price, 4)})
+        cur = None
+
+    for ts, util, power, mem in rows:
+        if (util or 0) >= active_util:
+            if cur is None:
+                cur = {"start": ts, "end": ts, "peak_util": 0, "peak_vram": 0, "sum_power": 0.0, "n": 0}
+            cur["end"] = ts
+            cur["peak_util"] = max(cur["peak_util"], util or 0)
+            cur["peak_vram"] = max(cur["peak_vram"], mem or 0)
+            cur["sum_power"] += (power or 0)
+            cur["n"] += 1
+            gap = 0
+        elif cur is not None:
+            gap += 1
+            if gap > max_gap:
+                close(); gap = 0
+    close()
+    return sorted(sessions, key=lambda s: -s["start"])
+
 def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
+    # Top-processes is refreshed by sample_once (10s cadence) and cached on
+    # HEALTH["processes"] — calling it here too would double-step the _PROC_PREV
+    # jiffy deltas across two cadences and corrupt both. Reuse the cached value.
     collect_os_releases()
     HEALTH["at"]      = int(time.time())
 
@@ -1957,21 +2525,30 @@ def _parse_ssh_target(t):
     port = int(g["port"]) if g["port"] else 22
     if not (1 <= port <= 65535):
         return None
+    # Defence-in-depth: a user/host beginning with '-' could be read as an ssh
+    # option (e.g. "-oProxyCommand=…") if it ever reached argv unguarded. The
+    # ssh calls below also pass the destination after "--", so this is the belt
+    # to that suspenders.
+    if g["user"].startswith("-") or g["host"].startswith("-"):
+        return None
     return g["user"], g["host"], port
 
 def list_hosts():
     with LOCK:
-        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json "
-                          "FROM hosts ORDER BY added_at").fetchall()
+        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json, "
+                          "poll_timeout, poll_calibrated_at FROM hosts ORDER BY added_at").fetchall()
     out = []
-    for name, target, tags, added, checked, blob in rows:
+    for name, target, tags, added, checked, blob, ptimeout, pcal in rows:
         try:
             check = json.loads(blob) if blob else None
         except Exception:
             check = None
         out.append({"name": name, "ssh_target": target,
                     "tags": [t for t in (tags or "").split(",") if t],
-                    "added_at": added, "last_check_at": checked, "last_check": check})
+                    "added_at": added, "last_check_at": checked, "last_check": check,
+                    # Adaptive poll budget (#99): None until a host is calibrated.
+                    "poll_timeout": int(ptimeout) if ptimeout else None,
+                    "poll_calibrated_at": pcal})
     return out
 
 def add_host(name, ssh_target, tags=""):
@@ -2183,33 +2760,43 @@ _WIN_PS_CMD = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Co
 
 HOST_DATA = {}          # name -> {"data": {...}, "at": int, "error": str?}
 HOST_DATA_LOCK = threading.Lock()
-HOST_POLL_TIMEOUT = 15
+HOST_POLL_TIMEOUT = 15           # default per-host probe budget (seconds)
+# Adaptive per-host poll timeout (issue #99): a host that keeps timing out at its
+# current budget is recalibrated once with a high ceiling to learn how long its
+# probe actually needs, then that learned budget is persisted and reused. Fast
+# hosts never leave the 15s default.
+POLL_TIMEOUT_TRIPWIRE   = 2      # consecutive timeouts before we recalibrate
+POLL_CALIBRATION_CEILING = 120   # safety ceiling for the learning probe (seconds)
+POLL_TIMEOUT_MAX        = 90      # cap on any learned budget
+POLL_TIMEOUT_HEADROOM   = 1.5     # learned = measured * headroom (+ a few seconds)
 
-def probe_host_metrics(user, host, port, family="linux"):
-    """Run the right probe on the remote via SSH stdin, return (data, error).
-    Windows hosts get the PowerShell probe; everything else gets probe.py. Both
-    emit the same JSON shape, so the caller and the UI don't branch on OS."""
+def probe_host_metrics(user, host, port, family="linux", timeout=HOST_POLL_TIMEOUT):
+    """Run the right probe on the remote via SSH stdin. Returns
+    (data, error, elapsed_ms, timed_out). Windows hosts get the PowerShell probe;
+    everything else gets probe.py — both emit the same JSON shape, so the caller
+    and the UI don't branch on OS. `timed_out` is True only when ssh hit the
+    timeout (rc 124), which is what the adaptive calibration keys off (#99)."""
     if family == "windows":
         if not _PROBE_PS_SCRIPT:
-            return None, "probe.ps1 not packaged in this image"
-        rc, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-                                          _PROBE_PS_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+            return None, "probe.ps1 not packaged in this image", 0, False
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                           _PROBE_PS_SCRIPT, timeout=timeout)
     else:
         if not _PROBE_SCRIPT:
-            return None, "probe.py not packaged in this image"
-        rc, out, err, _ = _ssh_with_stdin(user, host, port, "python3 -",
-                                          _PROBE_SCRIPT, timeout=HOST_POLL_TIMEOUT)
+            return None, "probe.py not packaged in this image", 0, False
+        rc, out, err, ms = _ssh_with_stdin(user, host, port, "python3 -",
+                                           _PROBE_SCRIPT, timeout=timeout)
     if rc != 0:
-        return None, _clean_ssh_err(err, out, rc)
+        return None, _clean_ssh_err(err, out, rc), ms, rc == 124
     # lstrip a UTF-8 BOM: PowerShell over SSH can prepend one, which str.strip()
     # won't remove and which would otherwise make json.loads choke on char 0.
     out = (out or "").lstrip("﻿").strip()
     if not out:
-        return None, "empty response from probe"
+        return None, "empty response from probe", ms, False
     try:
-        return json.loads(out), None
+        return json.loads(out), None, ms, False
     except Exception as e:
-        return None, f"bad JSON from probe: {e}"
+        return None, f"bad JSON from probe: {e}", ms, False
 
 def _local_now_snapshot():
     """Build a 'host' block for the hub itself, matching the probe shape so
@@ -2250,10 +2837,70 @@ def _local_now_snapshot():
         }
     return out
 
+# ── Adaptive per-host poll timeout (issue #99) ────────────────────────────────
+def _host_poll_state(name):
+    """(timeout, fails) for a host — timeout falls back to the global default."""
+    try:
+        with LOCK:
+            row = DB.execute("SELECT poll_timeout, poll_fails FROM hosts WHERE name=?", (name,)).fetchone()
+    except Exception:
+        return HOST_POLL_TIMEOUT, 0
+    t = row[0] if row and row[0] else None
+    return (int(t) if t else HOST_POLL_TIMEOUT), (int(row[1]) if row and row[1] else 0)
+
+def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
+    sets, params = [], []
+    if timeout is not None:   sets.append("poll_timeout=?");       params.append(int(timeout))
+    if fails is not None:      sets.append("poll_fails=?");          params.append(int(fails))
+    if calibrated:             sets.append("poll_calibrated_at=?");  params.append(int(time.time()))
+    if not sets:
+        return
+    params.append(name)
+    try:
+        with LOCK:
+            DB.execute(f"UPDATE hosts SET {','.join(sets)} WHERE name=?", params)
+            DB.commit()
+    except Exception as e:
+        print("host poll-state save error:", e, flush=True)
+
+def _learned_timeout(measured_ms):
+    """Turn a measured probe time into a budget: headroom over the real cost,
+    floored at the default and capped at the ceiling."""
+    secs = (measured_ms or 0) / 1000.0
+    return max(HOST_POLL_TIMEOUT, min(POLL_TIMEOUT_MAX, int(secs * POLL_TIMEOUT_HEADROOM) + 3))
+
+def _poll_and_adapt(name, u, host, port, fam):
+    """Probe one host at its learned budget. On a *timeout* (not other errors),
+    count it; once a host trips the wire, recalibrate once with a high ceiling to
+    learn the budget it actually needs, persist it, and use that probe's data.
+    Returns (data, error). Pure of the cache so it's unit-testable."""
+    timeout, fails = _host_poll_state(name)
+    data, err, _ms, timed_out = probe_host_metrics(u, host, port, fam, timeout=timeout)
+    if data:
+        if fails:
+            _host_poll_save(name, fails=0)
+        return data, None
+    if not timed_out:
+        return None, err                      # genuine error — don't touch tuning
+    fails += 1
+    _host_poll_save(name, fails=fails)
+    if fails < POLL_TIMEOUT_TRIPWIRE:
+        return None, err
+    # Recalibrate: one probe with the safety ceiling to learn the real cost.
+    cdata, cerr, cms, _ct = probe_host_metrics(u, host, port, fam, timeout=POLL_CALIBRATION_CEILING)
+    if cdata:
+        learned = _learned_timeout(cms)
+        _host_poll_save(name, timeout=learned, fails=0, calibrated=True)
+        print(f"host '{name}': calibrated poll timeout to {learned}s "
+              f"(probe took {round((cms or 0)/1000,1)}s)", flush=True)
+        return cdata, None
+    return None, cerr or err                  # too slow even at the ceiling / down
+
 def host_poller():
-    """Loop: probe every registered host whose last Test was healthy. Per-host
-    timeouts isolate slow remotes so the loop never stalls. Errors are kept on
-    the cache row so the UI can show a 'last error' instead of just going dark."""
+    """Loop: probe every registered host whose last Test was healthy. A per-host
+    adaptive timeout (issue #99) isolates slow remotes — they self-calibrate to a
+    working budget instead of going permanently dark, while fast hosts stay at the
+    15s default. Errors are kept on the cache row so the UI can show a last error."""
     # Stagger the first run a touch so we don't fire before the app is fully up.
     time.sleep(2)
     while True:
@@ -2267,7 +2914,7 @@ def host_poller():
                     continue
                 u, host, port = parsed
                 fam = ((check.get("os") or {}).get("family")) or "linux"
-                data, err = probe_host_metrics(u, host, port, fam)
+                data, err = _poll_and_adapt(h["name"], u, host, port, fam)
                 with HOST_DATA_LOCK:
                     entry = HOST_DATA.get(h["name"], {})
                     if data:
@@ -2300,7 +2947,7 @@ def _ssh(user, host, port, cmd, timeout=8):
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), "--", f"{user}@{host}", cmd,
         ], capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
@@ -2319,7 +2966,7 @@ def _ssh_with_stdin(user, host, port, cmd, stdin_bytes, timeout=60):
     t0 = time.time()
     try:
         p = subprocess.run([
-            "ssh", *_SSH_BASE_ARGS, "-p", str(port), f"{user}@{host}", cmd,
+            "ssh", *_SSH_BASE_ARGS, "-p", str(port), "--", f"{user}@{host}", cmd,
         ], input=stdin_bytes, capture_output=True, timeout=timeout)
         ms = int((time.time() - t0) * 1000)
         return (p.returncode,
@@ -2747,8 +3394,21 @@ SETTING_DEFAULTS = {
     "telegram_chat_id":    "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
+    "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
+    "currency":            "$",        # symbol shown next to costs
+    # ── dual (day/night) tariff — revamp ──────────────────────────────────────
+    "tariff_mode":         "single",   # "single" | "dual"  (default = original flat behaviour)
+    "kwh_price_night":     "",         # night price per kWh; blank => silently behaves as single
+    "night_start":         "22:00",    # local time-of-day "HH:MM"; window may wrap midnight
+    "night_end":           "06:00",    # local time-of-day "HH:MM"
+    "country":             "",         # ISO-3166 alpha-2 — UI prefill memo only; backend never resolves it
+    "system_idle_watts":   "",         # optional operator baseline (mainboard/fans/PSU/disks); blank => "other" omitted, never a guessed wall figure
+    # ── Integrations / experiment-tracking API (push/pull) ────────────────────
+    "api_key":             "",         # Bearer/X-API-Key for run ingest; empty => not generated (ingest fail-closed)
+    "mlflow_uri":          "",         # MLflow tracking server base (blank = off)
+    "mlflow_token":        "",         # optional bearer for a secured MLflow
 }
-SETTING_SECRETS = {"discord_webhook_url", "telegram_token"}   # never round-tripped to the UI in full
+SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
@@ -2762,6 +3422,30 @@ def get_settings():
     except Exception as e:
         print("settings read error:", e, flush=True)
     return out
+
+# Settings that hold a URL the server itself will later POST to (the alert
+# webhooks). The dashboard API is intentionally unauthenticated on a trusted
+# LAN, so validating the scheme/host on save keeps someone who can reach the
+# dashboard from pointing these at a non-HTTP scheme or an empty host — a small
+# SSRF-surface tightening, not a change to the trusted-LAN model.
+_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server"}
+
+def _validate_url_settings(updates):
+    """Return an error string if any URL-valued setting is malformed, else None.
+    An empty value is allowed (it clears the setting)."""
+    for key in _URL_SETTING_KEYS:
+        if key not in updates:
+            continue
+        val = (updates[key] or "").strip()
+        if not val:
+            continue
+        try:
+            u = urllib.parse.urlparse(val)
+        except Exception:
+            return f"{key} is not a valid URL."
+        if u.scheme not in ("http", "https") or not u.netloc:
+            return f"{key} must be an http(s) URL with a host."
+    return None
 
 def save_settings(updates):
     """Persist any subset of known setting keys. Unknown keys are ignored."""
@@ -2961,6 +3645,89 @@ def _gpu_num(x):
     except ValueError:
         return 0.0
 
+# Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
+# utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for
+# headroom), performance state, memory-junction temp, and the *throttle reasons*
+# that explain a card quietly running below its rated clocks. All best-effort —
+# many consumer GPUs report "[N/A]" for some of these and very old drivers may not
+# know a field name at all — so enrichment runs in its own guard and never blocks
+# the core GPU sample. `clocks_throttle_reasons.active` is a hex bitmask; the
+# field prefix was renamed `clocks_event_reasons` in newer drivers, so we try both.
+_THROTTLE_BITS = [
+    (0x0000000000000004, "Power cap"),    # SW_POWER_CAP — hitting the power limit
+    (0x0000000000000008, "HW slowdown"),  # HW_SLOWDOWN (thermal/power/other, generic)
+    (0x0000000000000020, "SW thermal"),   # SW_THERMAL_SLOWDOWN
+    (0x0000000000000040, "HW thermal"),   # HW_THERMAL_SLOWDOWN — too hot
+    (0x0000000000000080, "Power brake"),  # HW_POWER_BRAKE_SLOWDOWN — external power brake
+]
+
+def _decode_throttle(hexstr):
+    """nvidia-smi throttle bitmask → list of *meaningful* reasons. Idle / app-clocks
+    / sync-boost / display bits are normal and intentionally ignored."""
+    try:
+        mask = int(str(hexstr).strip(), 16)
+    except (TypeError, ValueError):
+        return []
+    return [label for bit, label in _THROTTLE_BITS if mask & bit]
+
+def _enrich_gpus(gpus):
+    """Best-effort: attach mem_util/clocks/power_limit/pstate/temp_mem and throttle
+    reasons to each card dict in `gpus` (matched by index). Mutates in place."""
+    by_idx = {g["idx"]: g for g in gpus}
+    try:
+        rows = smi(["--query-gpu=index,utilization.memory,clocks.current.sm,clocks.current.memory,"
+                    "power.limit,temperature.memory,pstate", "--format=csv,noheader,nounits"]).splitlines()
+        for line in rows:
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 7:
+                continue
+            g = by_idx.get(int(_gpu_num(p[0])))
+            if not g:
+                continue
+            g["mem_util"]    = _gpu_num(p[1])
+            g["clk_sm"]      = _gpu_num(p[2])
+            g["clk_mem"]     = _gpu_num(p[3])
+            g["power_limit"] = _gpu_num(p[4])
+            g["temp_mem"]    = _gpu_num(p[5])
+            g["pstate"]      = p[6] if (p[6] and not p[6].startswith("[")) else ""
+    except Exception:
+        pass
+    for field in ("clocks_throttle_reasons.active", "clocks_event_reasons.active"):
+        try:
+            rows = smi(["--query-gpu=index," + field, "--format=csv,noheader,nounits"]).splitlines()
+        except Exception:
+            continue
+        ok = False
+        for line in rows:
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 2 or not p[1] or p[1].startswith("["):
+                continue
+            g = by_idx.get(int(_gpu_num(p[0])))
+            if g is None:
+                continue
+            g["throttle"] = _decode_throttle(p[1])
+            g["throttled"] = bool(g["throttle"])
+            ok = True
+        if ok:
+            break
+
+def _gpu_extra(gpus):
+    """Aggregate the enriched per-card telemetry into one representative dict for the
+    always-visible 'GPU right now' panel (single-GPU rigs never see the per-card cards)."""
+    if not gpus:
+        return {}
+    g0 = gpus[0]
+    return {
+        "mem_util":  round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus)),
+        "clk_sm":    round(g0.get("clk_sm", 0)),
+        "clk_mem":   round(g0.get("clk_mem", 0)),
+        "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
+        "pstate":    g0.get("pstate", ""),
+        "temp_mem":  round(max((g.get("temp_mem", 0) for g in gpus), default=0)),
+        "throttled": any(g.get("throttled") for g in gpus),
+        "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
+    }
+
 def service_for_pid(pid, nm):
     try:
         with open(f"/proc/{pid}/cgroup") as f:
@@ -3057,24 +3824,48 @@ def sample_once():
     # a GPU-less host). Now a GPU failure just degrades the GPU panel to "absent"
     # while temperature & friends keep refreshing.
     util = mem_used = mem_total = power = temp = 0.0
+    gpus = []
+    gpu_extra = {}
     procs = {}
+    gpu_pids = {}
     gpu_avail = False
     try:
-        g = smi(["--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-                 "--format=csv,noheader,nounits"]).splitlines()[0].split(",")
-        # Parse each field defensively: nvidia-smi emits the literal "[N/A]" /
-        # "[Not Supported]" for power.draw/temperature.gpu on many consumer/laptop
-        # GPUs and inside containers, even with `nounits`. The old all-or-nothing
-        # float() unpack raised ValueError on that, which the except below caught
-        # and reported the (present, working) GPU as ABSENT. Degrade just the bad
-        # field to 0 instead.
-        util, mem_used, mem_total, power, temp = (_gpu_num(x) for x in g)
+        # One CSV row per card (issue #95). Parse each field defensively: nvidia-smi
+        # emits the literal "[N/A]" / "[Not Supported]" for power.draw/temperature
+        # on many consumer/laptop GPUs and inside containers, even with `nounits` —
+        # so degrade just the bad field to 0 rather than dropping the whole card.
+        rows = smi(["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                    "--format=csv,noheader,nounits"]).splitlines()
+        for line in rows:
+            if not line.strip():
+                continue
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < 7:
+                continue
+            u, mu, mt, pw, tp = (_gpu_num(x) for x in p[2:7])
+            gpus.append({"idx": int(_gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
+                         "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp})
+        if not gpus:
+            raise ValueError("nvidia-smi returned no GPU rows")
+        gpu_avail = True
+        # Aggregate across cards for the existing single-GPU views: VRAM + power are
+        # the pool, utilisation is averaged, temperature is the hottest card.
+        mem_used  = sum(g["mem_used"] for g in gpus)
+        mem_total = sum(g["mem_total"] for g in gpus)
+        power     = sum(g["power"] for g in gpus)
+        util      = round(sum(g["util"] for g in gpus) / len(gpus))
+        temp      = max(g["temp"] for g in gpus)
+        _enrich_gpus(gpus)                 # mem-bw util, clocks, power limit, throttle reasons (best-effort)
+        gpu_extra = _gpu_extra(gpus)
         for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
             if line.strip():
                 pid, mem = (p.strip() for p in line.split(","))
                 svc = service_for_pid(pid, nm)
                 procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
-        gpu_avail = True
+                try:
+                    gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _gpu_num(mem)
+                except ValueError:
+                    pass
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if LATEST.get("gpu_avail"):
@@ -3104,7 +3895,41 @@ def sample_once():
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = sample_callers(conts, {c["name"] for c in ai})
 
+    # Model intelligence: per-model metadata (Ollama /api/show, cached) + live serving
+    # telemetry (vLLM/TGI /metrics). Both best-effort — a slow/absent endpoint must
+    # never wedge the sample, so each is isolated.
+    try:
+        model_meta = collect_model_meta(ai, models)
+    except Exception:
+        model_meta = {}
+    try:
+        serving = collect_serving(ai)
+    except Exception:
+        serving = []
+    try:
+        training = collect_training(gpu_pids)
+    except Exception:
+        training = []
+    try:
+        devtools = collect_devtools(gpu_pids)
+    except Exception:
+        devtools = []
+
     host = read_host()
+    # Measured CPU/DRAM watts (RAPL) + per-process CPU breakdown — both best-effort.
+    # Call collect_top_processes ONCE here (the sampler cadence) and cache it so the
+    # Top-processes card + the cost attribution share one delta (health_scan reuses it).
+    rapl = {}
+    try:
+        rapl = read_rapl_power()
+    except Exception:
+        rapl = {}
+    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    try:
+        top_cpu = collect_top_processes()
+    except Exception:
+        top_cpu = None
+    HEALTH["processes"] = top_cpu
     ts = int(time.time())
     if _DB_MAINTENANCE:
         return
@@ -3113,25 +3938,49 @@ def sample_once():
         # history charts skip the gap via AVG() instead of showing a fake 0 dip;
         # the host columns are always real.
         gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
-        DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp)"
-                   " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)"
+                   " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (ts, *gcols, host["cpu"], host["ram_used"],
-                    host["ram_total"], host["load1"], host["ctemp"]))
+                    host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power))
         for svc, mem in procs.items():
             DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
+        pp_rows = _attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
+        if pp_rows:
+            DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
         for svc, mdl, vram in models:
             if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
                 DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
         for (caller, server), n in edges.items():
             DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
+        # Per-GPU history only when there's more than one card (single-GPU rigs are
+        # already covered by the aggregate `samples` table) — keeps storage lean.
+        if gpu_avail and len(gpus) > 1:
+            for g in gpus:
+                DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
+                           "VALUES(?,?,?,?,?,?,?)",
+                           (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
+        DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
+                       _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "edges", "events"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
+        if ts % 60 < INTERVAL:   # stale-run janitor: a crashed/disconnected push run -> killed
+            DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
+                       "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
+                       (ts, ts - 180))
         DB.commit()
+    # MLflow pull (network; outside the lock) every ~5 min when configured.
+    if get_settings().get("mlflow_uri") and ts % 300 < INTERVAL:
+        try:
+            sync_mlflow()
+        except Exception as e:
+            print("mlflow sync error:", e, flush=True)
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
-                  gpu_avail=gpu_avail,
+                  cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
+                  gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
 
@@ -3276,6 +4125,849 @@ def api_data():
                     "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
+def _hhmm_to_min(s, default):
+    """'HH:MM' -> minutes since midnight [0,1440). Falls back to `default` on junk."""
+    try:
+        h, m = str(s).split(":")
+        v = int(h) * 60 + int(m)
+        return v if 0 <= v < 1440 else default
+    except Exception:
+        return default
+
+def _make_is_night(night_start, night_end):
+    """Predicate is_night(ts) in the SERVER's local time. Handles a window that
+    wraps midnight (start > end) and the degenerate start == end (no night)."""
+    ns = _hhmm_to_min(night_start, 22 * 60)
+    ne = _hhmm_to_min(night_end,    6 * 60)
+    if ns == ne:
+        return lambda ts: False                       # empty window => everything is day
+    if ns < ne:                                        # same-day window, e.g. 01:00–05:00
+        def is_night(ts):
+            lt = time.localtime(ts)
+            mins = lt.tm_hour * 60 + lt.tm_min
+            return ns <= mins < ne
+    else:                                              # wraps midnight, e.g. 22:00–06:00
+        def is_night(ts):
+            lt = time.localtime(ts)
+            mins = lt.tm_hour * 60 + lt.tm_min
+            return mins >= ns or mins < ne
+    return is_night
+
+@app.route("/api/cost")
+def api_cost():
+    """Power → kWh → money (#25), now tariff-aware. Integrates the GPU `power`
+    samples we already collect; each sample stands for INTERVAL seconds, so
+    energy(kWh) = sum(power_W) * INTERVAL / 3_600_000.
+
+    Single mode (default): cost = energy * kwh_price — byte-for-byte the original
+    behaviour. Dual mode: each sample is billed at the night price inside the
+    (possibly midnight-wrapping) night window and the day price otherwise, split
+    per window. A blank night price silently degrades to single, so a user who
+    doesn't know their rates keeps the simple average. The card stays hidden until
+    a day price is set (`enabled`)."""
+    s = get_settings()
+    def fnum(key):
+        v = (s.get(key) or "").strip()
+        if v == "":
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    day_price   = fnum("kwh_price") or 0.0
+    night_price = fnum("kwh_price_night")
+    mode = "dual" if (s.get("tariff_mode") == "dual" and night_price is not None
+                      and day_price > 0) else "single"
+    currency = s.get("currency") or "$"
+    is_night = _make_is_night(s.get("night_start", "22:00"), s.get("night_end", "06:00"))
+
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per_wsample = INTERVAL / 3_600_000.0   # one power sample -> kWh
+
+    with LOCK:
+        cur = DB.cursor()
+        def avg_w(since):
+            return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
+        def total_kwh(since):
+            tot = cur.execute("SELECT SUM(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0
+            return tot * kwh_per_wsample
+        def split_kwh(since):
+            """One pass over (ts,power) >= since -> (day_kwh, night_kwh)."""
+            day_w = night_w = 0.0
+            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL", (since,)):
+                if is_night(ts):
+                    night_w += p
+                else:
+                    day_w += p
+            return day_w * kwh_per_wsample, night_w * kwh_per_wsample
+
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        wins = {"today": midnight, "d7": now - 604800, "d30": now - 2592000}
+        kwh, cost, split = {}, {}, {}
+        for w, since in wins.items():
+            if mode == "dual":
+                dk, nk = split_kwh(since)
+            else:
+                dk, nk = total_kwh(since), 0.0       # single: one SUM, no per-row loop
+            dc, nc = dk * day_price, nk * (night_price or 0.0)
+            kwh[w]  = round(dk + nk, 3)
+            cost[w] = round(dc + nc, 2)
+            split[w] = {"day_kwh": round(dk, 3), "night_kwh": round(nk, 3),
+                        "day_cost": round(dc, 2), "night_cost": round(nc, 2)}
+
+        # Cumulative-cost series across the selected range (mirrors api_data buckets).
+        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        labels, cost_cum, running = [], [], 0.0
+        if mode == "dual":                            # stream + classify per bucket (one pass)
+            acc = {}
+            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
+                b = (ts // bk) * bk
+                price = night_price if is_night(ts) else day_price
+                acc[b] = acc.get(b, 0.0) + (p or 0) * kwh_per_wsample * price
+            for b in sorted(acc):
+                running += acc[b]
+                labels.append(int(b)); cost_cum.append(round(running, 4))
+        else:                                         # single: cheap SQL-bucketed path (unchanged)
+            rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
+                               (bk, bk, since)).fetchall()
+            for b, p in rows:
+                running += (p or 0) * kwh_per_wsample * day_price
+                labels.append(int(b)); cost_cum.append(round(running, 4))
+
+    return jsonify({
+        "enabled": day_price > 0, "kwh_price": day_price, "currency": currency,
+        "range": rng, "bucket_sec": bk,
+        "current_w": round(LATEST.get("power") or 0),
+        "avg_24h_w": avg_w(now - 86400), "avg_7d_w": avg_w(now - 604800),
+        "kwh": kwh, "cost": cost, "split": split,
+        "tariff": {"mode": mode, "price_day": day_price, "price_night": night_price,
+                   "night_start": s.get("night_start", "22:00"),
+                   "night_end": s.get("night_end", "06:00")},
+        "series": {"labels": labels, "cost_cum": cost_cum},
+    })
+
+# ── Costs page: per-machine → per-component → per-process (with drilldown) ─────
+_TOTAL_W_EXPR = "COALESCE(power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0)"
+
+def _cost_ctx():
+    """Shared tariff context for the costs endpoints. Returns a dict with the
+    day/night prices, mode, currency and an is_night(ts) predicate."""
+    s = get_settings()
+    def fnum(key):
+        v = (s.get(key) or "").strip()
+        try:
+            return float(v) if v != "" else None
+        except ValueError:
+            return None
+    day = fnum("kwh_price") or 0.0
+    night = fnum("kwh_price_night")
+    mode = "dual" if (s.get("tariff_mode") == "dual" and night is not None and day > 0) else "single"
+    return {"day": day, "night": night, "mode": mode, "currency": s.get("currency") or "$",
+            "is_night": _make_is_night(s.get("night_start", "22:00"), s.get("night_end", "06:00")),
+            "night_start": s.get("night_start", "22:00"), "night_end": s.get("night_end", "06:00"),
+            "idle_w": fnum("system_idle_watts")}
+
+def _price_at(ctx, ts):
+    return ctx["night"] if (ctx["mode"] == "dual" and ctx["is_night"](ts)) else ctx["day"]
+
+@app.route("/api/costs")
+def api_costs():
+    """Richer power+cost view for the Costs page: per-machine totals, a stacked
+    component breakdown (GPU measured, CPU/DRAM measured via RAPL, optional operator
+    'other' baseline) and a ranked per-process/service/model breakdown — all over a
+    selectable range and tariff-aware. /api/cost (GPU-only) is left untouched."""
+    ctx = _cost_ctx()
+    cur = ctx["currency"]
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    with LOCK:
+        c = DB.cursor()
+        since = (c.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        comp = c.execute(f"SELECT (ts/?)*? b, AVG(power), AVG(cpu_power), AVG(dram_power) "
+                         f"FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
+        # component energy + cost over the range (tariff-aware, one streaming pass)
+        comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
+        cost_range = 0.0
+        nticks = 0
+        for ts, p, cp, dp in c.execute("SELECT ts,power,cpu_power,dram_power FROM samples WHERE ts>=?", (since,)):
+            nticks += 1
+            price = _price_at(ctx, ts)
+            tot = (p or 0) + (cp or 0) + (dp or 0)
+            comp_kwh["gpu"] += (p or 0) * kwh_per
+            comp_kwh["cpu"] += (cp or 0) * kwh_per
+            comp_kwh["dram"] += (dp or 0) * kwh_per
+            cost_range += tot * kwh_per * price
+        # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
+        def win_cost(start):
+            tot = 0.0
+            for ts, w in c.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=?", (start,)):
+                tot += (w or 0) * kwh_per * _price_at(ctx, ts)
+            return round(tot, 2)
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
+        # ranked per-entity breakdown from power_proc (tariff-aware day/night split)
+        acc = {}
+        for ts, kind, name, watts in c.execute("SELECT ts,kind,name,watts FROM power_proc WHERE ts>=?", (since,)):
+            a = acc.setdefault((kind, name), [0.0, 0.0])
+            if ctx["mode"] == "dual" and ctx["is_night"](ts):
+                a[1] += watts
+            else:
+                a[0] += watts
+    hours = max(1e-9, (now - since) / 3600.0)
+    idle_w = ctx["idle_w"]
+    labels = [int(r[0]) for r in comp]
+    series = {"labels": labels,
+              "gpu":  [round(r[1] or 0) for r in comp],
+              "cpu":  [round(r[2] or 0) if r[2] is not None else 0 for r in comp],
+              "dram": [round(r[3] or 0) if r[3] is not None else 0 for r in comp]}
+    have_cpu = any(r[2] is not None for r in comp)
+    have_dram = any(r[3] is not None for r in comp)
+    if not have_cpu: series.pop("cpu")
+    if not have_dram: series.pop("dram")
+    if idle_w:
+        series["other"] = [round(idle_w)] * len(labels)
+    breakdown = []
+    for (kind, name), (dayw, nightw) in acc.items():
+        energy = (dayw + nightw) * kwh_per
+        cost = (dayw * ctx["day"] + nightw * (ctx["night"] if ctx["night"] is not None else ctx["day"])) * kwh_per
+        breakdown.append({"kind": kind, "name": name, "energy_kwh": round(energy, 4),
+                          "cost": round(cost, 4), "avg_w": round((dayw + nightw) / max(1, nticks))})
+    breakdown.sort(key=lambda x: -x["energy_kwh"])
+    now_gpu = round(LATEST.get("power") or 0)
+    now_cpu = round(LATEST.get("cpu_power") or 0) if LATEST.get("cpu_power") is not None else None
+    now_dram = round(LATEST.get("dram_power") or 0) if LATEST.get("dram_power") is not None else None
+    now_total = now_gpu + (now_cpu or 0) + (now_dram or 0) + (round(idle_w) if idle_w else 0)
+    measured = ["gpu"] + (["cpu"] if have_cpu else []) + (["dram"] if have_dram else [])
+    machine = {"name": "local",
+               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram, "total": now_total},
+               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items() if (k != "dram" or have_dram)},
+               "cost": cost_win, "cost_range": round(cost_range, 2),
+               "measured": measured, "estimated": (["other"] if idle_w else [])}
+    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"][k] for k in machine["energy_kwh"] if k != "total"), 3)
+    return jsonify({
+        "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": cur,
+        "rapl_available": have_cpu,
+        "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
+                   "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
+        "machines": [machine], "components": series, "breakdown": breakdown[:40],
+    })
+
+@app.route("/api/costs/entity")
+def api_costs_entity():
+    """Per-entity drilldown: a power + cumulative-cost time-series for one
+    process/service/model over the range, plus what resources it used."""
+    ctx = _cost_ctx()
+    name = request.args.get("name", "")
+    kind = request.args.get("kind", "")
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    with LOCK:
+        c = DB.cursor()
+        since = (c.execute("SELECT MIN(ts) FROM power_proc").fetchone()[0] or now) if span is None else now - span
+        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+        q = "SELECT (ts/?)*? b, AVG(watts), MAX(watts) FROM power_proc WHERE name=? AND ts>=?"
+        args = [bk, bk, name, since]
+        if kind:
+            q += " AND kind=?"; args.append(kind)
+        q += " GROUP BY b ORDER BY b"
+        rows = c.execute(q, args).fetchall()
+        # cumulative tariff-aware cost needs per-bucket price; classify by bucket start ts
+        vram_peak = None
+        if kind != "cpu":
+            vram_peak = c.execute("SELECT MAX(mem) FROM proc WHERE service=? AND ts>=?", (name, since)).fetchone()[0]
+    labels, watts, cost_cum, running, energy = [], [], [], 0.0, 0.0
+    peak = 0.0
+    for b, avgw, maxw in rows:
+        labels.append(int(b)); watts.append(round(avgw or 0))
+        peak = max(peak, maxw or 0)
+        e = (avgw or 0) * kwh_per * (bk / INTERVAL)   # energy this bucket (avg W over bk seconds)
+        energy += e
+        running += e * _price_at(ctx, int(b))
+        cost_cum.append(round(running, 4))
+    return jsonify({
+        "name": name, "kind": kind, "range": rng, "bucket_sec": bk, "currency": ctx["currency"],
+        "energy_kwh": round(energy, 4), "cost": round(running, 2),
+        "avg_w": round(sum(watts) / len(watts)) if watts else 0, "peak_w": round(peak),
+        "series": {"labels": labels, "watts": watts, "cost_cum": cost_cum},
+        "resources": {"gpu_vram_peak_mb": round(vram_peak) if vram_peak else None},
+    })
+
+@app.route("/api/sessions")
+def api_sessions():
+    """GPU activity sessions over the range — contiguous GPU-busy periods rebuilt
+    from the power/util history. Plus the live training processes detected on the
+    hub right now (LATEST['training']). Powers the Experiments tab."""
+    s = get_settings()
+    try:
+        price = float(s.get("kwh_price") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    rng = request.args.get("range", "7d")
+    span = RANGES.get(rng, 604800)
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        rows = cur.execute("SELECT ts,util,power,mem_used FROM samples WHERE ts>=? ORDER BY ts", (since,)).fetchall()
+    sessions = _gpu_sessions(rows, INTERVAL, price=price)[:50]
+    tot_energy = round(sum(x["energy_kwh"] for x in sessions), 3)
+    return jsonify({
+        "range": rng, "currency": s.get("currency") or "$",
+        "price": price, "kwh_price": price,
+        "active_pct": _ACTIVE_UTIL,
+        "sessions": sessions,
+        "totals": {"count": len(sessions), "energy_kwh": tot_energy,
+                   "cost": round(tot_energy * price, 2),
+                   "active_hours": round(sum(x["duration"] for x in sessions) / 3600.0, 1)},
+        "training": LATEST.get("training") or [],
+        "devtools": LATEST.get("devtools") or [],
+    })
+
+# ── Integrations: experiment/run tracking API (push/pull) + MLflow sync ────────
+# Pivot from /proc auto-detection to a key-authenticated ingest API a notebook can
+# push to (Jupyter/Colab/Kaggle via homelab_run.py), pulled back with the run's real
+# GPU energy/cost attached by overlapping its [start,end] window with `samples`.
+MAX_RUN_FIELD, MAX_RUN_JSON, MAX_METRICS_REQ = 4096, 64 * 1024, 1000
+RUN_SOURCES = {"jupyter", "colab", "kaggle", "mlflow", "api", "cli"}
+RUN_STATUS  = {"running", "finished", "failed", "killed"}
+
+# Multiple named API keys, each optionally with an expiry, stored HASHED (sha256 —
+# the plaintext is shown once at creation and never persisted). Runs are attributed
+# to the key that pushed them, so you can track per-key usage and revoke individually.
+def _hash_key(k):
+    return hashlib.sha256(k.encode("utf-8")).hexdigest()
+
+def _create_api_key(name, expires_in_days=None):
+    """Mint a key: persist its hash + metadata, return (id, plaintext). The plaintext
+    is the only time it's available."""
+    key = "hlm_" + secrets.token_urlsafe(32)
+    kid, now = uuid.uuid4().hex, int(time.time())
+    exp = (now + int(expires_in_days) * 86400) if expires_in_days else None
+    with LOCK:
+        DB.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
+                   "VALUES(?,?,?,?,?,?,?)", (kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None))
+        DB.commit()
+    return kid, key
+
+def _gen_api_key(name="default", expires_in_days=None):
+    """Back-compat shim (used by tests): mint a key and return the plaintext."""
+    return _create_api_key(name, expires_in_days)[1]
+
+def _key_lookup(presented):
+    """Return the id of a live (non-expired) key matching `presented`, else None,
+    and stamp its last_used_at. Stored value is a hash, so the lookup never exposes
+    a usable secret. Fail-closed: no keys => all ingest rejected."""
+    if not presented:
+        return None
+    now = int(time.time())
+    with LOCK:
+        row = DB.execute("SELECT id, expires_at FROM api_keys WHERE key_hash=?",
+                         (_hash_key(presented),)).fetchone()
+        if not row:
+            return None
+        kid, exp = row
+        if exp and exp < now:
+            return None
+        DB.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, kid))
+        DB.commit()
+    return kid
+
+def _presented_key():
+    auth = request.headers.get("Authorization", "")
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip()
+    return request.headers.get("X-API-Key", "").strip()
+
+def require_api_key(fn):
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        kid = _key_lookup(_presented_key())
+        if not kid:
+            return jsonify({"ok": False, "error": "missing, invalid, or expired API key"}), 401
+        g.api_key_id = kid
+        return fn(*a, **kw)
+    return wrapper
+
+def _clip(v, n):
+    return ("" if v is None else str(v))[:n]
+
+def _json_field(v, n):
+    if v is None:
+        return None
+    txt = v if isinstance(v, str) else json.dumps(v, separators=(",", ":"))
+    if len(txt.encode("utf-8")) > n:
+        raise ValueError("payload too large")
+    return txt
+
+def _safe_json(txt):
+    try:
+        return json.loads(txt) if txt else None
+    except Exception:
+        return None
+
+def _run_cost_window(cur, started, ended, ctx):
+    """Integrate samples.power over [started, ended] -> (energy_kwh, cost, avg_w,
+    peak_util), priced exactly like the cost card (dual-tariff aware)."""
+    end = ended or int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    e_kwh = cost = sum_p = 0.0
+    n = 0
+    peak_u = 0.0
+    for ts, util, power in cur.execute(
+            "SELECT ts,util,power FROM samples WHERE ts>=? AND ts<=? AND power IS NOT NULL",
+            (started, end)):
+        p = power or 0.0
+        sum_p += p; n += 1; peak_u = max(peak_u, util or 0)
+        e_kwh += p * kwh_per
+        cost += p * kwh_per * (_price_at(ctx, ts) or 0.0)
+    return round(e_kwh, 4), round(cost, 4), (round(sum_p / n) if n else 0), round(peak_u)
+
+@app.route("/api/integration/keys", methods=["GET", "POST"])
+def api_keys_route():
+    """GET -> {keys:[{id,name,prefix,created_at,expires_at,last_used_at,expired,runs}]}
+    (never the secret). POST {name, expires_in_days?} -> {id, key} (key revealed once)."""
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        days = body.get("expires_in_days")
+        try:
+            days = int(days) if days not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            days = None
+        if days is not None and days <= 0:
+            days = None
+        kid, key = _create_api_key(_clip(body.get("name") or "key", 128), days)
+        return jsonify({"ok": True, "id": kid, "key": key})
+    now = int(time.time())
+    with LOCK:
+        rows = DB.execute("SELECT id,name,prefix,created_at,expires_at,last_used_at "
+                          "FROM api_keys ORDER BY created_at DESC").fetchall()
+        counts = dict(DB.execute("SELECT key_id, COUNT(*) FROM runs WHERE key_id IS NOT NULL "
+                                 "GROUP BY key_id").fetchall())
+    keys = [{"id": kid, "name": name, "prefix": prefix, "created_at": created,
+             "expires_at": exp, "last_used_at": used, "expired": bool(exp and exp < now),
+             "runs": counts.get(kid, 0)}
+            for (kid, name, prefix, created, exp, used) in rows]
+    return jsonify({"keys": keys, "has_key": bool(keys)})
+
+@app.route("/api/integration/keys/<kid>", methods=["DELETE"])
+def api_keys_delete(kid):
+    """Revoke (remove) a key. Runs it pushed are kept; they just lose live attribution."""
+    with LOCK:
+        cur = DB.execute("DELETE FROM api_keys WHERE id=?", (kid,))
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown key"}), 404))
+
+@app.route("/api/runs", methods=["POST"])
+@require_api_key
+def api_runs_create():
+    body = request.get_json(silent=True) or {}
+    source = (body.get("source") or "api").lower()
+    if source not in RUN_SOURCES:
+        source = "api"
+    now = int(time.time())
+    rid = (body.get("id") or uuid.uuid4().hex)[:64]
+    try:
+        params = _json_field(body.get("params"), MAX_RUN_JSON)
+        tags = _json_field(body.get("tags"), MAX_RUN_JSON)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 413
+    with LOCK:
+        DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,notes,"
+                   "heartbeat_at,ext_id,created_at,key_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                   "ON CONFLICT(id) DO NOTHING",
+                   (rid, _clip(body.get("name") or "run", MAX_RUN_FIELD), source, "running",
+                    int(body.get("started_at") or now), None, _clip(body.get("host"), 256),
+                    params, tags, _clip(body.get("notes"), MAX_RUN_FIELD), now, None, now,
+                    getattr(g, "api_key_id", None)))
+        DB.commit()
+    return jsonify({"ok": True, "id": rid})
+
+@app.route("/api/runs/<rid>", methods=["PATCH"])
+@require_api_key
+def api_runs_update(rid):
+    body = request.get_json(silent=True) or {}
+    sets, args = ["heartbeat_at=?"], [int(time.time())]
+    if body.get("status") in RUN_STATUS:
+        sets.append("status=?"); args.append(body["status"])
+    if body.get("ended_at"):
+        sets.append("ended_at=?"); args.append(int(body["ended_at"]))
+    for f, n in (("name", MAX_RUN_FIELD), ("notes", MAX_RUN_FIELD)):
+        if f in body:
+            sets.append(f"{f}=?"); args.append(_clip(body[f], n))
+    try:
+        for f in ("params", "tags"):
+            if f in body:
+                sets.append(f"{f}=?"); args.append(_json_field(body[f], MAX_RUN_JSON))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 413
+    args.append(rid)
+    with LOCK:
+        cur = DB.execute(f"UPDATE runs SET {','.join(sets)} WHERE id=?", args)
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
+@app.route("/api/runs/<rid>/metrics", methods=["POST"])
+@require_api_key
+def api_runs_metrics(rid):
+    body = request.get_json(silent=True) or {}
+    pts = body.get("metrics")
+    if pts is None and "key" in body:
+        pts = [body]
+    pts = pts or []
+    if len(pts) > MAX_METRICS_REQ:
+        return jsonify({"ok": False, "error": f"max {MAX_METRICS_REQ} points/request"}), 413
+    now = int(time.time())
+    rows = []
+    for p in pts:
+        try:
+            rows.append((rid, int(p.get("ts") or now), int(p.get("step") or 0),
+                         _clip(p["key"], 128), float(p["value"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    with LOCK:
+        if not DB.execute("SELECT 1 FROM runs WHERE id=?", (rid,)).fetchone():
+            return jsonify({"ok": False, "error": "unknown run"}), 404
+        if rows:
+            DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
+            DB.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (now, rid))
+            DB.commit()
+    return jsonify({"ok": True, "logged": len(rows)})
+
+@app.route("/api/runs/<rid>/finish", methods=["POST"])
+@require_api_key
+def api_runs_finish(rid):
+    body = request.get_json(silent=True) or {}
+    status = body.get("status") if body.get("status") in RUN_STATUS else "finished"
+    if status == "running":
+        status = "finished"
+    ended = int(body.get("ended_at") or time.time())
+    with LOCK:
+        cur = DB.execute("UPDATE runs SET status=?, ended_at=?, heartbeat_at=? WHERE id=?",
+                         (status, ended, ended, rid))
+        DB.commit()
+    return (jsonify({"ok": True, "id": rid, "status": status}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
+@app.route("/api/runs/<rid>", methods=["DELETE"])
+def api_runs_delete(rid):
+    """Remove a run and its logged metrics. A same-origin browser management action
+    (like deleting a host or an API key), so it's open on the LAN rather than
+    key-gated — the key gates *ingest* (forgery from notebooks), not housekeeping."""
+    with LOCK:
+        cur = DB.execute("DELETE FROM runs WHERE id=?", (rid,))
+        DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
+@app.route("/api/runs")
+def api_runs_list():
+    ctx = _cost_ctx()
+    rng = request.args.get("range", "7d"); span = RANGES.get(rng, 604800)
+    status = request.args.get("status")
+    key_filter = request.args.get("key")
+    now = int(time.time()); since = 0 if span is None else now - span
+    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes,key_id "
+         "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
+    args = [since, now]
+    if status in RUN_STATUS:
+        q += "AND status=? "; args.append(status)
+    if key_filter:
+        q += "AND key_id=? "; args.append(key_filter)
+    q += "ORDER BY started_at DESC LIMIT 500"
+    out = []
+    with LOCK:
+        cur = DB.cursor()
+        key_names = dict(cur.execute("SELECT id, name FROM api_keys").fetchall())
+        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in cur.execute(q, args).fetchall():
+            e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, ended, ctx)
+            kv = {}
+            # latest value per key = the last-logged row (max rowid), robust even when
+            # several points share a timestamp.
+            for k, v in cur.execute(
+                    "SELECT key, value FROM run_metrics WHERE run_id=? AND rowid IN "
+                    "(SELECT MAX(rowid) FROM run_metrics WHERE run_id=? GROUP BY key)", (rid, rid)):
+                kv[k] = v
+            out.append({"id": rid, "name": name, "source": source, "status": st,
+                        "started_at": started, "ended_at": ended, "duration": (ended or now) - started,
+                        "host": host, "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes,
+                        "key_id": key_id, "key_name": key_names.get(key_id),
+                        "metrics_latest": kv, "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u})
+    return jsonify({"range": rng, "currency": ctx["currency"], "tariff_mode": ctx["mode"], "runs": out})
+
+@app.route("/api/runs/<rid>")
+def api_runs_get(rid):
+    ctx = _cost_ctx()
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        r = cur.execute("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
+                        "FROM runs WHERE id=?", (rid,)).fetchone()
+        if not r:
+            return jsonify({"error": "unknown run"}), 404
+        (rid, name, source, st, started, ended, host, params, tags, notes) = r
+        end = ended or now
+        metrics = {}
+        for k, ts, step, v in cur.execute(
+                "SELECT key,ts,step,value FROM run_metrics WHERE run_id=? ORDER BY key,ts,step", (rid,)):
+            d = metrics.setdefault(k, {"steps": [], "ts": [], "values": []})
+            d["steps"].append(step); d["ts"].append(ts); d["values"].append(v)
+        bk = max(INTERVAL, round(max(1, end - started) / MAX_POINTS))
+        labels, power_w, util_pct = [], [], []
+        for b, ap, au in cur.execute("SELECT (ts/?)*? b, AVG(power), AVG(util) FROM samples "
+                                     "WHERE ts>=? AND ts<=? GROUP BY b ORDER BY b", (bk, bk, started, end)):
+            labels.append(int(b)); power_w.append(round(ap or 0)); util_pct.append(round(au or 0))
+        e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, end, ctx)
+    return jsonify({"id": rid, "name": name, "source": source, "status": st,
+                    "started_at": started, "ended_at": ended, "duration": end - started, "host": host,
+                    "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes, "metrics": metrics,
+                    "resource": {"labels": labels, "power_w": power_w, "util_pct": util_pct, "bucket_sec": bk},
+                    "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u,
+                    "currency": ctx["currency"], "tariff_mode": ctx["mode"]})
+
+# ── MLflow sync (pull) — mirror MLflow runs in as source='mlflow', pure REST ───
+_MLF_STATUS = {"RUNNING": "running", "FINISHED": "finished", "FAILED": "failed",
+               "KILLED": "killed", "SCHEDULED": "running"}
+
+def _mlf(method, path, payload=None, params=None, timeout=15):
+    base = (get_settings().get("mlflow_uri") or "").rstrip("/")
+    if not base:
+        return None
+    url = base + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    hdr = {"Content-Type": "application/json"}
+    tok = get_settings().get("mlflow_token")
+    if tok:
+        hdr["Authorization"] = "Bearer " + tok
+    req = urllib.request.Request(url, data=data, headers=hdr, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body = r.read()
+        return json.loads(body) if body else {}
+
+def _ms_to_s(v):
+    return int(v) // 1000 if v else None
+
+def sync_mlflow():
+    """Pull experiments/runs/metrics from the configured MLflow server into
+    runs/run_metrics as source='mlflow'. Idempotent via uniq(source,ext_id)."""
+    if not (get_settings().get("mlflow_uri") or "").strip():
+        return 0
+    exp_ids, tok = [], None
+    while True:
+        body = _mlf("POST", "/api/2.0/mlflow/experiments/search",
+                    {"max_results": 1000, **({"page_token": tok} if tok else {})}) or {}
+        exp_ids += [e["experiment_id"] for e in body.get("experiments", [])]
+        tok = body.get("next_page_token")
+        if not tok:
+            break
+    if not exp_ids:
+        return 0
+    now, synced, tok = int(time.time()), 0, None
+    while True:
+        body = _mlf("POST", "/api/2.0/mlflow/runs/search",
+                    {"experiment_ids": exp_ids, "max_results": 1000,
+                     **({"page_token": tok} if tok else {})}) or {}
+        for run in body.get("runs", []):
+            info, data = run.get("info", {}), run.get("data", {})
+            ext = info.get("run_id") or info.get("run_uuid")
+            if not ext:
+                continue
+            tagd = {t["key"]: t["value"] for t in data.get("tags", [])}
+            name = info.get("run_name") or tagd.get("mlflow.runName") or ext[:8]
+            started = _ms_to_s(info.get("start_time")) or now
+            ended = _ms_to_s(info.get("end_time"))
+            status = _MLF_STATUS.get(info.get("status"), "running")
+            params = {p["key"]: p["value"] for p in data.get("params", [])}
+            tags = {k: v for k, v in tagd.items() if not k.startswith("mlflow.")}
+            with LOCK:
+                row = DB.execute("SELECT id FROM runs WHERE source='mlflow' AND ext_id=?", (ext,)).fetchone()
+                rid = row[0] if row else uuid.uuid4().hex
+                DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,"
+                           "notes,heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                           "ON CONFLICT(source,ext_id) DO UPDATE SET status=excluded.status, "
+                           "ended_at=excluded.ended_at, name=excluded.name, params=excluded.params, "
+                           "tags=excluded.tags, heartbeat_at=excluded.heartbeat_at",
+                           (rid, name, "mlflow", status, started, ended, "mlflow",
+                            json.dumps(params, separators=(",", ":")),
+                            json.dumps(tags, separators=(",", ":")), "", now, ext, now))
+                DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
+                DB.commit()
+            for m in data.get("metrics", []):
+                hist = _mlf("GET", "/api/2.0/mlflow/metrics/get-history",
+                            params={"run_id": ext, "metric_key": m["key"]}) or {}
+                rows = [(rid, _ms_to_s(h.get("timestamp")) or started, int(h.get("step") or 0),
+                         m["key"], float(h["value"])) for h in hist.get("metrics", [])]
+                if rows:
+                    with LOCK:
+                        DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
+                        DB.commit()
+            synced += 1
+        tok = body.get("next_page_token")
+        if not tok:
+            break
+    return synced
+
+@app.route("/api/integration/mlflow/sync", methods=["GET", "POST"])
+def api_mlflow_sync():
+    """GET -> reachability probe (green/red). POST -> sync now."""
+    if not (get_settings().get("mlflow_uri") or "").strip():
+        return jsonify({"ok": False, "error": "no MLflow URI configured"}), 400
+    if request.method == "POST":
+        try:
+            return jsonify({"ok": True, "synced": sync_mlflow()})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]}), 502
+    try:
+        _mlf("POST", "/api/2.0/mlflow/experiments/search", {"max_results": 1})
+        return jsonify({"ok": True, "reachable": True})
+    except Exception as e:
+        return jsonify({"ok": False, "reachable": False, "error": str(e)[:200]}), 502
+
+# ── Container logs over SSE (issue #28) ───────────────────────────────────────
+_CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+def _docker_log_stream(name, tail, follow):
+    """Yield Server-Sent Events of a container's logs over the Docker socket.
+    Demuxes Docker's 8-byte stream framing (skipped for TTY containers); for
+    follow=1 it keeps the connection open and emits a heartbeat every ~20s so a
+    closed browser EventSource is noticed and the socket torn down cleanly."""
+    c = http.client.HTTPConnection("localhost", timeout=None)
+    c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.sock.connect(DOCKER_SOCK)
+    if follow:
+        c.sock.settimeout(20)
+    path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
+            f"&tail={tail}&follow={'1' if follow else '0'}")
+    text = ""
+    def lines_from(s):
+        nonlocal text
+        text += s
+        out = []
+        while "\n" in text:
+            line, text = text.split("\n", 1)
+            out.append(line)
+        return out
+    try:
+        c.request("GET", path)
+        r = c.getresponse()
+        if r.status != 200:
+            yield f"event: srverror\ndata: {r.status} {r.reason}\n\n"
+            return
+        framed, buf = None, b""
+        while True:
+            try:
+                chunk = r.read(4096)
+            except socket.timeout:
+                yield ": keep-alive\n\n"          # heartbeat → Flask sees a gone client
+                continue
+            if not chunk:
+                break
+            if framed is None:
+                framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
+            if framed:
+                buf += chunk
+                while len(buf) >= 8:
+                    size = int.from_bytes(buf[4:8], "big")
+                    if len(buf) < 8 + size:
+                        break
+                    payload, buf = buf[8:8 + size], buf[8 + size:]
+                    for line in lines_from(payload.decode("utf-8", "replace")):
+                        yield f"data: {line}\n\n"
+            else:
+                for line in lines_from(chunk.decode("utf-8", "replace")):
+                    yield f"data: {line}\n\n"
+        if text:
+            yield f"data: {text}\n\n"
+        yield "event: end\ndata: done\n\n"
+    finally:
+        try: c.close()
+        except Exception: pass
+
+@app.route("/api/containers/<name>/logs")
+def api_container_logs(name):
+    """Last `tail` log lines for a container; with follow=1, streams new lines as
+    SSE. Read-only — `docker logs` needs no extra socket permissions."""
+    if not _CT_NAME_RE.match(name or ""):
+        return jsonify({"error": "invalid container name"}), 400
+    try:
+        tail = max(1, min(2000, int(request.args.get("tail", 200))))
+    except (TypeError, ValueError):
+        tail = 200
+    follow = request.args.get("follow") == "1"
+    return Response(_docker_log_stream(name, tail, follow),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "Connection": "keep-alive"})
+
+@app.route("/api/network")
+def api_network():
+    """Host NIC throughput + per-container top talkers over a range (#30). Rates
+    are derived from the cumulative byte counters in net_samples, so a missed
+    sample or a counter reset (reboot) never invents a spike."""
+    rng = request.args.get("range", "1h")
+    span = RANGES.get(rng, 3600)
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        since = (cur.execute("SELECT MIN(ts) FROM net_samples").fetchone()[0] or now) if span is None else now - span
+        rows = cur.execute("SELECT ts,iface,bytes_in,bytes_out FROM net_samples WHERE ts>=? ORDER BY iface,ts",
+                           (since,)).fetchall()
+    bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
+    series = {}
+    for ts, iface, bi, bo in rows:
+        series.setdefault(iface, []).append((ts, bi, bo))
+
+    def rate_buckets(samples):
+        """Consecutive cumulative samples → {bucket: [sum_rate, count]} for in/out."""
+        ain, aout = {}, {}
+        for (t0, i0, o0), (t1, i1, o1) in zip(samples, samples[1:]):
+            dt = t1 - t0
+            di, do = i1 - i0, o1 - o0
+            if dt <= 0 or di < 0 or do < 0:        # gap or counter reset → skip
+                continue
+            b = (t1 // bk) * bk
+            s = ain.setdefault(b, [0, 0]);  s[0] += di / dt; s[1] += 1
+            s = aout.setdefault(b, [0, 0]); s[0] += do / dt; s[1] += 1
+        return ain, aout
+
+    host_ifaces = sorted(i for i in series if not i.startswith("@") and not _HOST_NIC_SKIP.match(i))
+    labels = sorted({(t // bk) * bk for i in host_ifaces for t, _, _ in series[i]})
+    ifaces_out = []
+    for iface in host_ifaces:
+        ain, aout = rate_buckets(series[iface])
+        ins  = [round(ain[b][0] / ain[b][1]) if ain.get(b, [0, 0])[1] else 0 for b in labels]
+        outs = [round(aout[b][0] / aout[b][1]) if aout.get(b, [0, 0])[1] else 0 for b in labels]
+        if any(ins) or any(outs):
+            ifaces_out.append({"iface": iface, "in": ins, "out": outs})
+
+    talkers = []
+    for iface, samples in series.items():
+        if not iface.startswith("@") or len(samples) < 2:
+            continue
+        di = max(0, samples[-1][1] - samples[0][1])
+        do = max(0, samples[-1][2] - samples[0][2])
+        if di + do > 0:
+            talkers.append({"name": iface[1:], "bytes_in": di, "bytes_out": do, "total": di + do})
+    talkers.sort(key=lambda x: -x["total"])
+
+    cur_in  = sum(s["in"][-1] for s in ifaces_out) if labels else 0
+    cur_out = sum(s["out"][-1] for s in ifaces_out) if labels else 0
+    return jsonify({"range": rng, "bucket_sec": bk, "labels": labels,
+                    "ifaces": ifaces_out, "talkers": talkers[:10],
+                    "current": {"in": cur_in, "out": cur_out}})
+
 @app.route("/healthz")
 def healthz():
     """Cheap liveness probe for Docker's HEALTHCHECK and any uptime monitor.
@@ -3397,7 +5089,9 @@ def api_health():
     now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
                    "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
                    "power": LATEST["power"], "temp": LATEST["temp"],
-                   "available": bool(gpu_avail)},
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or [],    # per-card detail (issue #95)
+                   "extra": LATEST.get("gpu_extra") or {}},  # mem-bw/clocks/throttle (telemetry)
            "host": enrich_os_upgrade(LATEST["host"])}
     docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
                                     "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
@@ -3406,6 +5100,7 @@ def api_health():
     update  = HEALTH["update"]  or {"available": False, "current": VERSION}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
+                    "processes": HEALTH["processes"],
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
                     "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
@@ -3562,7 +5257,9 @@ def _disk_scan_worker(path, real):
         # --max-depth=2 gives two levels at once (folder + its sub-folders) for a
         # nested treemap. du recurses fully regardless of --max-depth, so this is
         # no costlier than depth 1 — it only prints more.
-        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", real],
+        # `--` ends option parsing so a path can never be read as a du flag.
+        # `real` always starts with "/" already, so this is belt-and-suspenders.
+        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", "--", real],
                            capture_output=True, text=True, timeout=600)
         sizes = {}
         for ln in (r.stdout or "").splitlines():
@@ -3778,6 +5475,9 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
+        err = _validate_url_settings(updates)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
     return jsonify({"version": VERSION, "settings": _public_settings()})
 
