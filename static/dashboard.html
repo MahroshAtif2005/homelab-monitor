@@ -171,7 +171,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .tool-grid{display:flex;flex-wrap:wrap;gap:10px}
 .tool-tile{display:flex;align-items:center;gap:8px;border:1px solid var(--bd);border-radius:9px;padding:9px 13px;background:rgba(127,127,127,.04);text-decoration:none;color:var(--tx)}
 .tool-tile:hover{border-color:#58a6ff}
-.tool-ic{font-size:17px}.tool-nm{font-weight:600;font-size:13px}.tool-pt{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+.tool-ic{font-size:17px;display:inline-flex}.tool-ic .sic{width:18px;height:18px;vertical-align:0}.tool-nm{font-weight:600;font-size:13px}.tool-pt{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
@@ -622,6 +622,13 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{
 /* Inline SVG icons that replace heading emoji — inherit text colour + size. */
 .hic{ width:1.05em; height:1.05em; flex:none; vertical-align:-.16em; stroke-width:2; opacity:.82 }
 h2 .hic{ margin-right:8px } .card-sub .hic{ margin-right:6px; width:1em; height:1em } .logo .hic{ width:18px; height:18px; vertical-align:-.22em; opacity:1 }
+/* Inline status icons (chips/tiles/badges) — same family, em-sized, inherit colour. */
+.sic{ width:1em; height:1em; vertical-align:-.15em; flex:none; stroke-width:2 }
+.badge .sic, .mchip .sic{ margin-right:3px }
+/* Run-source colour dots — crisp, consistent, keep the per-source colour coding. */
+.src-dot{ display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; margin-right:3px }
+/* Run-status colour-codes its icon + label together (icon inherits currentColor). */
+.st-running{ color:var(--info) } .st-finished{ color:var(--ok) } .st-failed{ color:var(--warn) } .st-killed{ color:var(--crit) }
 /* ── Layout + de-noise pass ──────────────────────────────────────────────────
    Quiet the secondary voice, unify the pill/badge shape, and align the sub-tab
    icons — calmer rhythm without touching the data density users came for. */
@@ -1383,6 +1390,28 @@ const ICONS={
   '🔔':'<path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>',
 };
 function svgIc(d){ return `<svg class="hic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`; }
+// Inline status icons (same stroke family, em-sized) for dynamic content — so the
+// chips/tiles/badges match the heading icons instead of clashing emoji.
+const SIC={
+  flame:'<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/>',
+  moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/>',
+  play:'<path d="M6 4v16l13-8z"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  alert:'<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/>',
+  xcircle:'<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/>',
+  jupyter:'<rect width="16" height="20" x="4" y="2" rx="2"/><path d="M8 2v20M2 6h2M2 10h2M2 14h2M2 18h2"/>',
+  tensorboard:'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
+  mlflow:'<path d="M10 2v7.3M14 9.3V2M8.5 2h7M5.6 16.5h12.9"/><path d="M14 9.3a6.5 6.5 0 1 1-4 0"/>',
+  wandb:'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  streamlit:'<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+  ray:'<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+  link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+};
+function sic(name){ const d=SIC[name]; return d ? `<svg class="sic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>` : ''; }
+const RUN_SRC_COLOR={jupyter:'#a371f7',colab:'#f59e0b',kaggle:'#4dabf7',mlflow:'#3fb950',api:'#8b949e',cli:'#6b7280'};
+function srcDot(src){ return `<span class="src-dot" style="background:${RUN_SRC_COLOR[src]||'#8b949e'}" title="${esc(src||'')}"></span>`; }
+function stIcon(st){ return sic({running:'play',finished:'check',failed:'alert',killed:'xcircle'}[st]||''); }
 function applyIcons(scope){
   (scope||document).querySelectorAll('h2,.card-sub,.logo,.subtab').forEach(el=>{
     if(el.dataset.ic) return;
@@ -1637,7 +1666,7 @@ function renderGpuDetail(x, powerNow){
   if(banner){
     if(x.throttled && (x.throttle||[]).length){
       banner.style.display='flex';
-      banner.innerHTML=`<div class="ic">🔥</div><div><div class="t">GPU is throttling — running below rated clocks</div>`
+      banner.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">GPU is throttling — running below rated clocks</div>`
         +`<div class="d">Reason: <b>${(x.throttle||[]).map(esc).join(', ')}</b>. `
         +`Your real throughput is lower than the util % suggests — check cooling or the power limit.</div></div>`;
     } else { banner.style.display='none'; }
@@ -1673,7 +1702,7 @@ function renderPerGpu(gpus){
     const util = Math.round(g.util||0);
     const memUtil = Math.round(g.mem_util||0);
     const thr = (g.throttled && (g.throttle||[]).length)
-      ? `<span class="badge crit" title="Throttling: ${esc((g.throttle||[]).join(', '))}">🔥 throttling</span>` : '';
+      ? `<span class="badge crit" title="Throttling: ${esc((g.throttle||[]).join(', '))}">${sic('flame')} throttling</span>` : '';
     const clk = g.clk_sm>0 ? ` · ${Math.round(g.clk_sm)} MHz` : '';
     const cap = g.power_limit>0 ? `/${Math.round(g.power_limit)} W cap` : '';
     return `<div class="gpucard">
@@ -1750,7 +1779,7 @@ async function renderCost(){
   const sp = j.split || {};
   // In dual mode each cost KPI gains a muted "day X · night Y" breakdown line.
   const split2 = w => { const x = sp[w]; if(!dual || !x) return '';
-    return `<div class="s s2" style="opacity:.8">☀ ${money(x.day_cost)} · 🌙 ${money(x.night_cost)}</div>`; };
+    return `<div class="s s2" style="opacity:.8">${sic('sun')} ${money(x.day_cost)} · ${sic('moon')} ${money(x.night_cost)}</div>`; };
   document.getElementById('cost-kpis').innerHTML = [
     {v: j.current_w + ' W', l: 'Current draw'},
     {v: j.avg_24h_w + ' W', l: '24h average'},
@@ -2945,7 +2974,7 @@ function paintAiBand(g,x,loaded,serving){
   // throttle banner mirrors the GPU tab so it's visible from the landing page
   const tb=document.getElementById('ai-band-throttle');
   if(tb){ if(x.throttled && (x.throttle||[]).length){ tb.style.display='flex';
-      tb.innerHTML=`<div class="ic">🔥</div><div><div class="t">GPU throttling — ${(x.throttle||[]).map(esc).join(', ')}</div><div class="d">Real throughput is below what the util % implies.</div></div>`;
+      tb.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">GPU throttling — ${(x.throttle||[]).map(esc).join(', ')}</div><div class="d">Real throughput is below what the util % implies.</div></div>`;
     } else tb.style.display='none'; }
   const tokS=serving.reduce((a,s)=>a+(s.tok_per_s||0),0);
   const running=serving.reduce((a,s)=>a+(s.running||0),0);
@@ -2977,8 +3006,8 @@ function paintAiBand(g,x,loaded,serving){
 }
 
 // ── Runs (pushed from notebooks / MLflow) — the primary Experiments view ──────
-const RUN_SRC={jupyter:'🟣',colab:'🟠',kaggle:'🔵',mlflow:'🟢',api:'⚪',cli:'⚫'};
-const RUN_ST={running:'▶️',finished:'✅',failed:'⚠️',killed:'⛔'};
+// Source → colour dot (srcDot) and status → stroke icon+colour (stIcon) live in the
+// icon section; emoji maps replaced by the SVG status-icon family.
 async function renderRuns(){
   const card=document.getElementById('runs-card'); if(!card) return;
   const status=(document.getElementById('runs-status')||{}).value||'';
@@ -2994,8 +3023,8 @@ async function renderRuns(){
     const mets=Object.entries(r.metrics_latest||{}).slice(0,3).map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`).join(' · ');
     return `<tr data-id="${esc(r.id)}" style="cursor:pointer">
       <td><b>${esc(r.name)}</b></td>
-      <td><span class="mchip">${RUN_SRC[r.source]||'•'} ${esc(r.source)}</span></td>
-      <td>${RUN_ST[r.status]||''} ${esc(r.status)}</td>
+      <td><span class="mchip">${srcDot(r.source)}${esc(r.source)}</span></td>
+      <td><span class="st-${esc(r.status)}">${stIcon(r.status)} ${esc(r.status)}</span></td>
       <td>${fmtTs(r.started_at)}</td><td>${fmtDur(r.duration)}</td>
       <td class="muted">${mets||'—'}</td>
       <td>${(r.energy_kwh||0).toFixed(3)} kWh</td>
@@ -3010,7 +3039,7 @@ async function openRun(id){
   document.getElementById('run-detail').hidden=false;
   document.getElementById('run-detail-title').textContent=j.name;
   const params=j.params?(' · params '+esc(JSON.stringify(j.params))):'';
-  document.getElementById('run-detail-meta').innerHTML=`${RUN_SRC[j.source]||''} ${esc(j.source)} · ${esc(j.status)} · ${esc(j.host||'')} · ${fmtDur(j.duration)}${params}`;
+  document.getElementById('run-detail-meta').innerHTML=`${srcDot(j.source)}${esc(j.source)} · <span class="st-${esc(j.status)}">${stIcon(j.status)} ${esc(j.status)}</span> · ${esc(j.host||'')} · ${fmtDur(j.duration)}${params}`;
   const host=document.getElementById('run-metric-charts'); host.innerHTML='';
   const keys=Object.keys(j.metrics||{});
   keys.forEach((k,i)=>{
@@ -3070,11 +3099,10 @@ async function renderExperiments(force){
     if(!dv.length){ dc.hidden=true; }
     else{
       dc.hidden=false;
-      const ICONS={jupyter:'📓',tensorboard:'📊',mlflow:'🧪',wandb:'🐝',streamlit:'🎈',ray:'⚡'};
       db.innerHTML='<div class="tool-grid">'+dv.map(d=>{
         const href=`//${location.hostname}:${d.port}`;
         return `<a class="tool-tile" href="${href}" target="_blank" rel="noopener" title="Open ${esc(d.label)} on port ${d.port}">
-          <span class="tool-ic">${ICONS[d.kind]||'🔗'}</span>
+          <span class="tool-ic">${sic(d.kind)||sic('link')}</span>
           <span class="tool-nm">${esc(d.label)}</span>
           <span class="tool-pt">:${d.port}</span>
           ${d.idle_vram?`<span class="badge warn" title="Holding ${fmtMB(d.vram)} of GPU VRAM">🟡 ${fmtMB(d.vram)}</span>`:''}
