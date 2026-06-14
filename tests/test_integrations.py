@@ -54,6 +54,19 @@ class TestRunsApi(unittest.TestCase):
         self.assertEqual(len(d["metrics"]["loss"]["values"]), 2)
         self.assertEqual(d["params"], {"lr": 2e-4})
 
+    def test_delete_run_removes_run_and_metrics(self):
+        key = app._gen_api_key()
+        h = {"Authorization": "Bearer " + key}
+        self.c.post("/api/runs", json={"id": "del1", "name": "x"}, headers=h)
+        self.c.post("/api/runs/del1/metrics", json={"key": "loss", "value": 1.0}, headers=h)
+        # delete is an open browser action (not key-gated) — like deleting a host/key
+        r = self.c.delete("/api/runs/del1")
+        self.assertEqual(r.status_code, 200)
+        with app.LOCK:
+            self.assertIsNone(app.DB.execute("SELECT 1 FROM runs WHERE id='del1'").fetchone())
+            self.assertEqual(app.DB.execute("SELECT COUNT(*) FROM run_metrics WHERE run_id='del1'").fetchone()[0], 0)
+        self.assertEqual(self.c.delete("/api/runs/del1").status_code, 404)  # already gone
+
     def test_metrics_unknown_run_404(self):
         key = app._gen_api_key()
         r = self.c.post("/api/runs/nope/metrics",

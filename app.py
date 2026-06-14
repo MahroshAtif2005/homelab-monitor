@@ -4660,6 +4660,18 @@ def api_runs_finish(rid):
     return (jsonify({"ok": True, "id": rid, "status": status}) if cur.rowcount
             else (jsonify({"ok": False, "error": "unknown run"}), 404))
 
+@app.route("/api/runs/<rid>", methods=["DELETE"])
+def api_runs_delete(rid):
+    """Remove a run and its logged metrics. A same-origin browser management action
+    (like deleting a host or an API key), so it's open on the LAN rather than
+    key-gated — the key gates *ingest* (forgery from notebooks), not housekeeping."""
+    with LOCK:
+        cur = DB.execute("DELETE FROM runs WHERE id=?", (rid,))
+        DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
 @app.route("/api/runs")
 def api_runs_list():
     ctx = _cost_ctx()
