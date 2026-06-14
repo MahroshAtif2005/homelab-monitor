@@ -607,6 +607,7 @@ input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]),
 input:not([type=checkbox]):not([type=radio]):hover,select:hover,textarea:hover{ border-color:var(--mut); }
 input[type=checkbox],input[type=radio]{ accent-color:var(--accent); }
 .field{ width:100% }
+.flabel{ color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.02em; margin-bottom:5px }
 button,.rb,.nrow,.subtab,a{ transition:border-color .15s ease, background .15s ease, color .15s ease; }
 /* Visible keyboard focus everywhere — was a single rule in the whole app. */
 :where(a,button,.rb,.nrow,.subtab,[tabindex],[role="button"]):focus-visible{
@@ -878,7 +879,7 @@ h2 .hic{ opacity:.9 }
       </label>
 
       <div>
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Discord webhook URL</div>
+        <div class="flabel">Discord webhook URL</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_discord" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -887,7 +888,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">ntfy.sh topic</div>
+        <div class="flabel">ntfy.sh topic</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="text" id="al_ntfy_topic" placeholder="my-homelab-alerts" autocomplete="off" spellcheck="false"
                  style="flex:2;min-width:180px">
@@ -898,7 +899,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Telegram bot token</div>
+        <div class="flabel">Telegram bot token</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_token" placeholder="123456:ABC-DEF…" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -907,7 +908,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Telegram chat ID</div>
+        <div class="flabel">Telegram chat ID</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_chat_id" placeholder="-1001234567890" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -917,14 +918,14 @@ h2 .hic{ opacity:.9 }
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Minimum severity</div>
+          <div class="flabel">Minimum severity</div>
           <select id="al_minlevel" class="field">
             <option value="warning">warning</option>
             <option value="critical">critical only</option>
           </select>
         </div>
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Disk alert threshold (%)</div>
+          <div class="flabel">Disk alert threshold (%)</div>
           <input type="number" id="al_disk" min="50" max="99" step="1"
                  class="field">
         </div>
@@ -947,7 +948,7 @@ h2 .hic{ opacity:.9 }
 
       <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
       <div>
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Don't know your rates? Pick your country</div>
+        <div class="flabel">Don't know your rates? Pick your country</div>
         <select id="al_country" class="field">
           <option value="">— Select to prefill a typical estimate —</option>
         </select>
@@ -956,7 +957,7 @@ h2 .hic{ opacity:.9 }
 
       <!-- Mode toggle: Single average / Day & Night -->
       <div style="margin-top:4px">
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Tariff</div>
+        <div class="flabel">Tariff</div>
         <div class="seg" role="tablist" style="display:inline-flex;border:1px solid var(--bd);border-radius:7px;overflow:hidden">
           <button type="button" id="al_mode_single" class="rb on" style="border:0;border-radius:0">Single average</button>
           <button type="button" id="al_mode_dual"   class="rb"    style="border:0;border-radius:0;border-left:1px solid var(--bd)">Day &amp; Night</button>
@@ -965,12 +966,12 @@ h2 .hic{ opacity:.9 }
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
-          <div class="muted" id="al_kwh_label" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Price (per kWh)</div>
+          <div class="flabel" id="al_kwh_label">Price (per kWh)</div>
           <input type="number" id="al_kwh" min="0" step="0.0001" placeholder="e.g. 0.30"
                  class="field">
         </div>
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Currency symbol</div>
+          <div class="flabel">Currency symbol</div>
           <input type="text" id="al_currency" maxlength="4" placeholder="$"
                  class="field">
         </div>
@@ -979,17 +980,17 @@ h2 .hic{ opacity:.9 }
       <!-- Night fields: shown only in Day & Night mode -->
       <div id="al_night_wrap" hidden style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night price (per kWh)</div>
+          <div class="flabel">Night price (per kWh)</div>
           <input type="number" id="al_kwh_night" min="0" step="0.0001" placeholder="e.g. 0.15"
                  class="field">
         </div>
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night starts</div>
+          <div class="flabel">Night starts</div>
           <input type="time" id="al_night_start" value="22:00"
                  class="field">
         </div>
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night ends</div>
+          <div class="flabel">Night ends</div>
           <input type="time" id="al_night_end" value="06:00"
                  class="field">
         </div>
@@ -997,7 +998,7 @@ h2 .hic{ opacity:.9 }
       <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
 
       <div style="max-width:340px">
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Rest-of-system baseline (W) — optional</div>
+        <div class="flabel">Rest-of-system baseline (W) — optional</div>
         <input type="number" id="al_idle_w" min="0" step="1" placeholder="e.g. 60 (mainboard, fans, disks)"
                class="field">
         <div class="cap" style="margin-top:4px">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
@@ -1019,12 +1020,12 @@ h2 .hic{ opacity:.9 }
       <!-- Create a key -->
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:8px 0">
         <div style="flex:2;min-width:160px">
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">New key name</div>
+          <div class="flabel">New key name</div>
           <input type="text" id="intg_key_name" placeholder="e.g. colab-laptop" autocomplete="off"
                  class="field">
         </div>
         <div style="flex:1;min-width:120px">
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Expires in</div>
+          <div class="flabel">Expires in</div>
           <select id="intg_key_exp" class="field">
             <option value="">Never</option><option value="7">7 days</option><option value="30">30 days</option>
             <option value="90">90 days</option><option value="365">1 year</option>
@@ -1033,7 +1034,7 @@ h2 .hic{ opacity:.9 }
         <button class="rb on" id="intg_key_create">Create key</button>
       </div>
       <div id="intg_key_reveal" hidden style="margin:6px 0">
-        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Your new key — copy it now, it won't be shown again</div>
+        <div class="flabel">Your new key — copy it now, it won't be shown again</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="text" id="intg_key_value" readonly style="flex:1;min-width:240px;border:1px solid var(--ok)">
           <button class="rb" id="intg_key_copy">Copy</button>
@@ -1060,12 +1061,12 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="cap" style="margin:4px 0">Mirror runs from an MLflow tracking server — they appear under Runs with GPU cost attached. Synced every ~5 min.</div>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow tracking URI</div>
+          <div class="flabel">MLflow tracking URI</div>
           <input type="text" id="al_mlflow_uri" placeholder="http://mlflow.lan:5000"
                  class="field">
         </div>
         <div>
-          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow bearer token (optional)</div>
+          <div class="flabel">MLflow bearer token (optional)</div>
           <input type="text" id="al_mlflow_token" placeholder="only for a secured MLflow" autocomplete="off"
                  class="field">
           <div class="cap" id="al_mlflow_token_state" style="margin-top:4px"></div>
