@@ -19,6 +19,7 @@
 .wrap{max-width:1140px;margin:0 auto;padding:22px 18px 70px}
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 h1{font-size:22px;margin:0}.ver{color:var(--mut);font-size:12px;border:1px solid var(--bd);border-radius:20px;padding:1px 9px}
+.prebadge{display:inline-block;margin-left:5px;font-size:9.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#d29922;border:1px solid #d29922;border-radius:6px;padding:0 5px;vertical-align:middle}
 /* GitHub engagement cluster — sits in the sidebar right under the brand/version */
 .ghbox{display:flex;flex-direction:column;gap:7px;padding:11px 13px 12px;border-bottom:1px solid var(--bd)}
 .ghstar{position:relative;display:flex;align-items:center;gap:8px;text-decoration:none;border:1px solid var(--accent);border-radius:9px;padding:7px 11px;color:#1a1100;font-weight:600;font-size:12.5px;background:linear-gradient(180deg,#e6b948,#d29922);box-shadow:0 1px 1px #0000001f;transition:transform .12s ease,filter .2s;overflow:visible}
@@ -1299,6 +1300,13 @@ const SC = {crit:'var(--crit)',warn:'var(--warn)',ok:'var(--ok)',info:'var(--mut
 const fmtMB = v => v>=1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
 const fmtUp = s => {const d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0; return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`;};
 const fmtDur = s => {s=Math.max(0,Math.round(s)); if(s<60)return s+'s'; const m=s/60|0; if(m<60)return m+'m '+(s%60)+'s'; const h=m/60|0; if(h<24)return h+'h '+(m%60)+'m'; const d=h/24|0; return d+'d '+(h%24)+'h';};
+// Version badge — a pre-release version (contains a '-', e.g. 0.16.0-next) gets a
+// "preview" pill so you always know you're on a forward branch, not a stable release.
+function setVer(v){
+  const el=document.getElementById('ver'); if(!el||!v) return;
+  const pre = String(v).includes('-');
+  el.innerHTML = 'v'+esc(v) + (pre ? '<span class="prebadge" title="Pre-release on the next branch — not a stable release">preview</span>' : '');
+}
 const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const ICON={critical:'⛔',warning:'⚠️',ok:'✅',info:'ℹ️'};
@@ -1465,7 +1473,7 @@ async function loadHealth(){
 function renderData(){
   if(!D) return;
   const n=D.now, H=n.host||{}, tot=D.mem_total;
-  document.getElementById('ver').textContent='v'+D.version;
+  setVer(D.version);
   document.getElementById('lastup').textContent='updated '+new Date().toLocaleTimeString();
 
   // insights & at-a-glance cards used to live on the old Overview; that tab is
@@ -1853,7 +1861,7 @@ function modelSpark(service,tot){
 // ── Renderers (status tabs: Overview cards, Containers, Services) ──────────────
 function renderHealth(){
   if(!HH) return;
-  document.getElementById('ver').textContent='v'+HH.version;
+  setVer(HH.version);
   renderTopProcs();   // mini-htop card refreshes on every health poll (issue #32)
   renderAiBand();     // overview AI band uses fresh GPU/throttle data from /api/health
   if(TAB==='experiments') renderExperiments(false);   // throttled live refresh of training cards
