@@ -616,8 +616,21 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{
 /* Inline SVG icons that replace heading emoji — inherit text colour + size. */
 .hic{ width:1.05em; height:1.05em; flex:none; vertical-align:-.16em; stroke-width:2; opacity:.82 }
 h2 .hic{ margin-right:8px } .card-sub .hic{ margin-right:6px; width:1em; height:1em } .logo .hic{ width:18px; height:18px; vertical-align:-.22em; opacity:1 }
-/* De-noise: captions read as one calm, consistent secondary voice. */
-.cap{ line-height:1.45 }
+/* ── Layout + de-noise pass ──────────────────────────────────────────────────
+   Quiet the secondary voice, unify the pill/badge shape, and align the sub-tab
+   icons — calmer rhythm without touching the data density users came for. */
+.subtab .hic{ margin-right:5px; width:.95em; height:.95em; opacity:.9 }
+/* Captions = one calm, readable secondary voice (was 12px, dense, full-bleed).
+   Capped to a comfortable measure and de-emphasised so data leads, prose follows. */
+.cap{ font-size:11.5px; line-height:1.5; opacity:.9; max-width:80ch }
+/* The same concept should be one shape: pills/badges share the control radius. */
+.pill{ border-radius:6px } .badge{ border-radius:6px }
+/* Headings: consistent weight + breathing room; let the icon + title align as a row
+   only when the heading is already a flex row (avoids reflowing the simple ones). */
+h2{ font-weight:600; letter-spacing:.01em }
+h2 .hic{ opacity:.9 }
+/* Sub-tab row: a touch more air so the tabs read as a segmented control. */
+.subtabs{ gap:2px }
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -1361,10 +1374,11 @@ const ICONS={
   '🩺':'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   '🔑':'<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
   '🟢':'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
+  '🔔':'<path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>',
 };
 function svgIc(d){ return `<svg class="hic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`; }
 function applyIcons(scope){
-  (scope||document).querySelectorAll('h2,.card-sub,.logo').forEach(el=>{
+  (scope||document).querySelectorAll('h2,.card-sub,.logo,.subtab').forEach(el=>{
     if(el.dataset.ic) return;
     const t=el.firstChild;
     if(!t || t.nodeType!==3) return;
