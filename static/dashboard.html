@@ -497,6 +497,11 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 a{color:var(--info)}
 /* nav group headers — clearer */
 .navgroup{color:var(--tx);opacity:.78;font-size:10px;font-weight:700;border-bottom:1px solid var(--bd);padding:12px 6px 6px;margin:2px 4px 5px}
+/* settings sub-tabs (Alerts / Costs / Integrations …) */
+.subtabs{display:flex;gap:4px;border-bottom:1px solid var(--bd);margin-bottom:14px}
+.subtab{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);font:inherit;font-weight:600;padding:7px 12px;cursor:pointer;border-radius:0}
+.subtab.on{color:var(--tx);border-bottom-color:#58a6ff}
+.subtab:hover{color:var(--tx)}
 /* port chips */
 .portpill{background:var(--inset);color:var(--mut)}
 .portpill:hover{background:var(--hover);border-color:var(--accent);color:var(--accent)}
@@ -760,8 +765,14 @@ a{color:var(--info)}
 <!-- ───────── Alerts (Settings) ───────── -->
 <section data-tab="alerts" hidden>
   <div class="card">
-    <h2>🔔 Alerts</h2>
-    <p class="cap" style="margin:-4px 0 12px">
+    <div class="subtabs" id="set-subtabs">
+      <button type="button" class="subtab on" data-sp="alerts">🔔 Alerts</button>
+      <button type="button" class="subtab"    data-sp="costs">💰 Costs</button>
+    </div>
+
+    <!-- ── Alerts sub-page ── -->
+    <div id="set-pane-alerts">
+    <p class="cap" style="margin:2px 0 12px">
       Push notifications when something noteworthy happens. Configured here — no env vars, no config files.
       Any channel (Discord, ntfy, or Telegram) can be used; all are optional. Alerts are
       edge-triggered (one ping per state change) so they don't spam.</p>
@@ -827,7 +838,20 @@ a{color:var(--info)}
         </div>
       </div>
 
-      <div class="card-sub" style="margin-top:6px;font-weight:600">💰 Electricity cost</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="rb on" id="al_save">Save</button>
+        <button class="rb"    id="al_test">Send test alert</button>
+      </div>
+      <p class="cap" style="margin-top:6px">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
+        GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
+    </div>
+    </div><!-- /set-pane-alerts -->
+
+    <!-- ── Costs sub-page ── -->
+    <div id="set-pane-costs" hidden>
+      <p class="cap" style="margin:2px 0 12px">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
+      <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
+      <div class="card-sub" style="font-weight:600">💰 Electricity cost</div>
 
       <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
       <div>
@@ -878,16 +902,13 @@ a{color:var(--info)}
                  style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
       </div>
-      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Power &amp; cost</b> card on the System tab from the GPU power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the card.</p>
+      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <button class="rb on" id="al_save">Save</button>
-        <button class="rb"    id="al_test">Send test alert</button>
+        <button class="rb on" id="al_save_costs">Save</button>
       </div>
-
-      <p class="cap" style="margin-top:6px">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
-        GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
-    </div>
+      </div>
+    </div><!-- /set-pane-costs -->
   </div>
 </section>
 
@@ -1112,19 +1133,19 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 // ── Tab registry. Add a monitor: append one entry here + a matching <section
 //    data-tab="..."> above + a render in renderData()/renderHealth(). ──────────
 const TABS = [
-  {id:'overview',   label:'Overview',   charts:false},
-  {id:'gpu',        label:'GPU',        charts:true},
-  {id:'models',     label:'AI Models',  charts:false},
-  {id:'experiments',label:'Experiments', charts:false},
-  {id:'containers', label:'Containers', charts:false},
-  {id:'services',   label:'Services',   charts:false},
-  {id:'host',       label:'System',     charts:true},
-  {id:'disks',      label:'Disks',      charts:false},
-  {id:'network',    label:'Network',    charts:false},
-  {id:'security',   label:'Security',   charts:false},
-  {id:'hosts',      label:'Hosts',      charts:false, settings:true},
-  {id:'alerts',     label:'Alerts',     charts:false, settings:true},
-  {id:'backup',     label:'Backup',     charts:false, settings:true},
+  {id:'overview',   label:'Overview',   charts:false, zone:'monitoring'},
+  {id:'gpu',        label:'GPU',        charts:true,  zone:'monitoring'},
+  {id:'containers', label:'Containers', charts:false, zone:'monitoring'},
+  {id:'services',   label:'Services',   charts:false, zone:'monitoring'},
+  {id:'host',       label:'System',     charts:true,  zone:'monitoring'},
+  {id:'disks',      label:'Disks',      charts:false, zone:'monitoring'},
+  {id:'network',    label:'Network',    charts:false, zone:'monitoring'},
+  {id:'security',   label:'Security',   charts:false, zone:'monitoring'},
+  {id:'models',     label:'AI Models',  charts:false, zone:'ai'},
+  {id:'experiments',label:'Experiments', charts:false, zone:'ai'},
+  {id:'hosts',      label:'Hosts',      charts:false, settings:true, zone:'settings'},
+  {id:'alerts',     label:'Settings',   charts:false, settings:true, zone:'settings'},
+  {id:'backup',     label:'Backup',     charts:false, settings:true, zone:'settings'},
 ];
 let R = localStorage.getItem('hl_range') || '6h';
 let TAB = (location.hash.slice(1)) || localStorage.getItem('hl_tab') || 'overview';
@@ -1157,15 +1178,20 @@ function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86
   return md?(d.getMonth()+1)+'/'+d.getDate()+' '+hm:hm;});}
 
 // ── Tab navigation ────────────────────────────────────────────────────────────
-// rev6: nav rows live in a grouped sidebar (Monitoring / Settings), both always
+// rev6: nav rows live in a grouped sidebar (Monitoring / AI / Settings), always
 // visible — no gear drawer. tdot = per-section attention square (set in renderHealth).
 const tabBtn = t => `<button class="nrow" data-t="${t.id}"><span>${t.label}</span><span class="tdot" id="ndot-${t.id}" style="display:none"></span></button>`;
 const isSettingsTab = id => !!(TABS.find(t=>t.id===id)||{}).settings;
 function buildNav(){
   const nl = document.getElementById('navlist'); if(!nl) return;
-  nl.innerHTML =
-    '<div class="navgroup">Monitoring</div>' + TABS.filter(t=>!t.settings).map(tabBtn).join('') +
-    '<div class="navgroup">Settings</div>'   + TABS.filter(t=>t.settings).map(tabBtn).join('');
+  // Three zones so AI/Data-Science features live in their own area — a pure
+  // homelab admin can ignore it. Falls back to Monitoring for any tab w/o a zone.
+  const zone = id => (TABS.find(t=>t.id===id)||{}).zone || 'monitoring';
+  const group = (label, z) => {
+    const rows = TABS.filter(t => (t.zone||'monitoring')===z);
+    return rows.length ? `<div class="navgroup">${label}</div>` + rows.map(tabBtn).join('') : '';
+  };
+  nl.innerHTML = group('Monitoring','monitoring') + group('AI','ai') + group('Settings','settings');
   nl.querySelectorAll('.nrow').forEach(b => b.onclick = () => showTab(b.dataset.t));
 }
 // Drawer is gone; keep the name as a no-op so showTab() needn't change shape.
@@ -1483,7 +1509,7 @@ async function renderCost(){
     dis.hidden = false; body.hidden = true;
     if(charts['costchart']){ charts['costchart'].destroy(); delete charts['costchart']; }
     const lk = document.getElementById('cost-settings-link');
-    if(lk) lk.onclick = e => { e.preventDefault(); showTab('alerts'); };
+    if(lk) lk.onclick = e => { e.preventDefault(); showTab('alerts'); if(typeof setSettingsPane==='function') setSettingsPane('costs'); };
     return;
   }
   dis.hidden = true; body.hidden = false;
@@ -3677,9 +3703,17 @@ async function maybeWhatsNew(curVersion){
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
+const al_save_costs = document.getElementById('al_save_costs');
+if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
 document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
 document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);
 document.getElementById('al_country').onchange    = applyCountryPrefill;
+// Settings sub-tabs: Alerts / Costs (more added later, e.g. Integrations).
+function setSettingsPane(name){
+  document.querySelectorAll('#set-subtabs .subtab').forEach(b=>b.classList.toggle('on', b.dataset.sp===name));
+  document.querySelectorAll('[id^="set-pane-"]').forEach(p=>p.hidden = p.id !== 'set-pane-'+name);
+}
+document.querySelectorAll('#set-subtabs .subtab').forEach(b=>b.onclick=()=>setSettingsPane(b.dataset.sp));
 document.getElementById('bk_download').onclick = downloadBackup;
 document.getElementById('bk_restore_btn').onclick = () => document.getElementById('bk_file').click();
 document.getElementById('bk_file').onchange = e => { const f=e.target.files&&e.target.files[0]; if(f) restoreBackup(f); };
