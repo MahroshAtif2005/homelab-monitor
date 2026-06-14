@@ -65,7 +65,7 @@ h2{font-size:14px;margin:0 0 13px;font-weight:600;letter-spacing:.02em;text-tran
 .topnav{position:sticky;top:0;background:var(--bg);z-index:5;padding-top:4px}
 .hostbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 0 8px;border-bottom:1px dashed var(--bd)}
 .hostbar .label{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:2px}
-.hpill{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:18px;padding:4px 11px 4px 8px;cursor:pointer;font:inherit;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;transition:border-color .15s,background .15s}
+.hpill{background:var(--inset);border:1px solid var(--bd);color:var(--tx);border-radius:18px;padding:4px 11px 4px 8px;cursor:pointer;font:inherit;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;transition:border-color .15s,background .15s}
 .hpill:hover{border-color:var(--mut)}
 .hpill.on{border-color:var(--accent);background:#d2992211}
 .hpill .pdot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
@@ -85,15 +85,15 @@ h2{font-size:14px;margin:0 0 13px;font-weight:600;letter-spacing:.02em;text-tran
 .tab.back{color:var(--mut);font-size:13px}.tab.back:hover{color:var(--tx)}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:17px 19px;margin:16px 0}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:11px}
-.kpi{background:#0d1117;border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.kpi{background:var(--inset);border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
 .kpi .v{font-size:22px;font-weight:700}.kpi .l{color:var(--mut);font-size:11.5px;margin-top:2px}.kpi .s{font-size:11.5px;color:var(--mut);margin-top:3px}
-.ins{display:flex;gap:11px;padding:11px 13px;border-radius:9px;margin-bottom:9px;border:1px solid var(--bd);background:#0d1117}
+.ins{display:flex;gap:11px;padding:11px 13px;border-radius:9px;margin-bottom:9px;border:1px solid var(--bd);background:var(--inset)}
 .ins:last-child{margin-bottom:0}.ins .ic{font-size:17px;line-height:1.3}.ins .t{font-weight:600}.ins .d{color:var(--mut);font-size:13px}
 .ins.critical{border-left:3px solid var(--crit)}.ins.warning{border-left:3px solid var(--warn)}
 .ins.ok{border-left:3px solid var(--ok)}.ins.info{border-left:3px solid var(--info)}
 /* overview status cards */
 .ovgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:11px}
-.ov{display:block;text-align:left;background:#0d1117;border:1px solid var(--bd);border-left:3px solid var(--info);border-radius:10px;padding:13px 15px;cursor:pointer;color:inherit;font:inherit}
+.ov{display:block;text-align:left;background:var(--inset);border:1px solid var(--bd);border-left:3px solid var(--info);border-radius:10px;padding:13px 15px;cursor:pointer;color:inherit;font:inherit}
 .ov:hover{border-color:var(--mut)}.ov.crit{border-left-color:var(--crit)}.ov.warn{border-left-color:var(--warn)}.ov.ok{border-left-color:var(--ok)}.ov.info{border-left-color:var(--mut)}
 .ov .h{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.02em}
 .ov .m{font-size:20px;font-weight:700;margin-top:5px}.ov .d{font-size:12.5px;color:var(--mut);margin-top:1px}
@@ -109,7 +109,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .badge.ok{color:var(--ok);border-color:#3fb95055}.badge.info{color:var(--mut)}
 .chartbox{position:relative;height:300px;width:100%}.chartbox.short{height:180px}
 .ranges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.rb{background:#0d1117;border:1px solid var(--bd);color:var(--mut);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:13px}
+.rb{background:var(--inset);border:1px solid var(--bd);color:var(--mut);border-radius:7px;padding:6px 13px;cursor:pointer;font-size:13px}
 .rb.on{background:#1f6feb22;border-color:#1f6feb;color:#fff}.spacer{flex:1}
 .tg{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
@@ -175,7 +175,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .muted{color:var(--mut)}a{color:#58a6ff}
 /* clickable port chips on the Containers/Services tabs — opens the host:port in a new tab */
 .ports{display:inline-flex;flex-wrap:wrap;gap:4px}
-.portpill{font-size:11px;padding:1px 7px;border:1px solid var(--bd);border-radius:10px;color:var(--mut);text-decoration:none;line-height:1.6;background:#0d1117;white-space:nowrap;transition:color .2s,border-color .2s,background .2s}
+.portpill{font-size:11px;padding:1px 7px;border:1px solid var(--bd);border-radius:10px;color:var(--mut);text-decoration:none;line-height:1.6;background:var(--inset);white-space:nowrap;transition:color .2s,border-color .2s,background .2s}
 .portpill:hover{border-color:var(--accent);color:var(--accent);background:#d2992211}
 /* hide non-essential columns on narrow screens so the table doesn't horiz-scroll */
 @media(max-width:1100px){
@@ -217,7 +217,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .diagbanner .x:hover{color:var(--tx)}
 .diagrem{margin-top:6px}
 .diagrem .where{color:var(--mut);font-size:12px}
-.diagrem pre{background:#0d1117;border:1px solid var(--bd);border-radius:6px;padding:7px 9px;margin:4px 0 0;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx);font-family:ui-monospace,Menlo,Consolas,monospace}
+.diagrem pre{background:var(--inset);border:1px solid var(--bd);border-radius:6px;padding:7px 9px;margin:4px 0 0;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx);font-family:ui-monospace,Menlo,Consolas,monospace}
 .umodal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center;z-index:50;padding:18px}
 .umodal.show{display:flex}
 .umodal .box{background:var(--card);border:1px solid var(--bd);border-radius:12px;max-width:640px;width:100%;max-height:84vh;display:flex;flex-direction:column}
@@ -225,9 +225,9 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .umodal .hd .x{margin-left:auto;background:none;border:0;color:var(--mut);font-size:22px;line-height:1;cursor:pointer;padding:0 4px}
 .umodal .hd .x:hover{color:var(--tx)}
 .umodal .bd{padding:14px 18px;overflow:auto}
-.umodal pre.cmd{background:#0d1117;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-size:12.5px;white-space:pre-wrap;word-break:break-all;margin:8px 0 0;color:var(--tx)}
+.umodal pre.cmd{background:var(--inset);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-size:12.5px;white-space:pre-wrap;word-break:break-all;margin:8px 0 0;color:var(--tx)}
 .umodal .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.umodal .btn{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:7px;padding:7px 12px;cursor:pointer;font:inherit;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.umodal .btn{background:var(--inset);border:1px solid var(--bd);color:var(--tx);border-radius:7px;padding:7px 12px;cursor:pointer;font:inherit;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .umodal .btn:hover{border-color:var(--mut)}
 .umodal .notes{margin-top:14px;padding-top:12px;border-top:1px solid var(--bd);font-size:13px;color:var(--tx);line-height:1.5;max-height:40vh;overflow:auto}
 /* Prose styling for GitHub-rendered release notes (innerHTML from /api/markdown). */
@@ -236,12 +236,12 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .umodal .notes p{margin:.5em 0}
 .umodal .notes ul,.umodal .notes ol{padding-left:1.5em;margin:.4em 0}
 .umodal .notes li{margin:.2em 0}
-.umodal .notes code{background:#0d1117;border:1px solid var(--bd);border-radius:4px;padding:0 5px;font-size:.9em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.umodal .notes pre{background:#0d1117;border:1px solid var(--bd);border-radius:6px;padding:9px 11px;overflow-x:auto;font-size:12px;margin:.5em 0}
+.umodal .notes code{background:var(--inset);border:1px solid var(--bd);border-radius:4px;padding:0 5px;font-size:.9em;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.umodal .notes pre{background:var(--inset);border:1px solid var(--bd);border-radius:6px;padding:9px 11px;overflow-x:auto;font-size:12px;margin:.5em 0}
 .umodal .notes pre code{background:none;border:0;padding:0;font-size:12px}
 .umodal .notes table{border-collapse:collapse;margin:.6em 0;font-size:12.5px;display:block;overflow-x:auto}
 .umodal .notes th,.umodal .notes td{border:1px solid var(--bd);padding:5px 9px;text-align:left}
-.umodal .notes th{background:#0d1117;font-weight:600}
+.umodal .notes th{background:var(--inset);font-weight:600}
 .umodal .notes a{color:#58a6ff;text-decoration:none}
 .umodal .notes a:hover{text-decoration:underline}
 .umodal .notes blockquote{border-left:3px solid var(--bd);padding:.2em 0 .2em 10px;color:var(--mut);margin:.5em 0}
@@ -268,7 +268,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .wn-go{margin-left:auto;background:linear-gradient(180deg,#e6b948,#d29922)!important;border:1px solid var(--accent)!important;color:#1a1100!important;font-weight:600;padding:7px 16px!important}
 .wn-go:hover{filter:brightness(1.07)}
 /* Hosts tab (multi-machine monitoring) */
-.hosts-key{background:#0d1117;border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--tx);word-break:break-all;white-space:pre-wrap;margin:0}
+.hosts-key{background:var(--inset);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--tx);word-break:break-all;white-space:pre-wrap;margin:0}
 .hosts-form{display:grid;grid-template-columns:1fr 1.6fr auto;gap:8px;max-width:760px;align-items:end}
 @media(max-width:680px){.hosts-form{grid-template-columns:1fr}}
 .hosts-input{background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:8px 11px;font:inherit}
@@ -310,7 +310,7 @@ tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-
 .tm-crumb button{background:none;border:0;color:var(--accent);cursor:pointer;font:inherit;padding:0}
 .tm-crumb .sep{color:var(--mut)}
 .tm-crumb .cur{color:var(--tx);font-weight:600}
-.hostrow{border:1px solid var(--bd);border-radius:10px;padding:11px 13px;margin-top:9px;background:#0d1117}
+.hostrow{border:1px solid var(--bd);border-radius:10px;padding:11px 13px;margin-top:9px;background:var(--inset)}
 .hostrow.ok{border-left:3px solid var(--ok)}.hostrow.warn{border-left:3px solid var(--warn)}.hostrow.fail{border-left:3px solid var(--crit)}.hostrow.untested{border-left:3px solid var(--bd)}
 .hostrow .hd{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .hostrow .nm{font-weight:600}.hostrow .tg{color:var(--mut);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
@@ -326,12 +326,12 @@ tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-
 .hcheck .rem pre{margin:5px 0 0;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx)}
 .hcheck .rem .cp{margin-top:5px}
 .hcheck .rem .osvars{margin:6px 0 8px}
-.btn-mini{background:#0d1117;border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit;font-size:12px}
+.btn-mini{background:var(--inset);border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit;font-size:12px}
 .btn-mini:hover{border-color:var(--mut)}
 .btn-mini.danger{color:var(--crit);border-color:#f8514955}
 .btn-mini.danger:hover{border-color:var(--crit)}
 .hostrow .tg-edit{background:#161b22;color:var(--tx);border:1px solid var(--accent);border-radius:5px;padding:2px 7px;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;min-width:220px}
-.lansug{background:#0d1117;border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-top:8px}
+.lansug{background:var(--inset);border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-top:8px}
 .lansug .row{display:flex;align-items:center;gap:10px;padding:5px 0;border-top:1px dashed var(--bd)}
 .lansug .row:first-child{border-top:0}
 .lansug .ip{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--tx);min-width:120px}
@@ -341,7 +341,7 @@ tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-
 .lansug .ssh.closed{color:var(--mut);border-color:var(--bd)}
 .lansug .meta{color:var(--mut);font-size:11.5px;margin-bottom:4px}
 /* Run-on-remote inline panel */
-.runpanel{margin-top:8px;background:#0d1117;border:1px solid var(--bd);border-radius:7px;padding:9px 11px;font-size:12.5px}
+.runpanel{margin-top:8px;background:var(--inset);border:1px solid var(--bd);border-radius:7px;padding:9px 11px;font-size:12.5px}
 .runpanel .hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .runpanel .hd .lbl{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.02em;font-weight:600}
 .runpanel .note{display:flex;gap:6px;align-items:flex-start;color:var(--mut);font-size:11.5px;background:#161b22;border:1px solid var(--bd);border-radius:6px;padding:6px 9px;margin-top:6px}
@@ -357,7 +357,7 @@ tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-
 .fleet-tbl{width:100%;border-collapse:collapse;font-size:13px}
 .fleet-tbl th{font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:7px 9px;border-bottom:1px solid var(--bd);text-align:left;white-space:nowrap}
 .fleet-tbl td{padding:9px;border-bottom:1px solid var(--bd);vertical-align:middle}
-.fleet-tbl tr{cursor:pointer}.fleet-tbl tr:hover td{background:#0d1117}
+.fleet-tbl tr{cursor:pointer}.fleet-tbl tr:hover td{background:var(--inset)}
 .fleet-tbl .hostcell{font-weight:600;color:var(--tx)}
 .fleet-tbl .hostcell .sub{color:var(--mut);font-size:11.5px;font-weight:400;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .fleet-tbl td .pct{font-weight:600}
@@ -372,7 +372,7 @@ tr.cttot td{border-top:2px solid var(--bd);border-bottom:0;padding-top:9px;font-
 .fleet-tbl .status.unknown .d{background:var(--mut)}
 .fleet-tbl .stale{font-size:11px;color:var(--warn)}
 /* Scope notice on tabs that aren't multi-host yet */
-.scope-notice{display:flex;gap:10px;align-items:flex-start;background:#0d1117;border:1px dashed var(--bd);border-radius:9px;padding:10px 13px;color:var(--mut);font-size:13px;margin-bottom:14px}
+.scope-notice{display:flex;gap:10px;align-items:flex-start;background:var(--inset);border:1px dashed var(--bd);border-radius:9px;padding:10px 13px;color:var(--mut);font-size:13px;margin-bottom:14px}
 .scope-notice .ic{font-size:16px;line-height:1.3}
 .scope-notice b{color:var(--tx)}
 
@@ -506,7 +506,7 @@ a{color:var(--info)}
 /* port chips */
 .portpill{background:var(--inset);color:var(--mut)}
 .portpill:hover{background:var(--hover);border-color:var(--accent);color:var(--accent)}
-/* ALL form fields (overrides the inline background:#0d1117 on Alerts/Hosts inputs) */
+/* ALL form fields (overrides the inline background:var(--inset) on Alerts/Hosts inputs) */
 .content input,.content select,.content textarea{background:var(--inset)!important;color:var(--tx)!important;border-color:var(--bd)}
 .content details > pre{background:var(--hover)!important;color:var(--tx)!important}
 /* inset surfaces */
@@ -593,6 +593,31 @@ a{color:var(--info)}
 .sharepriv{margin-top:11px;font-size:10.5px;line-height:1.45;color:var(--mut);display:flex;gap:6px;align-items:flex-start;border-top:1px solid var(--bd);padding-top:9px}
 .sharepriv .lk{flex:none}
 @media(max-width:680px){.sharepop{position:fixed;left:10px;right:10px;top:auto;bottom:10px;width:auto}}
+/* ───────── Design-system layer (impeccable craft pass) ─────────
+   Tokens + control states + a real SVG icon system, added on top so the rest of
+   the sheet is untouched. Fixes the two biggest findings: no focus states, and a
+   surface assembled from one-off inline styles. */
+:root{ --ring:var(--info); --r-ctrl:7px; --r-card:11px; }
+/* The floor for any text-like control not carrying an inline style — themable,
+   consistent. Scoped away from checkboxes/radios/range/file so they keep native UI. */
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]),select,textarea{
+  background:var(--inset); color:var(--tx); border:1px solid var(--bd);
+  border-radius:var(--r-ctrl); padding:7px 10px; font:inherit;
+  transition:border-color .15s ease, box-shadow .15s ease; }
+input:not([type=checkbox]):not([type=radio]):hover,select:hover,textarea:hover{ border-color:var(--mut); }
+input[type=checkbox],input[type=radio]{ accent-color:var(--accent); }
+button,.rb,.nrow,.subtab,a{ transition:border-color .15s ease, background .15s ease, color .15s ease; }
+/* Visible keyboard focus everywhere — was a single rule in the whole app. */
+:where(a,button,.rb,.nrow,.subtab,[tabindex],[role="button"]):focus-visible{
+  outline:2px solid var(--ring); outline-offset:2px; border-radius:6px; }
+input:focus-visible,select:focus-visible,textarea:focus-visible{
+  outline:none; border-color:var(--ring); box-shadow:0 0 0 3px rgba(88,166,255,.28); }
+@media(prefers-reduced-motion:reduce){ input,select,textarea,button,.rb,.nrow,.subtab,a{ transition:none } }
+/* Inline SVG icons that replace heading emoji — inherit text colour + size. */
+.hic{ width:1.05em; height:1.05em; flex:none; vertical-align:-.16em; stroke-width:2; opacity:.82 }
+h2 .hic{ margin-right:8px } .card-sub .hic{ margin-right:6px; width:1em; height:1em } .logo .hic{ width:18px; height:18px; vertical-align:-.22em; opacity:1 }
+/* De-noise: captions read as one calm, consistent secondary voice. */
+.cap{ line-height:1.45 }
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1>🛰️ HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
 <button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
@@ -752,7 +777,7 @@ a{color:var(--info)}
   <div class="card" id="runs-card">
     <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">🧪 Runs
       <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— pushed from your notebooks &amp; MLflow, priced with real GPU energy</span>
-      <select id="runs-status" style="margin-left:auto;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:4px 8px;font:inherit;font-size:12px">
+      <select id="runs-status" style="margin-left:auto;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:4px 8px;font:inherit;font-size:12px">
         <option value="">all status</option><option value="running">running</option>
         <option value="finished">finished</option><option value="failed">failed</option><option value="killed">killed</option>
       </select></h2>
@@ -842,7 +867,7 @@ a{color:var(--info)}
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Discord webhook URL</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_discord" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false"
-                 style="flex:1;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="flex:1;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div class="cap" id="al_discord_state" style="margin-top:4px"></div>
       </div>
@@ -851,9 +876,9 @@ a{color:var(--info)}
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">ntfy.sh topic</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="text" id="al_ntfy_topic" placeholder="my-homelab-alerts" autocomplete="off" spellcheck="false"
-                 style="flex:2;min-width:180px;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="flex:2;min-width:180px;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
           <input type="text" id="al_ntfy_server" placeholder="https://ntfy.sh" autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:160px;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="flex:1;min-width:160px;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div class="cap">Topic is required; server defaults to <code>https://ntfy.sh</code>. Self-hosted ntfy works too.</div>
       </div>
@@ -862,7 +887,7 @@ a{color:var(--info)}
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Telegram bot token</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_token" placeholder="123456:ABC-DEF…" autocomplete="off" spellcheck="false"
-                 style="flex:1;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="flex:1;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div class="cap" id="al_telegram_state" style="margin-top:4px"></div>
       </div>
@@ -871,7 +896,7 @@ a{color:var(--info)}
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Telegram chat ID</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_chat_id" placeholder="-1001234567890" autocomplete="off" spellcheck="false"
-                 style="flex:1;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="flex:1;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div class="cap">Required with a bot token. Message your bot once, then read <code>chat.id</code> from <code>getUpdates</code>.</div>
       </div>
@@ -879,7 +904,7 @@ a{color:var(--info)}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Minimum severity</div>
-          <select id="al_minlevel" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+          <select id="al_minlevel" style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
             <option value="warning">warning</option>
             <option value="critical">critical only</option>
           </select>
@@ -887,7 +912,7 @@ a{color:var(--info)}
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Disk alert threshold (%)</div>
           <input type="number" id="al_disk" min="50" max="99" step="1"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
       </div>
 
@@ -909,7 +934,7 @@ a{color:var(--info)}
       <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
       <div>
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Don't know your rates? Pick your country</div>
-        <select id="al_country" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        <select id="al_country" style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
           <option value="">— Select to prefill a typical estimate —</option>
         </select>
         <div class="cap" id="al_tariff_src" style="margin-top:4px">Indicative estimate — always edit to match your own bill.</div>
@@ -928,12 +953,12 @@ a{color:var(--info)}
         <div>
           <div class="muted" id="al_kwh_label" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Price (per kWh)</div>
           <input type="number" id="al_kwh" min="0" step="0.0001" placeholder="e.g. 0.30"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Currency symbol</div>
           <input type="text" id="al_currency" maxlength="4" placeholder="$"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
       </div>
 
@@ -942,17 +967,17 @@ a{color:var(--info)}
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night price (per kWh)</div>
           <input type="number" id="al_kwh_night" min="0" step="0.0001" placeholder="e.g. 0.15"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night starts</div>
           <input type="time" id="al_night_start" value="22:00"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Night ends</div>
           <input type="time" id="al_night_end" value="06:00"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
       </div>
       <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
@@ -960,7 +985,7 @@ a{color:var(--info)}
       <div style="max-width:340px">
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Rest-of-system baseline (W) — optional</div>
         <input type="number" id="al_idle_w" min="0" step="1" placeholder="e.g. 60 (mainboard, fans, disks)"
-               style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+               style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         <div class="cap" style="margin-top:4px">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
       </div>
 
@@ -982,11 +1007,11 @@ a{color:var(--info)}
         <div style="flex:2;min-width:160px">
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">New key name</div>
           <input type="text" id="intg_key_name" placeholder="e.g. colab-laptop" autocomplete="off"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div style="flex:1;min-width:120px">
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Expires in</div>
-          <select id="intg_key_exp" style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+          <select id="intg_key_exp" style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
             <option value="">Never</option><option value="7">7 days</option><option value="30">30 days</option>
             <option value="90">90 days</option><option value="365">1 year</option>
           </select>
@@ -996,7 +1021,7 @@ a{color:var(--info)}
       <div id="intg_key_reveal" hidden style="margin:6px 0">
         <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Your new key — copy it now, it won't be shown again</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <input type="text" id="intg_key_value" readonly style="flex:1;min-width:240px;background:#0d1117;color:var(--tx);border:1px solid var(--ok);border-radius:7px;padding:7px 10px;font:inherit">
+          <input type="text" id="intg_key_value" readonly style="flex:1;min-width:240px;background:var(--inset);color:var(--tx);border:1px solid var(--ok);border-radius:7px;padding:7px 10px;font:inherit">
           <button class="rb" id="intg_key_copy">Copy</button>
         </div>
       </div>
@@ -1023,12 +1048,12 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow tracking URI</div>
           <input type="text" id="al_mlflow_uri" placeholder="http://mlflow.lan:5000"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
         </div>
         <div>
           <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow bearer token (optional)</div>
           <input type="text" id="al_mlflow_token" placeholder="only for a secured MLflow" autocomplete="off"
-                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+                 style="width:100%;background:var(--inset);color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
           <div class="cap" id="al_mlflow_token_state" style="margin-top:4px"></div>
         </div>
       </div>
@@ -1306,6 +1331,53 @@ function setVer(v){
   const el=document.getElementById('ver'); if(!el||!v) return;
   const pre = String(v).includes('-');
   el.innerHTML = 'v'+esc(v) + (pre ? '<span class="prebadge" title="Pre-release on the next branch — not a stable release">preview</span>' : '');
+}
+
+// ── Real SVG icon system (replaces emoji in headings) ─────────────────────────
+// Lucide-style 24×24 stroke icons keyed by the emoji they replace, so headings get
+// one consistent, cross-platform icon family instead of OS-dependent emoji. Applied
+// at runtime to <h2>, .card-sub and the brand .logo — no markup churn, reversible,
+// and degrades to the original emoji for any glyph not in the map.
+const ICONS={
+  '⚡':'<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+  '🌐':'<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  '🎮':'<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M9 2v2M15 20v2M9 20v2M20 9h2M20 15h2M2 9h2M2 15h2"/>',
+  '💰':'<circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 6v2m0 8v2"/>',
+  '💾':'<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7M7 3v4a1 1 0 0 0 1 1h7"/>',
+  '📈':'<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+  '📊':'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
+  '📋':'<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01"/>',
+  '📦':'<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" x2="12" y1="22" y2="12"/>',
+  '📶':'<path d="M2 20h.01M7 20v-4M12 20v-8M17 20V8M22 4v16"/>',
+  '🔬':'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  '🖥':'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
+  '🛡':'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+  '🛰':'<path d="M13 7 9 3 5 7l4 4"/><path d="m17 11 4 4-4 4-4-4"/><path d="m8 12 4 4 6-6-4-4Z"/><path d="m16 8 3-3"/><path d="M9 21a6 6 0 0 0-6-6"/>',
+  '🧠':'<path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>',
+  '🧩':'<path d="m12.8 2.2 8.6 3.9a1 1 0 0 1 0 1.8l-8.6 3.9a2 2 0 0 1-1.6 0L2.6 7.9a1 1 0 0 1 0-1.8l8.6-3.9a2 2 0 0 1 1.6 0Z"/><path d="m22 17.6-9.2 4.2a2 2 0 0 1-1.6 0L2 17.6"/><path d="m22 12.6-9.2 4.2a2 2 0 0 1-1.6 0L2 12.6"/>',
+  '🧪':'<path d="M10 2v7.3M14 9.3V2M8.5 2h7M5.6 16.5h12.9"/><path d="M14 9.3a6.5 6.5 0 1 1-4 0"/>',
+  '🧰':'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  '🧾':'<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M8 7h8M8 11h8M8 15h5"/>',
+  '🩺':'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  '🔑':'<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
+  '🟢':'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
+};
+function svgIc(d){ return `<svg class="hic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`; }
+function applyIcons(scope){
+  (scope||document).querySelectorAll('h2,.card-sub,.logo').forEach(el=>{
+    if(el.dataset.ic) return;
+    const t=el.firstChild;
+    if(!t || t.nodeType!==3) return;
+    const lead=t.nodeValue.replace(/^\s+/,'');
+    for(const key in ICONS){
+      if(lead.startsWith(key)){
+        t.nodeValue = t.nodeValue.replace(/^\s*/,'').slice(key.length).replace(/^[️‍]*/,'').replace(/^\s*/,' ');
+        el.insertAdjacentHTML('afterbegin', svgIc(ICONS[key]));
+        el.dataset.ic='1';
+        break;
+      }
+    }
+  });
 }
 const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
@@ -3254,6 +3326,7 @@ function renderDisksTab(){
     }).join('');
     disks.forEach(d=>{ const id=_dskId(d.mount);
       document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true); });
+    applyIcons(root);   // the per-disk 💾 headings are built here, so iconify them too
   } else {
     // mounts unchanged: just refresh the used/total figures in the headers
     disks.forEach(d=>{ const c=document.querySelector('#'+_dskId(d.mount)+'_crumb'); /* keep state */ });
@@ -3691,6 +3764,7 @@ function refreshLocalOnlyNotices(){
 // ── Wire-up ───────────────────────────────────────────────────────────────────
 mountShell();
 buildNav();
+applyIcons();        // swap heading emoji for the SVG icon family (static markup + brand logo)
 initTheme();
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
