@@ -746,10 +746,33 @@ a{color:var(--info)}
   <p class="cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
 </section>
 
-<!-- ───────── Experiments / Training ───────── -->
+<!-- ───────── Experiments / Runs ───────── -->
 <section data-tab="experiments" hidden>
+  <div class="card" id="runs-card">
+    <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">🧪 Runs
+      <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— pushed from your notebooks &amp; MLflow, priced with real GPU energy</span>
+      <select id="runs-status" style="margin-left:auto;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:4px 8px;font:inherit;font-size:12px">
+        <option value="">all status</option><option value="running">running</option>
+        <option value="finished">finished</option><option value="failed">failed</option><option value="killed">killed</option>
+      </select></h2>
+    <div id="runs-empty" class="topproc-empty" hidden>
+      No runs yet. Push one from Jupyter/Colab/Kaggle with the tiny client, or wire up MLflow — set it up in
+      <a href="#" id="runs-settings-link">Settings → Integrations</a>.
+    </div>
+    <table id="runs-table" style="margin-top:6px"><thead><tr>
+      <th>Run</th><th>Source</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th><th>Energy</th><th>Cost</th>
+    </tr></thead><tbody id="runs-tbody"></tbody></table>
+  </div>
+  <div class="card" id="run-detail" hidden>
+    <h2 id="run-detail-title">Run</h2>
+    <div id="run-detail-meta" class="cap"></div>
+    <div id="run-metric-charts"></div>
+    <h2 style="margin-top:6px;font-size:13px">⚡ GPU power &amp; utilisation during this run</h2>
+    <div class="chartbox short"><canvas id="run-resource"></canvas></div>
+    <p class="cap" id="run-cost-cap"></p>
+  </div>
   <div class="card" id="train-card">
-    <h2>🔬 Training runs <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— detected on the hub right now</span></h2>
+    <h2>🔬 Auto-detected on the hub <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— training processes running now (no push needed)</span></h2>
     <div id="train-body"></div>
   </div>
   <div class="card" id="devtools-card" hidden>
@@ -796,6 +819,7 @@ a{color:var(--info)}
     <div class="subtabs" id="set-subtabs">
       <button type="button" class="subtab on" data-sp="alerts">🔔 Alerts</button>
       <button type="button" class="subtab"    data-sp="costs">💰 Costs</button>
+      <button type="button" class="subtab"    data-sp="integrations">🧪 Integrations</button>
     </div>
 
     <!-- ── Alerts sub-page ── -->
@@ -944,6 +968,54 @@ a{color:var(--info)}
       </div>
       </div>
     </div><!-- /set-pane-costs -->
+
+    <!-- ── Integrations sub-page ── -->
+    <div id="set-pane-integrations" hidden>
+      <p class="cap" style="margin:2px 0 12px">Push run/session data from Jupyter, Colab or Kaggle (or mirror MLflow) — each run comes back priced with the real GPU energy it used. Writes need the API key; the dashboard reads are open on your LAN.</p>
+
+      <div class="card-sub" style="font-weight:600">🔑 API key</div>
+      <div id="intg_key_state" class="cap" style="margin:4px 0">…</div>
+      <div id="intg_key_reveal" hidden style="margin:6px 0">
+        <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">Your new key — copy it now, it won't be shown again</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input type="text" id="intg_key_value" readonly style="flex:1;min-width:240px;background:#0d1117;color:var(--tx);border:1px solid var(--ok);border-radius:7px;padding:7px 10px;font:inherit">
+          <button class="rb" id="intg_key_copy">Copy</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="rb" id="intg_key_gen">Generate / regenerate key</button>
+        <a class="rb" id="intg_client_dl" href="/static/homelab_run.py" download>Download client (homelab_run.py)</a>
+      </div>
+      <div class="cap" style="margin-top:8px">Quickstart in a notebook:</div>
+      <pre class="cmd" id="intg_snippet" style="white-space:pre-wrap">import homelab_run as homelab
+homelab.configure(url="http://THIS-HOST:9800", key="hlm_…")
+with homelab.run("my-finetune", params={"lr":2e-4}) as r:
+    for step, loss in enumerate(train()):
+        r.log_metric("loss", loss, step=step)</pre>
+      <div class="cap">Colab/Kaggle run in the cloud — point <code>url</code> at a Tailscale/ngrok address that reaches this hub.</div>
+
+      <div class="card-sub" style="font-weight:600;margin-top:16px">🟢 MLflow (pull)</div>
+      <div class="cap" style="margin:4px 0">Mirror runs from an MLflow tracking server — they appear under Runs with GPU cost attached. Synced every ~5 min.</div>
+      <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow tracking URI</div>
+          <input type="text" id="al_mlflow_uri" placeholder="http://mlflow.lan:5000"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+        </div>
+        <div>
+          <div class="muted" style="font-size:12px;text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px">MLflow bearer token (optional)</div>
+          <input type="text" id="al_mlflow_token" placeholder="only for a secured MLflow" autocomplete="off"
+                 style="width:100%;background:#0d1117;color:var(--tx);border:1px solid var(--bd);border-radius:7px;padding:7px 10px;font:inherit">
+          <div class="cap" id="al_mlflow_token_state" style="margin-top:4px"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="rb on" id="al_save_intg">Save</button>
+        <button class="rb" id="intg_mlflow_test">Test connection</button>
+        <button class="rb" id="intg_mlflow_sync">Sync now</button>
+      </div>
+      <div id="intg_status" class="cap" style="margin-top:6px"></div>
+    </div><!-- /set-pane-integrations -->
   </div>
 </section>
 
@@ -2139,6 +2211,9 @@ async function loadAlerts(){
   document.getElementById('al_night_start').value = s.night_start||'22:00';
   document.getElementById('al_night_end').value   = s.night_end||'06:00';
   const idleW=document.getElementById('al_idle_w'); if(idleW) idleW.value = s.system_idle_watts||'';
+  const mu=document.getElementById('al_mlflow_uri'); if(mu) mu.value = s.mlflow_uri||'';
+  const mts=document.getElementById('al_mlflow_token_state');
+  if(mts) mts.textContent = s.mlflow_token_set ? 'A token is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.' : 'No token saved.';
   buildCountrySelect().then(()=>{ document.getElementById('al_country').value = s.country||''; });
   setTariffMode(s.tariff_mode==='dual');
   // The webhook is a secret — server only returns whether one is set.
@@ -2178,6 +2253,7 @@ async function saveAlerts(){
     night_start:      document.getElementById('al_night_start').value || '22:00',
     night_end:        document.getElementById('al_night_end').value   || '06:00',
     system_idle_watts: (document.getElementById('al_idle_w')||{}).value || '',
+    mlflow_uri:        (document.getElementById('al_mlflow_uri')||{}).value || '',
     country:          document.getElementById('al_country').value,
   };
   // Only send the webhook field if the user actually typed in it — empty means
@@ -2189,10 +2265,14 @@ async function saveAlerts(){
   const tv = document.getElementById('al_telegram_token').value;
   if(tv === 'CLEAR'){ body.telegram_token=''; }
   else if(tv && tv.trim()){ body.telegram_token = tv.trim(); }
+  const mtv = (document.getElementById('al_mlflow_token')||{}).value;
+  if(mtv === 'CLEAR'){ body.mlflow_token=''; }
+  else if(mtv && mtv.trim()){ body.mlflow_token = mtv.trim(); }
   let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)})).json(); }catch(e){ showAlertStatus('critical','Could not save settings: '+e); return; }
   document.getElementById('al_discord').value='';
   document.getElementById('al_telegram_token').value='';
+  const mtok=document.getElementById('al_mlflow_token'); if(mtok) mtok.value='';
   await loadAlerts();
   showAlertStatus('ok','Settings saved.');
 }
@@ -2774,13 +2854,70 @@ function paintAiBand(g,x,loaded,serving){
     : 'No GPU detected on the hub — showing model servers only.';
 }
 
+// ── Runs (pushed from notebooks / MLflow) — the primary Experiments view ──────
+const RUN_SRC={jupyter:'🟣',colab:'🟠',kaggle:'🔵',mlflow:'🟢',api:'⚪',cli:'⚫'};
+const RUN_ST={running:'▶️',finished:'✅',failed:'⚠️',killed:'⛔'};
+async function renderRuns(){
+  const card=document.getElementById('runs-card'); if(!card) return;
+  const status=(document.getElementById('runs-status')||{}).value||'';
+  let j; try{ j=await(await fetch('/api/runs?range='+encodeURIComponent(R)+(status?'&status='+status:''))).json(); }catch(e){ return; }
+  const cur=j.currency||'$', runs=j.runs||[];
+  const empty=document.getElementById('runs-empty'), tbl=document.getElementById('runs-table'), tb=document.getElementById('runs-tbody');
+  if(!runs.length){ empty.hidden=false; if(tbl) tbl.style.display='none';
+    const lk=document.getElementById('runs-settings-link'); if(lk) lk.onclick=e=>{e.preventDefault();showTab('alerts');if(typeof setSettingsPane==='function')setSettingsPane('integrations');};
+    return; }
+  empty.hidden=true; if(tbl) tbl.style.display='';
+  const fmtTs=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  tb.innerHTML=runs.map(r=>{
+    const mets=Object.entries(r.metrics_latest||{}).slice(0,3).map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`).join(' · ');
+    return `<tr data-id="${esc(r.id)}" style="cursor:pointer">
+      <td><b>${esc(r.name)}</b></td>
+      <td><span class="mchip">${RUN_SRC[r.source]||'•'} ${esc(r.source)}</span></td>
+      <td>${RUN_ST[r.status]||''} ${esc(r.status)}</td>
+      <td>${fmtTs(r.started_at)}</td><td>${fmtDur(r.duration)}</td>
+      <td class="muted">${mets||'—'}</td>
+      <td>${(r.energy_kwh||0).toFixed(3)} kWh</td>
+      <td>${cur}${(r.cost||0).toFixed(2)}</td></tr>`;
+  }).join('');
+  tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openRun(tr.dataset.id));
+}
+async function openRun(id){
+  let j; try{ j=await(await fetch('/api/runs/'+encodeURIComponent(id))).json(); }catch(e){ return; }
+  if(!j || j.error) return;
+  const cur=j.currency||'$';
+  document.getElementById('run-detail').hidden=false;
+  document.getElementById('run-detail-title').textContent=j.name;
+  const params=j.params?(' · params '+esc(JSON.stringify(j.params))):'';
+  document.getElementById('run-detail-meta').innerHTML=`${RUN_SRC[j.source]||''} ${esc(j.source)} · ${esc(j.status)} · ${esc(j.host||'')} · ${fmtDur(j.duration)}${params}`;
+  const host=document.getElementById('run-metric-charts'); host.innerHTML='';
+  const keys=Object.keys(j.metrics||{});
+  keys.forEach((k,i)=>{
+    const id2='runmetric'+i, m=j.metrics[k];
+    host.insertAdjacentHTML('beforeend',`<div style="margin-top:8px"><div class="cap" style="margin-bottom:2px">${esc(k)}</div><div class="chartbox short"><canvas id="${id2}"></canvas></div></div>`);
+    mk(id2,{type:'line',data:{labels:m.steps,datasets:[{label:k,data:m.values,borderColor:colorFor(k),backgroundColor:colorFor(k)+'22',fill:true,pointRadius:0,tension:.2}]},
+      options:{responsive:true,maintainAspectRatio:false,scales:{x:{ticks:{color:cv('--mut'),maxTicksLimit:8}},y:{ticks:{color:cv('--mut')}}},plugins:{legend:{display:false}}}});
+  });
+  if(!keys.length) host.innerHTML='<div class="muted" style="margin-top:6px">No metrics logged for this run.</div>';
+  const res=j.resource||{labels:[],power_w:[],util_pct:[]}, labels=fmtLabels(res.labels||[]);
+  mk('run-resource',{type:'line',data:{labels,datasets:[
+    {label:'Power (W)',data:res.power_w,borderColor:'#3fb950',backgroundColor:'#3fb95022',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
+    {label:'Util (%)',data:res.util_pct,borderColor:'#4dabf7',pointRadius:0,yAxisID:'y1',tension:.2}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10}},
+        y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
+        y1:{position:'right',min:0,max:100,grid:{display:false},ticks:{color:cv('--mut'),callback:v=>v+'%'}}},
+      plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}}});
+  document.getElementById('run-cost-cap').textContent=`This run used ${(j.energy_kwh||0).toFixed(3)} kWh and cost ${cur}${(j.cost||0).toFixed(2)} in GPU energy over its window · peak util ${j.peak_util}% · avg ${j.avg_w} W.`;
+  document.getElementById('run-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
 // ── Experiments / Training tab ───────────────────────────────────────────────
-// Live training-run cards (auto-detected from /proc on the hub) + a table of GPU
-// activity sessions reconstructed from power/util history, with energy and cost.
+// Auto-detected training processes (no push) + GPU activity sessions, below Runs.
 let EXP_AT=0;
 async function renderExperiments(force){
   if(CURRENT_HOST!=='local'){ renderLocalOnlyNotice('experiments'); return; }
   clearLocalOnlyNotice('experiments');
+  renderRuns();                                     // pushed/MLflow runs (primary view)
   if(!force && Date.now()-EXP_AT < 15000) return;   // throttle the live refresh
   EXP_AT=Date.now();
   let j; try{ j=await(await fetch('/api/sessions?range='+encodeURIComponent(R))).json(); }catch(e){ return; }
@@ -3825,12 +3962,43 @@ if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist al
 document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
 document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);
 document.getElementById('al_country').onchange    = applyCountryPrefill;
-// Settings sub-tabs: Alerts / Costs (more added later, e.g. Integrations).
+// Settings sub-tabs: Alerts / Costs / Integrations.
 function setSettingsPane(name){
   document.querySelectorAll('#set-subtabs .subtab').forEach(b=>b.classList.toggle('on', b.dataset.sp===name));
   document.querySelectorAll('[id^="set-pane-"]').forEach(p=>p.hidden = p.id !== 'set-pane-'+name);
+  if(name==='integrations') loadIntegrations();
 }
 document.querySelectorAll('#set-subtabs .subtab').forEach(b=>b.onclick=()=>setSettingsPane(b.dataset.sp));
+
+// ── Integrations settings (API key + MLflow) ──────────────────────────────────
+async function loadIntegrations(){
+  let j; try{ j=await(await fetch('/api/integration/key')).json(); }catch(e){ return; }
+  const st=document.getElementById('intg_key_state');
+  if(st) st.innerHTML = j.has_key
+    ? 'A key is set: <code>'+esc(j.key_masked)+'</code>. Regenerating invalidates the old one.'
+    : 'No API key yet — generate one so notebooks can push runs (ingest is disabled until you do).';
+  const snip=document.getElementById('intg_snippet');
+  if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)`;
+}
+function intgStatus(level,msg){ const el=document.getElementById('intg_status'); if(el){ el.textContent=msg; el.style.color = level==='ok'?'var(--ok)':level==='err'?'var(--crit)':'var(--mut)'; } }
+(function wireIntegrations(){
+  const gen=document.getElementById('intg_key_gen');
+  if(gen) gen.onclick=async()=>{ if(!confirm('Generate a new API key? Any client using the old key will stop working.')) return;
+    let j; try{ j=await(await fetch('/api/integration/key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({regenerate:true})})).json(); }catch(e){ intgStatus('err','Failed: '+e); return; }
+    if(j.key){ document.getElementById('intg_key_reveal').hidden=false; document.getElementById('intg_key_value').value=j.key; loadIntegrations(); intgStatus('ok','New key generated — copy it now.'); } };
+  const cp=document.getElementById('intg_key_copy');
+  if(cp) cp.onclick=()=>{ const v=document.getElementById('intg_key_value').value; copyText(v); intgStatus('ok','Key copied to clipboard.'); };
+  const si=document.getElementById('al_save_intg');
+  if(si) si.onclick=saveAlerts;
+  const tst=document.getElementById('intg_mlflow_test');
+  if(tst) tst.onclick=async()=>{ intgStatus('info','Testing MLflow…'); let j; try{ j=await(await fetch('/api/integration/mlflow/sync')).json(); }catch(e){ intgStatus('err','Failed: '+e); return; }
+    intgStatus(j.ok?'ok':'err', j.ok?'MLflow reachable ✓':'MLflow unreachable: '+(j.error||'')); };
+  const syn=document.getElementById('intg_mlflow_sync');
+  if(syn) syn.onclick=async()=>{ intgStatus('info','Syncing from MLflow…'); let j; try{ j=await(await fetch('/api/integration/mlflow/sync',{method:'POST'})).json(); }catch(e){ intgStatus('err','Failed: '+e); return; }
+    if(j.ok){ intgStatus('ok','Synced '+(j.synced||0)+' run(s) from MLflow.'); if(TAB==='experiments') renderRuns(); } else intgStatus('err','Sync failed: '+(j.error||'')); };
+  const rs=document.getElementById('runs-status');
+  if(rs) rs.onchange=()=>renderRuns();
+})();
 document.getElementById('bk_download').onclick = downloadBackup;
 document.getElementById('bk_restore_btn').onclick = () => document.getElementById('bk_file').click();
 document.getElementById('bk_file').onchange = e => { const f=e.target.files&&e.target.files[0]; if(f) restoreBackup(f); };

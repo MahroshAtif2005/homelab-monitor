@@ -18,7 +18,8 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid
+from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
 except ImportError:
@@ -111,8 +112,17 @@ CREATE INDEX IF NOT EXISTS idx_net_ts    ON net_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_proc_ts   ON proc(ts);
 CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE INDEX IF NOT EXISTS idx_edges_ts  ON edges(ts);
+CREATE TABLE IF NOT EXISTS runs(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL,
+  started_at INTEGER NOT NULL, ended_at INTEGER, host TEXT, params TEXT, tags TEXT,
+  notes TEXT, heartbeat_at INTEGER, ext_id TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS run_metrics(run_id TEXT NOT NULL, ts INTEGER NOT NULL,
+  step INTEGER DEFAULT 0, key TEXT NOT NULL, value REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
 CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
+CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_runmetrics_rid ON run_metrics(run_id, key, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_runs_ext ON runs(source, ext_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
@@ -3368,8 +3378,12 @@ SETTING_DEFAULTS = {
     "night_end":           "06:00",    # local time-of-day "HH:MM"
     "country":             "",         # ISO-3166 alpha-2 — UI prefill memo only; backend never resolves it
     "system_idle_watts":   "",         # optional operator baseline (mainboard/fans/PSU/disks); blank => "other" omitted, never a guessed wall figure
+    # ── Integrations / experiment-tracking API (push/pull) ────────────────────
+    "api_key":             "",         # Bearer/X-API-Key for run ingest; empty => not generated (ingest fail-closed)
+    "mlflow_uri":          "",         # MLflow tracking server base (blank = off)
+    "mlflow_token":        "",         # optional bearer for a secured MLflow
 }
-SETTING_SECRETS = {"discord_webhook_url", "telegram_token"}   # never round-tripped to the UI in full
+SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
@@ -3925,7 +3939,17 @@ def sample_once():
         if ts % 360 < INTERVAL:
             for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
+        if ts % 60 < INTERVAL:   # stale-run janitor: a crashed/disconnected push run -> killed
+            DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
+                       "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
+                       (ts, ts - 180))
         DB.commit()
+    # MLflow pull (network; outside the lock) every ~5 min when configured.
+    if get_settings().get("mlflow_uri") and ts % 300 < INTERVAL:
+        try:
+            sync_mlflow()
+        except Exception as e:
+            print("mlflow sync error:", e, flush=True)
     LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
@@ -4384,6 +4408,334 @@ def api_sessions():
         "training": LATEST.get("training") or [],
         "devtools": LATEST.get("devtools") or [],
     })
+
+# ── Integrations: experiment/run tracking API (push/pull) + MLflow sync ────────
+# Pivot from /proc auto-detection to a key-authenticated ingest API a notebook can
+# push to (Jupyter/Colab/Kaggle via homelab_run.py), pulled back with the run's real
+# GPU energy/cost attached by overlapping its [start,end] window with `samples`.
+MAX_RUN_FIELD, MAX_RUN_JSON, MAX_METRICS_REQ = 4096, 64 * 1024, 1000
+RUN_SOURCES = {"jupyter", "colab", "kaggle", "mlflow", "api", "cli"}
+RUN_STATUS  = {"running", "finished", "failed", "killed"}
+
+def _get_api_key():
+    return get_settings().get("api_key") or ""
+
+def _gen_api_key():
+    key = "hlm_" + secrets.token_urlsafe(32)
+    save_settings({"api_key": key})
+    return key
+
+def _key_ok(presented):
+    real = _get_api_key()
+    if not real or not presented:
+        return False                       # fail-closed: no key set => ingest disabled
+    return hmac.compare_digest(presented, real)
+
+def _presented_key():
+    auth = request.headers.get("Authorization", "")
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip()
+    return request.headers.get("X-API-Key", "").strip()
+
+def require_api_key(fn):
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        if not _key_ok(_presented_key()):
+            return jsonify({"ok": False, "error": "missing or invalid API key"}), 401
+        return fn(*a, **kw)
+    return wrapper
+
+def _clip(v, n):
+    return ("" if v is None else str(v))[:n]
+
+def _json_field(v, n):
+    if v is None:
+        return None
+    txt = v if isinstance(v, str) else json.dumps(v, separators=(",", ":"))
+    if len(txt.encode("utf-8")) > n:
+        raise ValueError("payload too large")
+    return txt
+
+def _safe_json(txt):
+    try:
+        return json.loads(txt) if txt else None
+    except Exception:
+        return None
+
+def _run_cost_window(cur, started, ended, ctx):
+    """Integrate samples.power over [started, ended] -> (energy_kwh, cost, avg_w,
+    peak_util), priced exactly like the cost card (dual-tariff aware)."""
+    end = ended or int(time.time())
+    kwh_per = INTERVAL / 3_600_000.0
+    e_kwh = cost = sum_p = 0.0
+    n = 0
+    peak_u = 0.0
+    for ts, util, power in cur.execute(
+            "SELECT ts,util,power FROM samples WHERE ts>=? AND ts<=? AND power IS NOT NULL",
+            (started, end)):
+        p = power or 0.0
+        sum_p += p; n += 1; peak_u = max(peak_u, util or 0)
+        e_kwh += p * kwh_per
+        cost += p * kwh_per * (_price_at(ctx, ts) or 0.0)
+    return round(e_kwh, 4), round(cost, 4), (round(sum_p / n) if n else 0), round(peak_u)
+
+@app.route("/api/integration/key", methods=["GET", "POST"])
+def api_integration_key():
+    """GET -> {has_key, key_masked}. POST {regenerate:true} -> {key} (revealed once)."""
+    if request.method == "POST":
+        if (request.get_json(silent=True) or {}).get("regenerate"):
+            return jsonify({"ok": True, "key": _gen_api_key()})
+        return jsonify({"ok": False, "error": "nothing to do"}), 400
+    k = _get_api_key()
+    return jsonify({"has_key": bool(k), "key_masked": (k[:8] + "…" + k[-4:]) if k else ""})
+
+@app.route("/api/runs", methods=["POST"])
+@require_api_key
+def api_runs_create():
+    body = request.get_json(silent=True) or {}
+    source = (body.get("source") or "api").lower()
+    if source not in RUN_SOURCES:
+        source = "api"
+    now = int(time.time())
+    rid = (body.get("id") or uuid.uuid4().hex)[:64]
+    try:
+        params = _json_field(body.get("params"), MAX_RUN_JSON)
+        tags = _json_field(body.get("tags"), MAX_RUN_JSON)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 413
+    with LOCK:
+        DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,notes,"
+                   "heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                   "ON CONFLICT(id) DO NOTHING",
+                   (rid, _clip(body.get("name") or "run", MAX_RUN_FIELD), source, "running",
+                    int(body.get("started_at") or now), None, _clip(body.get("host"), 256),
+                    params, tags, _clip(body.get("notes"), MAX_RUN_FIELD), now, None, now))
+        DB.commit()
+    return jsonify({"ok": True, "id": rid})
+
+@app.route("/api/runs/<rid>", methods=["PATCH"])
+@require_api_key
+def api_runs_update(rid):
+    body = request.get_json(silent=True) or {}
+    sets, args = ["heartbeat_at=?"], [int(time.time())]
+    if body.get("status") in RUN_STATUS:
+        sets.append("status=?"); args.append(body["status"])
+    if body.get("ended_at"):
+        sets.append("ended_at=?"); args.append(int(body["ended_at"]))
+    for f, n in (("name", MAX_RUN_FIELD), ("notes", MAX_RUN_FIELD)):
+        if f in body:
+            sets.append(f"{f}=?"); args.append(_clip(body[f], n))
+    try:
+        for f in ("params", "tags"):
+            if f in body:
+                sets.append(f"{f}=?"); args.append(_json_field(body[f], MAX_RUN_JSON))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 413
+    args.append(rid)
+    with LOCK:
+        cur = DB.execute(f"UPDATE runs SET {','.join(sets)} WHERE id=?", args)
+        DB.commit()
+    return (jsonify({"ok": True}) if cur.rowcount else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
+@app.route("/api/runs/<rid>/metrics", methods=["POST"])
+@require_api_key
+def api_runs_metrics(rid):
+    body = request.get_json(silent=True) or {}
+    pts = body.get("metrics")
+    if pts is None and "key" in body:
+        pts = [body]
+    pts = pts or []
+    if len(pts) > MAX_METRICS_REQ:
+        return jsonify({"ok": False, "error": f"max {MAX_METRICS_REQ} points/request"}), 413
+    now = int(time.time())
+    rows = []
+    for p in pts:
+        try:
+            rows.append((rid, int(p.get("ts") or now), int(p.get("step") or 0),
+                         _clip(p["key"], 128), float(p["value"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    with LOCK:
+        if not DB.execute("SELECT 1 FROM runs WHERE id=?", (rid,)).fetchone():
+            return jsonify({"ok": False, "error": "unknown run"}), 404
+        if rows:
+            DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
+            DB.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (now, rid))
+            DB.commit()
+    return jsonify({"ok": True, "logged": len(rows)})
+
+@app.route("/api/runs/<rid>/finish", methods=["POST"])
+@require_api_key
+def api_runs_finish(rid):
+    body = request.get_json(silent=True) or {}
+    status = body.get("status") if body.get("status") in RUN_STATUS else "finished"
+    if status == "running":
+        status = "finished"
+    ended = int(body.get("ended_at") or time.time())
+    with LOCK:
+        cur = DB.execute("UPDATE runs SET status=?, ended_at=?, heartbeat_at=? WHERE id=?",
+                         (status, ended, ended, rid))
+        DB.commit()
+    return (jsonify({"ok": True, "id": rid, "status": status}) if cur.rowcount
+            else (jsonify({"ok": False, "error": "unknown run"}), 404))
+
+@app.route("/api/runs")
+def api_runs_list():
+    ctx = _cost_ctx()
+    rng = request.args.get("range", "7d"); span = RANGES.get(rng, 604800)
+    status = request.args.get("status")
+    now = int(time.time()); since = 0 if span is None else now - span
+    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
+         "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
+    args = [since, now]
+    if status in RUN_STATUS:
+        q += "AND status=? "; args.append(status)
+    q += "ORDER BY started_at DESC LIMIT 500"
+    out = []
+    with LOCK:
+        cur = DB.cursor()
+        for (rid, name, source, st, started, ended, host, params, tags, notes) in cur.execute(q, args).fetchall():
+            e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, ended, ctx)
+            kv = {}
+            # latest value per key = the last-logged row (max rowid), robust even when
+            # several points share a timestamp.
+            for k, v in cur.execute(
+                    "SELECT key, value FROM run_metrics WHERE run_id=? AND rowid IN "
+                    "(SELECT MAX(rowid) FROM run_metrics WHERE run_id=? GROUP BY key)", (rid, rid)):
+                kv[k] = v
+            out.append({"id": rid, "name": name, "source": source, "status": st,
+                        "started_at": started, "ended_at": ended, "duration": (ended or now) - started,
+                        "host": host, "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes,
+                        "metrics_latest": kv, "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u})
+    return jsonify({"range": rng, "currency": ctx["currency"], "tariff_mode": ctx["mode"], "runs": out})
+
+@app.route("/api/runs/<rid>")
+def api_runs_get(rid):
+    ctx = _cost_ctx()
+    now = int(time.time())
+    with LOCK:
+        cur = DB.cursor()
+        r = cur.execute("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
+                        "FROM runs WHERE id=?", (rid,)).fetchone()
+        if not r:
+            return jsonify({"error": "unknown run"}), 404
+        (rid, name, source, st, started, ended, host, params, tags, notes) = r
+        end = ended or now
+        metrics = {}
+        for k, ts, step, v in cur.execute(
+                "SELECT key,ts,step,value FROM run_metrics WHERE run_id=? ORDER BY key,ts,step", (rid,)):
+            d = metrics.setdefault(k, {"steps": [], "ts": [], "values": []})
+            d["steps"].append(step); d["ts"].append(ts); d["values"].append(v)
+        bk = max(INTERVAL, round(max(1, end - started) / MAX_POINTS))
+        labels, power_w, util_pct = [], [], []
+        for b, ap, au in cur.execute("SELECT (ts/?)*? b, AVG(power), AVG(util) FROM samples "
+                                     "WHERE ts>=? AND ts<=? GROUP BY b ORDER BY b", (bk, bk, started, end)):
+            labels.append(int(b)); power_w.append(round(ap or 0)); util_pct.append(round(au or 0))
+        e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, end, ctx)
+    return jsonify({"id": rid, "name": name, "source": source, "status": st,
+                    "started_at": started, "ended_at": ended, "duration": end - started, "host": host,
+                    "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes, "metrics": metrics,
+                    "resource": {"labels": labels, "power_w": power_w, "util_pct": util_pct, "bucket_sec": bk},
+                    "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u,
+                    "currency": ctx["currency"], "tariff_mode": ctx["mode"]})
+
+# ── MLflow sync (pull) — mirror MLflow runs in as source='mlflow', pure REST ───
+_MLF_STATUS = {"RUNNING": "running", "FINISHED": "finished", "FAILED": "failed",
+               "KILLED": "killed", "SCHEDULED": "running"}
+
+def _mlf(method, path, payload=None, params=None, timeout=15):
+    base = (get_settings().get("mlflow_uri") or "").rstrip("/")
+    if not base:
+        return None
+    url = base + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    hdr = {"Content-Type": "application/json"}
+    tok = get_settings().get("mlflow_token")
+    if tok:
+        hdr["Authorization"] = "Bearer " + tok
+    req = urllib.request.Request(url, data=data, headers=hdr, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body = r.read()
+        return json.loads(body) if body else {}
+
+def _ms_to_s(v):
+    return int(v) // 1000 if v else None
+
+def sync_mlflow():
+    """Pull experiments/runs/metrics from the configured MLflow server into
+    runs/run_metrics as source='mlflow'. Idempotent via uniq(source,ext_id)."""
+    if not (get_settings().get("mlflow_uri") or "").strip():
+        return 0
+    exp_ids, tok = [], None
+    while True:
+        body = _mlf("POST", "/api/2.0/mlflow/experiments/search",
+                    {"max_results": 1000, **({"page_token": tok} if tok else {})}) or {}
+        exp_ids += [e["experiment_id"] for e in body.get("experiments", [])]
+        tok = body.get("next_page_token")
+        if not tok:
+            break
+    if not exp_ids:
+        return 0
+    now, synced, tok = int(time.time()), 0, None
+    while True:
+        body = _mlf("POST", "/api/2.0/mlflow/runs/search",
+                    {"experiment_ids": exp_ids, "max_results": 1000,
+                     **({"page_token": tok} if tok else {})}) or {}
+        for run in body.get("runs", []):
+            info, data = run.get("info", {}), run.get("data", {})
+            ext = info.get("run_id") or info.get("run_uuid")
+            if not ext:
+                continue
+            tagd = {t["key"]: t["value"] for t in data.get("tags", [])}
+            name = info.get("run_name") or tagd.get("mlflow.runName") or ext[:8]
+            started = _ms_to_s(info.get("start_time")) or now
+            ended = _ms_to_s(info.get("end_time"))
+            status = _MLF_STATUS.get(info.get("status"), "running")
+            params = {p["key"]: p["value"] for p in data.get("params", [])}
+            tags = {k: v for k, v in tagd.items() if not k.startswith("mlflow.")}
+            with LOCK:
+                row = DB.execute("SELECT id FROM runs WHERE source='mlflow' AND ext_id=?", (ext,)).fetchone()
+                rid = row[0] if row else uuid.uuid4().hex
+                DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,"
+                           "notes,heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                           "ON CONFLICT(source,ext_id) DO UPDATE SET status=excluded.status, "
+                           "ended_at=excluded.ended_at, name=excluded.name, params=excluded.params, "
+                           "tags=excluded.tags, heartbeat_at=excluded.heartbeat_at",
+                           (rid, name, "mlflow", status, started, ended, "mlflow",
+                            json.dumps(params, separators=(",", ":")),
+                            json.dumps(tags, separators=(",", ":")), "", now, ext, now))
+                DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
+                DB.commit()
+            for m in data.get("metrics", []):
+                hist = _mlf("GET", "/api/2.0/mlflow/metrics/get-history",
+                            params={"run_id": ext, "metric_key": m["key"]}) or {}
+                rows = [(rid, _ms_to_s(h.get("timestamp")) or started, int(h.get("step") or 0),
+                         m["key"], float(h["value"])) for h in hist.get("metrics", [])]
+                if rows:
+                    with LOCK:
+                        DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
+                        DB.commit()
+            synced += 1
+        tok = body.get("next_page_token")
+        if not tok:
+            break
+    return synced
+
+@app.route("/api/integration/mlflow/sync", methods=["GET", "POST"])
+def api_mlflow_sync():
+    """GET -> reachability probe (green/red). POST -> sync now."""
+    if not (get_settings().get("mlflow_uri") or "").strip():
+        return jsonify({"ok": False, "error": "no MLflow URI configured"}), 400
+    if request.method == "POST":
+        try:
+            return jsonify({"ok": True, "synced": sync_mlflow()})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]}), 502
+    try:
+        _mlf("POST", "/api/2.0/mlflow/experiments/search", {"max_results": 1})
+        return jsonify({"ok": True, "reachable": True})
+    except Exception as e:
+        return jsonify({"ok": False, "reachable": False, "error": str(e)[:200]}), 502
 
 # ── Container logs over SSE (issue #28) ───────────────────────────────────────
 _CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
