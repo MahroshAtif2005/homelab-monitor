@@ -5,27 +5,35 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
-## [Unreleased] — `next` branch · **"The AI Lab Cockpit"**
-*Staged on `next` for preview (deployable via the `:next` Docker image). Not yet on `main`.*
+## [Unreleased] — `next` · **The AI Lab Cockpit**
+*Your GPU, your models, and your power bill — finally on the same page.*
 
-The release that turns HomeLab Monitor from a great sysadmin dashboard into **the** at-a-glance cockpit for people who **train models and serve LLMs** at home. No new dependencies — still pure Python + Flask, reading `nvidia-smi`, `/proc`, the Docker socket and your model servers directly.
+> Staged on `next` for preview (run the `:next` image). Two milestones land together here: the **deeper-visibility** work, and the big push that turns HomeLab Monitor into the at-a-glance dashboard for anyone training models or serving LLMs at home. Still pure Python + Flask, no new dependencies — it just reads `nvidia-smi`, `/proc`, `/sys`, the Docker socket and your model servers directly.
 
-- **Cost — day & night tariffs.** Electricity is commonly billed at split day/night rates (UK Economy 7, France Heures Creuses, Spain PVPC, German HT/NT…). The cost card now supports dual tariffs with a configurable night window (may cross midnight, evaluated in server-local time). Don't know your rates? **Pick your country** to prefill a typical, sourced estimate from a bundled 38-country dataset — always editable. Single-average mode is unchanged and the default. (#113)
-- **GPU truth-telling.** A GPU at "100% util" can still be underperforming. New from the same `nvidia-smi` call: **throttle-reason decoding** (a red banner when the card is power-capped or thermally throttling), **memory-bandwidth utilisation** (mem-bound vs compute-bound), core/mem clocks, **power draw vs limit (headroom)**, performance state, and memory-junction temp. (#114)
-- **Model intelligence.** Ollama models show **parameter size, quantization, context length** and capability badges (vision/tools/embedding) via `/api/show`. vLLM/TGI servers get a **live serving** strip — **tokens/sec**, requests running/queued, **KV-cache fill**, and average TTFT — scraped from their Prometheus `/metrics`. (#115)
-- **AI workload band.** The Overview now leads with an at-a-glance hero: models loaded + VRAM committed, GPU util + mem-bandwidth, live throughput, **tokens-per-Joule efficiency**, today's GPU cost, and a throttle banner. (#116)
-- **Experiments tab.** Auto-detects **training / fine-tuning runs** (torchrun, accelerate, deepspeed, train/SFT/LoRA scripts, trl/axolotl/unsloth…) with elapsed time, VRAM held, and a **"possible stall"** alert when a run holds VRAM but GPU util collapses — catch a dead 2 a.m. job. Plus **GPU activity sessions** reconstructed from power/util history, each with energy (kWh) and cost. (#117)
-- **Notebooks & tools.** Auto-discovers **Jupyter, TensorBoard, MLflow, Weights & Biases, Streamlit, Ray** from `/proc` and links straight to them — with an **idle-VRAM-squatter** flag for the forgotten notebook kernel hogging your GPU. (#118)
+**See what your GPU is actually doing**
+- **GPU truth** — your card says 100% util, but is it throttling, memory-bandwidth-bound, or quietly drooping its clocks? The GPU tab now decodes `nvidia-smi`'s throttle reasons (a red banner the moment it's power-capped or too hot), and adds memory-bandwidth util, core/mem clocks, power-vs-limit headroom and performance state — all from the same call.
+- **Multi-GPU** — every card gets its own live panel; the pooled views still sum across them. Closes #95.
+- **Model intelligence** — Ollama models show their parameter size, quantisation and context length at a glance, and vLLM/TGI servers get a live serving strip: **tokens/sec**, requests running/queued, KV-cache fill and TTFT, read straight from their `/metrics`.
 
-94 unit tests; every change shipped through CI → `:next` → preview. Research, design and the per-tab gap analysis live under `design/ai-cockpit/`.
+**Know what it costs**
+- **Costs** gets its own page — power becomes money, per machine, then **per component** (GPU measured via `nvidia-smi`, CPU/DRAM via RAPL), then **per process, container or model** you can click to drill into, over any timeframe. Day & night tariffs (UK Economy 7, France Heures Creuses, …) — or just pick your country for a sensible estimate. Honest by design: every watt is measured or a baseline you set, never a guessed wall figure. Closes #25.
 
-**Round 2 (cost depth, structure & integrations):**
-- **Costs — its own page.** A dedicated Costs page (Monitoring) with **per-machine → per-component → per-process** depth: **CPU/DRAM power is now measured** via Intel/AMD **RAPL** (alongside the measured GPU power), a stacked component breakdown, and a **per-process/container/model breakdown you can click to drill into** — see exactly how much power and money any workload used over a selectable timeframe. Honest by construction: every watt is measured, an operator-set baseline, or a labelled split of a measured quantity (wall power is never guessed). (#123)
-- **Experiments → Integrations (push/pull).** Replaced auto-detection with a real **run-tracking API**: a one-file client (`homelab_run.py`) pushes runs/metrics from **Jupyter/Colab/Kaggle**, and each run comes back **priced with the real GPU energy it used**. Plus **native MLflow** mirroring (pull). Key-authenticated ingest (fail-closed), open LAN reads. (#124)
-- **Navigation & Settings restructure.** A dedicated **AI** zone in the sidebar (AI Models, Experiments) between Monitoring and Settings, so a pure homelab admin isn't put off. The **Alerts** tab is now **Settings** with sub-tabs — **Alerts**, **Costs**, **Integrations** — so electricity config isn't buried. (#122)
-- **Fix:** the cost **country dropdown** was empty because `tariffs.json` wasn't bundled in the image. (#121)
+**Track your runs**
+- **Experiments** — push a run from Jupyter, Colab or Kaggle with a tiny one-file client (or mirror it from **MLflow**), and it comes back **priced with the real GPU energy it burned** — loss curve and power draw on the same timeline. The API keys are yours to create, name, expire and revoke.
+- **Notebooks & tools** — auto-discovers Jupyter, TensorBoard, MLflow, W&B, Streamlit and Ray, and flags the idle notebook squatting on your VRAM.
 
-108 unit tests after round 2.
+**The rest of the lab, deeper**
+- **Network I/O** — host throughput and per-container top talkers. Closes #30.
+- **Container logs** — click a container, tail its logs in a side drawer. Closes #28.
+- **Top processes** — a mini-htop on the System tab: who's eating CPU and RAM, by command. Closes #32.
+- **Adaptive host timeouts** — a slow box that timed out on poll now learns its own sweet-spot instead of being marked down. Closes #99.
+- Click the **logo** to jump back to Overview. Closes #98 — thanks @DevCrox for the PR.
+
+**Tidied up**
+- A dedicated **AI** zone in the sidebar, so a homelab admin who doesn't care about models isn't put off by "Experiments". The old Alerts tab is now one **Settings** home with **Alerts / Costs / Integrations** sub-tabs.
+- A proper visual pass: a real SVG icon set in place of emoji, consistent type/spacing/radius tokens, visible keyboard focus everywhere, and a light theme that finally behaves.
+
+130+ unit tests, shipped one PR at a time through CI → `:next`. Research and design notes live under `design/ai-cockpit/`.
 
 ## [0.15.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.15.0) — 2026-06-12
 *Polish, safety & sharing.*
