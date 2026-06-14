@@ -19,6 +19,14 @@ The release that turns HomeLab Monitor from a great sysadmin dashboard into **th
 
 94 unit tests; every change shipped through CI → `:next` → preview. Research, design and the per-tab gap analysis live under `design/ai-cockpit/`.
 
+**Round 2 (cost depth, structure & integrations):**
+- **Costs — its own page.** A dedicated Costs page (Monitoring) with **per-machine → per-component → per-process** depth: **CPU/DRAM power is now measured** via Intel/AMD **RAPL** (alongside the measured GPU power), a stacked component breakdown, and a **per-process/container/model breakdown you can click to drill into** — see exactly how much power and money any workload used over a selectable timeframe. Honest by construction: every watt is measured, an operator-set baseline, or a labelled split of a measured quantity (wall power is never guessed). (#123)
+- **Experiments → Integrations (push/pull).** Replaced auto-detection with a real **run-tracking API**: a one-file client (`homelab_run.py`) pushes runs/metrics from **Jupyter/Colab/Kaggle**, and each run comes back **priced with the real GPU energy it used**. Plus **native MLflow** mirroring (pull). Key-authenticated ingest (fail-closed), open LAN reads. (#124)
+- **Navigation & Settings restructure.** A dedicated **AI** zone in the sidebar (AI Models, Experiments) between Monitoring and Settings, so a pure homelab admin isn't put off. The **Alerts** tab is now **Settings** with sub-tabs — **Alerts**, **Costs**, **Integrations** — so electricity config isn't buried. (#122)
+- **Fix:** the cost **country dropdown** was empty because `tariffs.json` wasn't bundled in the image. (#121)
+
+108 unit tests after round 2.
+
 ## [0.15.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.15.0) — 2026-06-12
 *Polish, safety & sharing.*
 - **Snapshot & Share** — grab the current tab as a PNG, or share a generic link + blurb (no host data) to X, Reddit, Hacker News, LinkedIn, Mastodon, Bluesky, Telegram, WhatsApp and more. Closes #31, #87.
