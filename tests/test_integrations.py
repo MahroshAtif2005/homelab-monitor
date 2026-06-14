@@ -16,6 +16,7 @@ class TestRunsApi(unittest.TestCase):
         with app.LOCK:
             app.DB.execute("DELETE FROM runs")
             app.DB.execute("DELETE FROM run_metrics")
+            app.DB.execute("DELETE FROM api_keys")
             app.DB.commit()
         app.save_settings({"api_key": "", "kwh_price": "0.30", "currency": "$", "tariff_mode": "single"})
 
@@ -76,6 +77,59 @@ class TestRunsApi(unittest.TestCase):
         self.assertGreater(d["cost"], 0)
         self.assertEqual(d["peak_util"], 80)
         self.assertGreater(len(d["resource"]["power_w"]), 0)
+
+
+class TestApiKeys(unittest.TestCase):
+    def setUp(self):
+        self.c = app.app.test_client()
+        with app.LOCK:
+            app.DB.execute("DELETE FROM api_keys")
+            app.DB.execute("DELETE FROM runs")
+            app.DB.commit()
+
+    def test_create_list_revoke(self):
+        r = self.c.post("/api/integration/keys", json={"name": "laptop"}).get_json()
+        kid, key = r["id"], r["key"]
+        self.assertTrue(key.startswith("hlm_"))
+        j = self.c.get("/api/integration/keys").get_json()
+        self.assertEqual(len(j["keys"]), 1)
+        self.assertEqual(j["keys"][0]["name"], "laptop")
+        self.assertNotIn("key", j["keys"][0])          # plaintext never listed
+        self.assertNotIn("key_hash", j["keys"][0])      # hash never exposed
+        h = {"Authorization": "Bearer " + key}
+        self.assertEqual(self.c.post("/api/runs", json={"name": "x"}, headers=h).status_code, 200)
+        self.assertEqual(self.c.delete("/api/integration/keys/" + kid).status_code, 200)
+        self.assertEqual(self.c.post("/api/runs", json={"name": "y"}, headers=h).status_code, 401)  # revoked
+
+    def test_expired_key_rejected(self):
+        r = self.c.post("/api/integration/keys", json={"name": "old", "expires_in_days": 30}).get_json()
+        with app.LOCK:                                  # backdate it past expiry
+            app.DB.execute("UPDATE api_keys SET expires_at=? WHERE id=?", (int(time.time()) - 10, r["id"]))
+            app.DB.commit()
+        resp = self.c.post("/api/runs", json={"name": "x"}, headers={"Authorization": "Bearer " + r["key"]})
+        self.assertEqual(resp.status_code, 401)
+        j = self.c.get("/api/integration/keys").get_json()
+        self.assertTrue(j["keys"][0]["expired"])
+
+    def test_per_key_attribution_and_filter(self):
+        ka = self.c.post("/api/integration/keys", json={"name": "A"}).get_json()
+        self.c.post("/api/integration/keys", json={"name": "B"}).get_json()
+        self.c.post("/api/runs", json={"id": "ra", "name": "r"}, headers={"Authorization": "Bearer " + ka["key"]})
+        byname = {k["name"]: k for k in self.c.get("/api/integration/keys").get_json()["keys"]}
+        self.assertEqual(byname["A"]["runs"], 1)
+        self.assertEqual(byname["B"]["runs"], 0)
+        self.assertIsNotNone(byname["A"]["last_used_at"])
+        runs = self.c.get("/api/runs?range=7d&key=" + ka["id"]).get_json()["runs"]
+        self.assertEqual(runs[0]["key_name"], "A")
+        self.assertEqual(runs[0]["key_id"], ka["id"])
+
+    def test_legacy_single_key_migrated(self):
+        app.save_settings({"api_key": "hlm_legacytestkey123"})
+        app._apply_schema_migrations(app.DB)             # migrates the setting into api_keys
+        resp = self.c.post("/api/runs", json={"name": "x"},
+                           headers={"Authorization": "Bearer hlm_legacytestkey123"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(app.get_settings().get("api_key", ""), "")   # setting cleared
 
 
 class TestMlflowSync(unittest.TestCase):
