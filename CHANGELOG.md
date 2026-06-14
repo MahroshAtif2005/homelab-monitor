@@ -5,6 +5,10 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [Unreleased] — `next`
+
+_Nothing here yet — `next` is the preview branch; changes land here before the next tagged release._
+
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
 
