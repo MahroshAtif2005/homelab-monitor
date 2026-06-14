@@ -28,6 +28,7 @@ COPY probe.py /app/probe.py
 COPY probe.ps1 /app/probe.ps1
 COPY static/dashboard.html /app/static/dashboard.html
 COPY static/favicon.svg    /app/static/favicon.svg
+COPY static/logo.svg       /app/static/logo.svg
 COPY static/tariffs.json   /app/static/tariffs.json
 COPY static/homelab_run.py /app/static/homelab_run.py
 
