@@ -2073,7 +2073,7 @@ function renderModels(){
   live.forEach(m=>{const arr=bySvc[m.service]=bySvc[m.service]||[]; if(!arr.some(x=>x.model===m.model)) arr.push({model:m.model,peak:null,avg:null,vram:m.vram});});
   const host=document.getElementById('modelsbody'); if(!host) return;
   const services=Object.keys(bySvc);
-  if(!services.length){ host.innerHTML='<div class="card"><div class="muted">No recognised AI model server is running. Start one (Ollama, vLLM, faster-whisper, Stable Diffusion, …) and it will appear here.</div></div>'; return; }
+  if(!services.length){ host.innerHTML='<div class="card"><div class="muted">'+I18N.t('models.empty','No recognised AI model server is running. Start one (Ollama, vLLM, faster-whisper, Stable Diffusion, …) and it will appear here.')+'</div></div>'; return; }
   const maxV=Math.max(tot||1, ...sums.map(m=>m.peak||0));
   host.innerHTML = services.map(svc=>{
     const ss=svcSum[svc]||{}, c=colorFor(svc);
@@ -2081,7 +2081,7 @@ function renderModels(){
     const rows=models.map(m=>{
       const pW=m.peak!=null?Math.max(2,m.peak/maxV*100):0, aW=m.avg!=null?Math.max(2,m.avg/maxV*100):0;
       return `<tr><td><span class="dot" style="background:${c}"></span>${esc(m.model)}${modelMetaChips(m.model)}</td>
-        <td>${m.vram!=null?'<span class="badge ok">Loaded</span>':'<span class="badge info">Idle</span>'}</td>
+        <td>${m.vram!=null?'<span class="badge ok">'+I18N.t('models.loaded','Loaded')+'</span>':'<span class="badge info">'+I18N.t('models.idle','Idle')+'</span>'}</td>
         <td>${m.vram!=null?fmtMB(m.vram):'—'}</td>
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
         <td>${m.avg!=null?fmtMB(m.avg):'—'}</td>
@@ -2091,7 +2091,7 @@ function renderModels(){
     return `<div class="card">
       <h2 style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--tx)">
         <span class="dot" style="background:${c}"></span>${esc(svc)}
-        <span class="pill" style="margin-left:auto;text-transform:none">resident ${ss.present!=null?ss.present+'%':'—'} · server peak ${ss.peak!=null?fmtMB(ss.peak):'—'}</span></h2>
+        <span class="pill" style="margin-left:auto;text-transform:none">${I18N.tf('models.server_meta','resident {resident} · server peak {peak}',{resident:(ss.present!=null?ss.present+'%':'—'),peak:(ss.peak!=null?fmtMB(ss.peak):'—')})}</span></h2>
       ${servingFor(svc)}
       ${modelSpark(svc,tot)}
       ${callersFor(svc)}
@@ -2106,11 +2106,11 @@ function fmtCtx(n){ n=+n||0; return n>=1000 ? (n%1000?(n/1000).toFixed(1):n/1000
 function modelMetaChips(model){
   const m=((D.now&&D.now.model_meta)||{})[model]; if(!m) return '';
   const out=[];
-  if(m.param_size) out.push(`<span class="mchip" title="Parameters">${esc(m.param_size)}</span>`);
-  if(m.quant)      out.push(`<span class="mchip" title="Quantization">${esc(m.quant)}</span>`);
-  if(m.ctx)        out.push(`<span class="mchip" title="Context length">${esc(fmtCtx(m.ctx))} ctx</span>`);
+  if(m.param_size) out.push(`<span class="mchip" title="${I18N.t('models.meta_params','Parameters')}">${esc(m.param_size)}</span>`);
+  if(m.quant)      out.push(`<span class="mchip" title="${I18N.t('models.meta_quant','Quantization')}">${esc(m.quant)}</span>`);
+  if(m.ctx)        out.push(`<span class="mchip" title="${I18N.t('models.meta_ctx','Context length')}">${esc(fmtCtx(m.ctx))} ${I18N.t('models.ctx','ctx')}</span>`);
   (m.caps||[]).forEach(c=>{ if(c==='vision'||c==='tools'||c==='embedding')
-    out.push(`<span class="mchip cap" title="Capability">${c==='vision'?'👁 vision':c==='tools'?'🛠 tools':'🔢 embed'}</span>`); });
+    out.push(`<span class="mchip cap" title="${I18N.t('models.meta_cap','Capability')}">${c==='vision'?I18N.t('models.cap_vision','👁 vision'):c==='tools'?I18N.t('models.cap_tools','🛠 tools'):I18N.t('models.cap_embed','🔢 embed')}</span>`); });
   return out.length ? ' '+out.join('') : '';
 }
 // Live serving telemetry (vLLM / TGI /metrics): requests running/waiting, KV-cache
@@ -2118,15 +2118,15 @@ function modelMetaChips(model){
 function servingFor(svc){
   const s=((D.now&&D.now.serving)||[]).find(x=>x.service===svc); if(!s) return '';
   const chips=[];
-  if(s.tok_per_s!=null)   chips.push({v:s.tok_per_s+' tok/s', l:'Throughput', hot:s.tok_per_s>0});
-  if(s.running!=null)     chips.push({v:s.running, l:'Running', hot:s.running>0});
-  if(s.waiting!=null)     chips.push({v:s.waiting, l:'Queued', warn:s.waiting>0});
-  if(s.kv_cache_pct!=null)chips.push({v:s.kv_cache_pct+'%', l:'KV-cache', warn:s.kv_cache_pct>=90});
-  if(s.ttft_avg_s!=null)  chips.push({v:(s.ttft_avg_s*1000).toFixed(0)+' ms', l:'Avg TTFT'});
+  if(s.tok_per_s!=null)   chips.push({v:s.tok_per_s+' tok/s', l:I18N.t('models.chip_throughput','Throughput'), hot:s.tok_per_s>0});
+  if(s.running!=null)     chips.push({v:s.running, l:I18N.t('models.chip_running','Running'), hot:s.running>0});
+  if(s.waiting!=null)     chips.push({v:s.waiting, l:I18N.t('models.chip_queued','Queued'), warn:s.waiting>0});
+  if(s.kv_cache_pct!=null)chips.push({v:s.kv_cache_pct+'%', l:I18N.t('models.chip_kvcache','KV-cache'), warn:s.kv_cache_pct>=90});
+  if(s.ttft_avg_s!=null)  chips.push({v:(s.ttft_avg_s*1000).toFixed(0)+' ms', l:I18N.t('models.chip_ttft','Avg TTFT')});
   if(!chips.length) return '';
   return `<div class="serving-row">${chips.map(c=>
     `<div class="gpu-chip ${c.warn?'warn':''}${c.hot?' live':''}"><div class="v">${esc(String(c.v))}</div><div class="l">${esc(c.l)}</div></div>`
-  ).join('')}<span class="serving-tag" title="Scraped live from the server's Prometheus /metrics endpoint">live serving</span></div>`;
+  ).join('')}<span class="serving-tag" title="${I18N.t('models.live_serving_t',"Scraped live from the server's Prometheus /metrics endpoint")}">${I18N.t('models.live_serving','live serving')}</span></div>`;
 }
 // Caller attribution — "who is driving this server", from connection-seconds (D.callers).
 function callersFor(svc){
@@ -2138,11 +2138,11 @@ function callersFor(svc){
     return `<span class="pill" style="text-transform:none" title="${c.seconds}s of connection time over the range${live.has(c.caller)?' · active now':''}">`
       +`${live.has(c.caller)?'🟢 ':''}${esc(c.caller)} <b>${pct}%</b>${m?` · ${m}m`:''}</span>`;}).join(' ');
   return `<div class="mspark-cap" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">`
-    +`<span>Driven by</span> ${chips}</div>`;
+    +`<span>${I18N.t('models.driven_by','Driven by')}</span> ${chips}</div>`;
 }
 function modelSpark(service,tot){
   const arr=(D.services&&D.services[service])||[];
-  if(!arr.length) return '<div class="mspark-cap muted">No VRAM history captured for this server in the selected range.</div>';
+  if(!arr.length) return '<div class="mspark-cap muted">'+I18N.t('models.no_history','No VRAM history captured for this server in the selected range.')+'</div>';
   const max=Math.max(tot||1, ...arr), n=arr.length, den=(n-1)||1;
   const pts=arr.map((v,i)=>`${(i/den*100).toFixed(1)},${(100-(v/max*100)).toFixed(1)}`).join(' ');
   const labels=D.labels||[];
@@ -2150,8 +2150,8 @@ function modelSpark(service,tot){
   const marks=evs.map(i=>`<line x1="${(i/den*100).toFixed(1)}" y1="0" x2="${(i/den*100).toFixed(1)}" y2="100" stroke="var(--crit)" stroke-width="1" opacity=".8"/>`).join('');
   return `<svg class="mspark" viewBox="0 0 100 100" preserveAspectRatio="none">`
     + `<polyline fill="none" stroke="${colorFor(service)}" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${pts}"/>${marks}</svg>`
-    + `<div class="mspark-cap">Server VRAM — <b>${esc(service)}</b> (shared by all its models) over the selected range`
-    + `${evs.length?` · <span style="color:var(--crit)">▲ ${evs.length} OOM event${evs.length>1?'s':''}</span>`:''} · peak axis ${fmtMB(max)}.</div>`;
+    + `<div class="mspark-cap">`+I18N.tf('models.spark_cap','Server VRAM — <b>{svc}</b> (shared by all its models) over the selected range',{svc:esc(service)})
+    + `${evs.length?` · <span style="color:var(--crit)">`+I18N.tf('models.oom_events',`▲ ${evs.length} OOM event${evs.length>1?'s':''}`,{n:evs.length})+`</span>`:''} · `+I18N.tf('models.peak_axis','peak axis {v}',{v:fmtMB(max)})+`.</div>`;
 }
 
 // ── Renderers (status tabs: Overview cards, Containers, Services) ──────────────
@@ -3294,17 +3294,17 @@ async function renderRuns(){
       <td class="muted">${mets||'—'}</td>
       <td>${(r.energy_kwh||0).toFixed(3)} kWh</td>
       <td>${cur}${(r.cost||0).toFixed(2)}</td>
-      <td><button class="run-del" data-del="${esc(r.id)}" title="Delete this run">${sic('trash')}</button></td></tr>`;
+      <td><button class="run-del" data-del="${esc(r.id)}" title="${I18N.t('exp.delete_run','Delete this run')}">${sic('trash')}</button></td></tr>`;
   }).join('');
   tb.querySelectorAll('button[data-del]').forEach(btn=>btn.onclick=e=>{ e.stopPropagation(); deleteRun(btn.dataset.del, runs.find(x=>x.id===btn.dataset.del)); });
   tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openRun(tr.dataset.id));
 }
 async function deleteRun(id, run){
-  const nm=(run&&run.name)||'this run';
-  if(!confirm(`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`)) return;
+  const nm=(run&&run.name)||I18N.t('exp.this_run','this run');
+  if(!confirm(I18N.tf('confirm.delete_run',`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`,{nm}))) return;
   try{ const r=await fetch('/api/runs/'+encodeURIComponent(id),{method:'DELETE'});
     if(!r.ok && r.status!==404) throw new Error('HTTP '+r.status); }
-  catch(e){ alert('Could not delete the run: '+e); return; }
+  catch(e){ alert(I18N.t('toast.delete_run_fail','Could not delete the run: ')+e); return; }
   const det=document.getElementById('run-detail');           // close the detail if it was this run
   if(det && !det.hidden && CURRENT_RUN===id){ det.hidden=true; }
   renderRuns();
@@ -3327,17 +3327,17 @@ async function openRun(id){
     mk(id2,{type:'line',data:{labels:m.steps,datasets:[{label:k,data:m.values,borderColor:colorFor(k),backgroundColor:colorFor(k)+'22',fill:true,pointRadius:0,tension:.2}]},
       options:{responsive:true,maintainAspectRatio:false,scales:{x:{ticks:{color:cv('--mut'),maxTicksLimit:8}},y:{ticks:{color:cv('--mut')}}},plugins:{legend:{display:false}}}});
   });
-  if(!keys.length) host.innerHTML='<div class="muted" style="margin-top:6px">No metrics logged for this run.</div>';
+  if(!keys.length) host.innerHTML='<div class="muted" style="margin-top:6px">'+I18N.t('exp.no_metrics','No metrics logged for this run.')+'</div>';
   const res=j.resource||{labels:[],power_w:[],util_pct:[]}, labels=fmtLabels(res.labels||[]);
   mk('run-resource',{type:'line',data:{labels,datasets:[
-    {label:'Power (W)',data:res.power_w,borderColor:'#3fb950',backgroundColor:'#3fb95022',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
-    {label:'Util (%)',data:res.util_pct,borderColor:'#4dabf7',pointRadius:0,yAxisID:'y1',tension:.2}]},
+    {label:I18N.t('cost.chart_power','Power (W)'),data:res.power_w,borderColor:'#3fb950',backgroundColor:'#3fb95022',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
+    {label:I18N.t('exp.chart_util','Util (%)'),data:res.util_pct,borderColor:'#4dabf7',pointRadius:0,yAxisID:'y1',tension:.2}]},
     options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
       scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10}},
         y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
         y1:{position:'right',min:0,max:100,grid:{display:false},ticks:{color:cv('--mut'),callback:v=>v+'%'}}},
       plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}}});
-  document.getElementById('run-cost-cap').textContent=`This run used ${(j.energy_kwh||0).toFixed(3)} kWh and cost ${cur}${(j.cost||0).toFixed(2)} in GPU energy over its window · peak util ${j.peak_util}% · avg ${j.avg_w} W.`;
+  document.getElementById('run-cost-cap').textContent=I18N.tf('exp.run_cost_cap','This run used {kwh} kWh and cost {cost} in GPU energy over its window · peak util {util}% · avg {avg} W.',{kwh:(j.energy_kwh||0).toFixed(3),cost:cur+(j.cost||0).toFixed(2),util:j.peak_util,avg:j.avg_w});
   document.getElementById('run-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -3356,18 +3356,16 @@ async function renderExperiments(force){
   const tr=j.training||[], tb=document.getElementById('train-body');
   if(tb){
     if(!tr.length){
-      tb.innerHTML='<div class="muted">No training or fine-tuning process detected on the hub. Launch one '
-        +'(<code>torchrun</code>, <code>accelerate</code>, <code>deepspeed</code>, a <code>train.py</code> / SFT / LoRA script…) '
-        +'and it appears here automatically — no agent inside the job.</div>';
+      tb.innerHTML='<div class="muted">'+I18N.t('exp.train_empty','No training or fine-tuning process detected on the hub. Launch one (<code>torchrun</code>, <code>accelerate</code>, <code>deepspeed</code>, a <code>train.py</code> / SFT / LoRA script…) and it appears here automatically — no agent inside the job.')+'</div>';
     } else {
       const gutil=(HH&&HH.now&&HH.now.gpu&&HH.now.gpu.util)||0;
       tb.innerHTML=tr.map(t=>{
         const stall=t.on_gpu && gutil<8;
         return `<div class="gpucard">
           <div class="gpucard-h"><b>${esc(t.label)}</b> <span class="muted">pid ${t.pid}</span>
-            ${t.on_gpu?'<span class="badge ok">on GPU</span>':'<span class="badge info">no GPU yet</span>'}
-            ${stall?'<span class="badge crit" title="Holds VRAM but GPU util ~0 — possible stall (dead dataloader / checkpoint / deadlock)">⚠ possible stall</span>':''}
-            <span class="gpucard-stats">${fmtDur(t.elapsed)} elapsed${t.vram?' · '+fmtMB(t.vram)+' VRAM':''}</span></div>
+            ${t.on_gpu?'<span class="badge ok">'+I18N.t('exp.on_gpu','on GPU')+'</span>':'<span class="badge info">'+I18N.t('exp.no_gpu_yet','no GPU yet')+'</span>'}
+            ${stall?'<span class="badge crit" title="'+I18N.t('exp.possible_stall_t','Holds VRAM but GPU util ~0 — possible stall (dead dataloader / checkpoint / deadlock)')+'">'+I18N.t('exp.possible_stall','⚠ possible stall')+'</span>':''}
+            <span class="gpucard-stats">${I18N.tf('exp.elapsed','{dur} elapsed',{dur:fmtDur(t.elapsed)})}${t.vram?' · '+fmtMB(t.vram)+' VRAM':''}</span></div>
           <div class="cap" style="margin-top:6px;word-break:break-all">${esc(t.cmd)}</div></div>`;
       }).join('');
     }
@@ -3380,11 +3378,11 @@ async function renderExperiments(force){
       dc.hidden=false;
       db.innerHTML='<div class="tool-grid">'+dv.map(d=>{
         const href=`//${location.hostname}:${d.port}`;
-        return `<a class="tool-tile" href="${href}" target="_blank" rel="noopener" title="Open ${esc(d.label)} on port ${d.port}">
+        return `<a class="tool-tile" href="${href}" target="_blank" rel="noopener" title="${I18N.tf('exp.devtool_open','Open {label} on port {port}',{label:esc(d.label),port:d.port})}">
           <span class="tool-ic">${sic(d.kind)||sic('link')}</span>
           <span class="tool-nm">${esc(d.label)}</span>
           <span class="tool-pt">:${d.port}</span>
-          ${d.idle_vram?`<span class="badge warn" title="Holding ${fmtMB(d.vram)} of GPU VRAM">🟡 ${fmtMB(d.vram)}</span>`:''}
+          ${d.idle_vram?`<span class="badge warn" title="${I18N.tf('exp.devtool_holding','Holding {vram} of GPU VRAM',{vram:fmtMB(d.vram)})}">🟡 ${fmtMB(d.vram)}</span>`:''}
         </a>`;
       }).join('')+'</div>';
     }
@@ -3393,10 +3391,10 @@ async function renderExperiments(force){
   const T=j.totals||{};
   const k=document.getElementById('sess-kpis');
   if(k) k.innerHTML=[
-    {v:String(T.count||0),l:'Sessions'},
-    {v:(T.active_hours||0)+' h',l:'GPU-active time'},
-    {v:(T.energy_kwh||0).toFixed(2)+' kWh',l:'Energy'},
-    {v:j.price>0?cur+(T.cost||0).toFixed(2):'—',l:'Cost'},
+    {v:String(T.count||0),l:I18N.t('exp.sess_count','Sessions')},
+    {v:(T.active_hours||0)+' h',l:I18N.t('exp.sess_active','GPU-active time')},
+    {v:(T.energy_kwh||0).toFixed(2)+' kWh',l:I18N.t('col.energy','Energy')},
+    {v:j.price>0?cur+(T.cost||0).toFixed(2):'—',l:I18N.t('col.cost','Cost')},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
   const fmtTs=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
   const rows=j.sessions||[], st=document.getElementById('sess-tbl');
@@ -3404,7 +3402,7 @@ async function renderExperiments(force){
     `<tr><td>${fmtTs(s.start)}</td><td>${fmtDur(s.duration)}</td><td>${s.peak_util}%</td>
       <td>${fmtMB(s.peak_vram)}</td><td>${s.avg_power} W</td><td>${s.energy_kwh.toFixed(3)} kWh</td>
       <td>${j.price>0?cur+s.cost.toFixed(2):'—'}</td></tr>`).join('')
-    : `<tr><td class="muted" colspan="7">No GPU activity above ${j.active_pct||20}% util in this range yet.</td></tr>`;
+    : I18N.tf('exp.sess_empty','<tr><td class="muted" colspan="7">No GPU activity above {n}% util in this range yet.</td></tr>',{n:(j.active_pct||20)});
 }
 
 function renderFleet(){
@@ -3412,15 +3410,14 @@ function renderFleet(){
   const meta = document.getElementById('fleet_meta');
   const tbody = document.querySelector('#fleet_tbl tbody');
   const rows = FLEET.hosts || [];
-  meta.innerHTML = `${rows.length} host${rows.length===1?'':'s'} · polling every ${FLEET.interval||10}s · ` +
-                   `click a row to focus that host in the other tabs.`;
+  meta.innerHTML = I18N.tf('fleet.meta', `${rows.length} host${rows.length===1?'':'s'} · polling every ${FLEET.interval||10}s · click a row to focus that host in the other tabs.`, {n:rows.length, i:(FLEET.interval||10)});
   tbody.innerHTML = rows.map(r => {
     const st = statusOfFleetRow(r);
     const h = r.host || {};
     // CPU: percent + cores
     const cpu = h.cpu==null
       ? '—'
-      : `<span class="pct">${Math.round(h.cpu)}%</span><span class="abs">${h.cores||'?'} cores</span>`;
+      : `<span class="pct">${Math.round(h.cpu)}%</span><span class="abs">${I18N.tf('kpi.cores','{n} cores',{n:(h.cores||'?')})}</span>`;
     // RAM: percent bar + absolute GB
     const ramPct = h.ram_total ? Math.round((h.ram_used||0) * 100 / h.ram_total) : null;
     const ram = h.ram_total
@@ -3436,7 +3433,7 @@ function renderFleet(){
     // Load 1m: number + denominator
     const load = h.load1==null
       ? '—'
-      : `<span class="pct">${h.load1.toFixed(2)}</span><span class="abs">of ${h.cores||'?'} cores</span>`;
+      : `<span class="pct">${h.load1.toFixed(2)}</span><span class="abs">${I18N.tf('kpi.of_cores','of {n} cores',{n:(h.cores||'?')})}</span>`;
     const up = fmtUpShort(h.uptime);
     const temp = h.ctemp==null ? '—' : Math.round(h.ctemp)+' °C';
     // Disks: include GB alongside %
