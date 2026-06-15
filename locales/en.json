@@ -548,5 +548,12 @@
   "net.talkers_cap": "Total bytes each container moved over the selected range (its own network namespace).",
   "security.cap": "Read-only, agentless — no changes are made to any host. Items shown in grey (⚪) couldn't be read without elevated privileges on that machine.",
   "models.section_cap": "One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.",
-  "footer.about": "Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.\nGPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker API.\n<br>Ideas welcome — see <a href=\"https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CONTRIBUTING.md\" target=\"_blank\" rel=\"noopener\">CONTRIBUTING.md</a> · issues &amp; PRs always open."
+  "footer.about": "Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.\nGPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker API.\n<br>Ideas welcome — see <a href=\"https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CONTRIBUTING.md\" target=\"_blank\" rel=\"noopener\">CONTRIBUTING.md</a> · issues &amp; PRs always open.",
+  "diag.lbl.nvidia": "NVIDIA GPU",
+  "diag.lbl.docker": "Docker socket",
+  "diag.lbl.host_root": "Host filesystem",
+  "diag.lbl.dbus": "systemd D-Bus",
+  "diag.lbl.data": "History storage",
+  "diag.lbl.host_metrics": "Host metrics",
+  "diag.lbl.proc": "Host readable (WMI)"
 }

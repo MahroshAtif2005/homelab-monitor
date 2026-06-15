@@ -2203,7 +2203,7 @@ function renderHealth(){
       const r = c.remedy;
       const rem = r ? `<div class="diagrem">${r.where?`<div class="where">${esc(r.where)}</div>`:''}`
                       + `<pre>${esc(r.cmd||'')}</pre></div>` : '';
-      return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.label)}</td>`
+      return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(I18N.t('diag.lbl.'+c.id, c.label))}</td>`
         + `<td><span class="badge ${c.status}">${I18N.t('sectag.'+c.status, SEC_TAG[c.status]||esc(c.status))}</span></td>`
         + `<td class="muted">${esc(c.detail||'')}${rem}</td></tr>`;
     }).join('');
