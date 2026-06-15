@@ -245,7 +245,21 @@
       "mcp.enabled_html",
       "diag.banner_lead",
       "diag.banner_link",
-      "common.dismiss"
+      "common.dismiss",
+      "ct.click_logs",
+      "ct.total",
+      "ct.running",
+      "ct.none",
+      "svc.title_win",
+      "svc.title_systemd",
+      "svc.off_win",
+      "svc.off_systemd",
+      "svc.reason_win",
+      "svc.reason_systemd",
+      "kpi.loaded_services",
+      "kpi.failed",
+      "kpi.your_units",
+      "svc.none"
     ],
     "coverage": 0.0
   },
@@ -489,5 +503,19 @@
   "mcp.enabled_html": "<span class=\"badge ok\">Enabled</span> — serving on <code>{ep}</code>.",
   "diag.banner_lead": "⚠️ {n} setup items need attention — some features are limited.",
   "diag.banner_link": "See Setup &amp; requirements",
-  "common.dismiss": "Dismiss"
+  "common.dismiss": "Dismiss",
+  "ct.click_logs": "Click to tail logs",
+  "ct.total": "Total",
+  "ct.running": "{n} running",
+  "ct.none": "No containers found.",
+  "svc.title_win": "🧩 Windows services",
+  "svc.title_systemd": "🧩 systemd services",
+  "svc.off_win": "service monitoring is off",
+  "svc.off_systemd": "systemd monitoring is off",
+  "svc.reason_win": "No services returned.",
+  "svc.reason_systemd": "No D-Bus / systemd detected.",
+  "kpi.loaded_services": "Loaded services",
+  "kpi.failed": "Failed",
+  "kpi.your_units": "Your units",
+  "svc.none": "No user-deployed or failed services found."
 }

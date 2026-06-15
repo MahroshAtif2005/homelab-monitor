@@ -245,5 +245,19 @@
   "mcp.enabled_html": "<span class=\"badge ok\">Enabled</span> — serving on <code>{ep}</code>.",
   "diag.banner_lead": "⚠️ {n} setup items need attention — some features are limited.",
   "diag.banner_link": "See Setup &amp; requirements",
-  "common.dismiss": "Dismiss"
+  "common.dismiss": "Dismiss",
+  "ct.click_logs": "Click to tail logs",
+  "ct.total": "Total",
+  "ct.running": "{n} running",
+  "ct.none": "No containers found.",
+  "svc.title_win": "🧩 Windows services",
+  "svc.title_systemd": "🧩 systemd services",
+  "svc.off_win": "service monitoring is off",
+  "svc.off_systemd": "systemd monitoring is off",
+  "svc.reason_win": "No services returned.",
+  "svc.reason_systemd": "No D-Bus / systemd detected.",
+  "kpi.loaded_services": "Loaded services",
+  "kpi.failed": "Failed",
+  "kpi.your_units": "Your units",
+  "svc.none": "No user-deployed or failed services found."
 }

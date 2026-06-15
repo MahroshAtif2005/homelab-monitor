@@ -2286,7 +2286,7 @@ function renderHealth(){
     // keep only the trailing health/exit detail (if any).
     const stext = c.status_text || '';
     const upStripped = stext.replace(/^Up\s+[^()]+\s*/i,'').trim() || (stext.startsWith('Up ') ? '' : stext);
-    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="Click to tail logs"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.name)}</td>
+    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="${I18N.t('ct.click_logs','Click to tail logs')}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.name)}</td>
      <td><span class="badge ${c.status}">${esc(c.label)}</span></td>
      <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
@@ -2297,13 +2297,13 @@ function renderHealth(){
      <td class="muted">${upStripped?esc(upStripped):'—'}</td></tr>`;
   }).join('')
     + (ctlist.length ? `<tr class="cttot">
-        <td><b>Total</b> <span class="muted">${running} running</span></td>
+        <td><b>${I18N.t('ct.total','Total')}</b> <span class="muted">${I18N.tf('ct.running','{n} running',{n:running})}</span></td>
         <td></td><td data-col="image"></td><td></td><td class="muted"></td>
         <td><b>${fmtBytes(tRam)}</b></td>
         <td><b>${anyVram?fmtBytes(tVram):'—'}</b></td>
         <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
         <td></td></tr>` : '')
-    || (dk.available?'<tr><td colspan="9" class="muted">No containers found.</td></tr>':'');
+    || (dk.available?'<tr><td colspan="9" class="muted">'+I18N.t('ct.none','No containers found.')+'</td></tr>':'');
   // Click any container row to tail its logs in the side drawer (issue #28).
   document.getElementById('cttbl').onclick = e => {
     const tr = e.target.closest('.ctrow'); if(tr && tr.dataset.ct) openLogDrawer(tr.dataset.ct);
@@ -2326,16 +2326,16 @@ function renderServicesBlock(sd){
       : (HOST_DATA&&HOST_DATA.host&&HOST_DATA.host.os&&HOST_DATA.host.os.family)) || '';
   const win = fam==='windows';
   const title = document.getElementById('svctitle');
-  if(title) title.textContent = win ? '🧩 Windows services' : '🧩 systemd services';
+  if(title) title.textContent = win ? I18N.t('svc.title_win','🧩 Windows services') : I18N.t('svc.title_systemd','🧩 systemd services');
   if(!sd.available){
-    svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">${win?'service monitoring is off':'systemd monitoring is off'}</div><div class="d">${esc(sd.reason||(win?'No services returned.':'No D-Bus / systemd detected.'))}</div></div></div>`;
+    svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">${win?I18N.t('svc.off_win','service monitoring is off'):I18N.t('svc.off_systemd','systemd monitoring is off')}</div><div class="d">${esc(sd.reason||(win?I18N.t('svc.reason_win','No services returned.'):I18N.t('svc.reason_systemd','No D-Bus / systemd detected.')))}</div></div></div>`;
     return;
   }
   // Port pills link to <host>:<port> — locally that's this page's host; per-host
   // tab uses CURRENT_HOST (typically the registry name, e.g. "ardi").
   const portHost = CURRENT_HOST === 'local' ? location.hostname : CURRENT_HOST;
-  const kpis=[{v:ss.loaded||0,l:'Loaded services'},{v:ss.running||0,l:'Running'},
-              {v:ss.failed||0,l:'Failed'},{v:ss.admin||0,l:'Your units'}]
+  const kpis=[{v:ss.loaded||0,l:I18N.t('kpi.loaded_services','Loaded services')},{v:ss.running||0,l:I18N.t('kpi.running','Running')},
+              {v:ss.failed||0,l:I18N.t('kpi.failed','Failed')},{v:ss.admin||0,l:I18N.t('kpi.your_units','Your units')}]
     .map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
   const rows=(sd.services||[]).map(s=>{
     // For failed units, the exit code is more useful than a zero uptime.
@@ -2350,7 +2350,7 @@ function renderServicesBlock(sd){
      <td class="muted">${fmtBytes(s.mem_bytes)}</td>
      <td class="muted">${esc(s.desc)}</td></tr>`;
   }).join('')
-    || '<tr><td colspan="6" class="muted">No user-deployed or failed services found.</td></tr>';
+    || '<tr><td colspan="6" class="muted">'+I18N.t('svc.none','No user-deployed or failed services found.')+'</td></tr>';
   svc.innerHTML=`<div class="grid">${kpis}</div>
     <table style="margin-top:14px"><thead><tr>
       <th>${I18N.t('col.unit','Unit')}</th><th>${I18N.t('col.state','State')}</th><th>${I18N.t('col.ports','Ports')}</th><th>${I18N.t('col.uptime','Uptime')}</th><th>${I18N.t('col.memory','Memory')}</th><th>${I18N.t('col.description','Description')}</th>
