@@ -2817,26 +2817,26 @@ async function loadHosts(){
 function renderHosts(hosts){
   const wrap = document.getElementById('hostlist');
   if(!hosts.length){
-    wrap.innerHTML = '<div class="muted" style="margin-top:6px">No hosts yet. Add one above to get started.</div>';
+    wrap.innerHTML = '<div class="muted" style="margin-top:6px">'+I18N.t('hosts.none','No hosts yet. Add one above to get started.')+'</div>';
     return;
   }
   wrap.innerHTML = hosts.map(h => {
     const overall = (h.last_check && h.last_check.summary && h.last_check.summary.overall) || 'untested';
     const badge = h.last_check
-      ? `<span class="badge ${overall==='ok'?'ok':overall==='warn'?'warn':overall==='fail'?'crit':'info'}">${overall.toUpperCase()}</span>`
-      : `<span class="badge info">UNTESTED</span>`;
+      ? `<span class="badge ${overall==='ok'?'ok':overall==='warn'?'warn':overall==='fail'?'crit':'info'}">${I18N.t('hosts.st_'+overall, overall.toUpperCase())}</span>`
+      : `<span class="badge info">${I18N.t('hosts.st_untested','UNTESTED')}</span>`;
     const osLabel = (h.last_check && h.last_check.os && h.last_check.os.label) || '';
-    const osBadge = osLabel ? `<span class="osbadge" title="Detected during last Test">${esc(osLabel)}</span>` : '';
+    const osBadge = osLabel ? `<span class="osbadge" title="${I18N.t('hosts.os_detected','Detected during last Test')}">${esc(osLabel)}</span>` : '';
     return `<div class="hostrow ${overall}" data-h="${esc(h.name)}">
       <div class="hd">
         <span class="nm">${esc(h.name)}</span>
         <span class="tg" data-tg="${esc(h.ssh_target)}">${esc(h.ssh_target)}</span>
-        <button class="btn-mini hbtn-edit" data-h="${esc(h.name)}" title="Edit SSH target">✎</button>
+        <button class="btn-mini hbtn-edit" data-h="${esc(h.name)}" title="${I18N.t('hosts.edit_target','Edit SSH target')}">✎</button>
         ${badge}${osBadge}
-        <span class="ts">checked ${relTime(h.last_check_at)}</span>
+        <span class="ts">${I18N.tf('hosts.checked','checked {t}',{t:relTime(h.last_check_at)})}</span>
         <span class="ac">
-          <button class="btn-mini hbtn-test"   data-h="${esc(h.name)}">Test</button>
-          <button class="btn-mini danger hbtn-del" data-h="${esc(h.name)}">Remove</button>
+          <button class="btn-mini hbtn-test"   data-h="${esc(h.name)}">${I18N.t('hosts.test','Test')}</button>
+          <button class="btn-mini danger hbtn-del" data-h="${esc(h.name)}">${I18N.t('hosts.remove','Remove')}</button>
         </span>
       </div>
       <div class="hcheck${h.last_check?' show':''}" id="hck-${esc(h.name)}">
@@ -2868,8 +2868,8 @@ function beginEditHost(name){
     let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}`,
       {method:'PATCH', headers:{'Content-Type':'application/json'},
        body: JSON.stringify({ssh_target: v})})).json(); }
-    catch(e){ showHostStatus('critical','Edit failed: '+e); await loadHosts(); return; }
-    if(!j.ok){ showHostStatus('critical', j.error || 'Edit failed.'); await loadHosts(); return; }
+    catch(e){ showHostStatus('critical',I18N.t('hosts.edit_failed','Edit failed: ')+e); await loadHosts(); return; }
+    if(!j.ok){ showHostStatus('critical', j.error || I18N.t('hosts.edit_failed2','Edit failed.')); await loadHosts(); return; }
     showHostStatus('ok',I18N.t('toast.host_updated','Updated — re-running Test.'));
     await loadHosts();
     testHost(name);
@@ -2884,13 +2884,13 @@ function beginEditHost(name){
 async function scanLAN(){
   const btn = document.getElementById('h_scan');
   const wrap = document.getElementById('lansuggest');
-  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⏳ Scanning…';
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = I18N.t('hosts.scanning','⏳ Scanning…');
   wrap.style.display = 'block';
-  wrap.innerHTML = '<div class="muted" style="padding:8px 2px">Probing ARP cache + sweeping local /24 for SSH on :22… (≤5s)</div>';
+  wrap.innerHTML = '<div class="muted" style="padding:8px 2px">'+I18N.t('hosts.probing','Probing ARP cache + sweeping local /24 for SSH on :22… (≤5s)')+'</div>';
   let j;
   try{ j = await(await fetch('/api/lan/scan')).json(); }
   catch(e){
-    wrap.innerHTML = `<div class="muted">Scan failed: ${esc(String(e))}</div>`;
+    wrap.innerHTML = `<div class="muted">${I18N.t('hosts.scan_failed','Scan failed: ')}${esc(String(e))}</div>`;
     btn.disabled=false; btn.textContent=t0; return;
   }
   renderLanSuggestions(j);
@@ -2900,27 +2900,25 @@ function renderLanSuggestions(j){
   const wrap = document.getElementById('lansuggest');
   const hosts = j.hosts || [];
   if(!hosts.length){
-    wrap.innerHTML = '<div class="lansug"><div class="muted">No candidates found. ' +
-      'Either nothing on the LAN answered, or the container can\'t see the host network — ' +
-      'check that <code>network_mode: host</code> is set.</div></div>';
+    wrap.innerHTML = '<div class="lansug"><div class="muted">'+I18N.t('hosts.no_candidates','No candidates found. Either nothing on the LAN answered, or the container can\'t see the host network — check that <code>network_mode: host</code> is set.')+'</div></div>';
     return;
   }
-  const meta = `Found ${hosts.length} candidate${hosts.length===1?'':'s'} · scanned ${new Date(j.scanned_at*1000).toLocaleTimeString()}. ` +
-    `<span class="muted">SSH-open hosts are most likely worth registering.</span>`;
+  const meta = I18N.tf('hosts.found',`Found ${hosts.length} candidate${hosts.length===1?'':'s'} · scanned ${new Date(j.scanned_at*1000).toLocaleTimeString()}. `,{n:hosts.length,t:new Date(j.scanned_at*1000).toLocaleTimeString()}) +
+    `<span class="muted">${I18N.t('hosts.found_hint','SSH-open hosts are most likely worth registering.')}</span>`;
   wrap.innerHTML = '<div class="lansug">' +
     `<div class="meta">${meta}</div>` +
     hosts.map(h => {
       const display = h.hostname || h.ip;
       const ssh = h.ssh_open
-        ? '<span class="ssh">SSH :22 open</span>'
-        : '<span class="ssh closed">no :22</span>';
+        ? '<span class="ssh">'+I18N.t('hosts.ssh_open','SSH :22 open')+'</span>'
+        : '<span class="ssh closed">'+I18N.t('hosts.ssh_closed','no :22')+'</span>';
       return `<div class="row">
         <span class="ip">${esc(h.ip)}</span>
-        <span class="hn" title="${esc(h.hostname||'')}">${esc(h.hostname||'(no reverse DNS)')}</span>
+        <span class="hn" title="${esc(h.hostname||'')}">${esc(h.hostname||I18N.t('hosts.no_rdns','(no reverse DNS)'))}</span>
         <span class="src">${esc(h.source)}</span>
         ${ssh}
         <button class="btn-mini lan-use"
-                data-ip="${esc(h.ip)}" data-hn="${esc(h.hostname||'')}">Use →</button>
+                data-ip="${esc(h.ip)}" data-hn="${esc(h.hostname||'')}">${I18N.t('hosts.use','Use →')}</button>
       </div>`;
     }).join('') +
   '</div>';
@@ -2963,11 +2961,11 @@ function renderChecks(checks, hostName){
       const canRun = sshOk && !isInfo && cmd.trim() && !cmd.trim().startsWith('#')
                      && !cmd.includes('rm '+KNOWN_HOSTS_PATH); // hub-side hints
       const runBtn = canRun
-        ? `<button class="btn-mini hbtn-run" type="button" data-h="${esc(hostName||'')}">▶ Run on remote</button>`
+        ? `<button class="btn-mini hbtn-run" type="button" data-h="${esc(hostName||'')}">${I18N.t('hosts.run_remote','▶ Run on remote')}</button>`
         : '';
       let body;
       if(variants){
-        const tabs = variants.map((v,i)=>`<button class="osvar${i===0?' on':''}" type="button" data-i="${i}">${esc(v.label||v.os||('Option '+(i+1)))}</button>`).join('');
+        const tabs = variants.map((v,i)=>`<button class="osvar${i===0?' on':''}" type="button" data-i="${i}">${esc(v.label||v.os||I18N.tf('hosts.option','Option {n}',{n:i+1}))}</button>`).join('');
         const pres = variants.map((v,i)=>`<pre class="osvarcmd"${i===0?'':' hidden'}>${esc(v.cmd||'')}</pre>`).join('');
         body = `<div class="osvars">${tabs}</div>${pres}`;
       } else {
@@ -2977,12 +2975,12 @@ function renderChecks(checks, hostName){
         <div class="lbl">→ ${esc(rem0.where||'')}</div>
         ${body}
         <div class="cp">
-          <button class="btn-mini hbtn-copyrem" type="button">📋 Copy</button>
+          <button class="btn-mini hbtn-copyrem" type="button">${I18N.t('hosts.copy','📋 Copy')}</button>
           ${runBtn}
         </div>
       </div>`;
     }
-    const dbg = c.debug ? `<details style="margin-top:4px"><summary class="muted" style="font-size:12px;cursor:pointer">Show ssh details</summary><pre style="margin:5px 0 0;background:#161b22;border:1px solid var(--bd);border-radius:6px;padding:7px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx);max-height:200px;overflow:auto">${esc(c.debug)}</pre></details>` : '';
+    const dbg = c.debug ? `<details style="margin-top:4px"><summary class="muted" style="font-size:12px;cursor:pointer">${I18N.t('hosts.show_ssh','Show ssh details')}</summary><pre style="margin:5px 0 0;background:#161b22;border:1px solid var(--bd);border-radius:6px;padding:7px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--tx);max-height:200px;overflow:auto">${esc(c.debug)}</pre></details>` : '';
     return `<div class="row">
       <div class="ic">${ic}</div>
       <div style="flex:1;min-width:0">
@@ -3001,8 +2999,8 @@ async function addHost(){
   if(!name || !target){ showHostStatus('warning',I18N.t('toast.host_fields_required','Name and SSH target are both required.')); return; }
   let j; try{ j = await(await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},
     body: JSON.stringify({name, ssh_target: target})})).json(); }
-  catch(e){ showHostStatus('critical','Add failed: '+e); return; }
-  if(!j.ok){ showHostStatus('critical', j.error || 'Add failed.'); return; }
+  catch(e){ showHostStatus('critical',I18N.t('hosts.add_failed','Add failed: ')+e); return; }
+  if(!j.ok){ showHostStatus('critical', j.error || I18N.t('hosts.add_failed2','Add failed.')); return; }
   document.getElementById('h_name').value='';
   document.getElementById('h_target').value='';
   showHostStatus('ok',I18N.t('toast.host_added','Host added — hit Test to check connectivity.'));
@@ -3013,12 +3011,12 @@ async function testHost(name){
   if(row){
     const ck = row.querySelector('.hcheck');
     ck.classList.add('show');
-    ck.innerHTML = '<div class="row"><div class="ic">⏳</div><div><div class="lbl">Testing…</div><div class="det">SSH probes can take a few seconds.</div></div></div>';
+    ck.innerHTML = '<div class="row"><div class="ic">⏳</div><div><div class="lbl">'+I18N.t('hosts.testing','Testing…')+'</div><div class="det">'+I18N.t('hosts.testing_d','SSH probes can take a few seconds.')+'</div></div></div>';
     row.querySelectorAll('button').forEach(b => b.disabled = true);
   }
   let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}/test`,{method:'POST'})).json(); }
-  catch(e){ showHostStatus('critical','Test failed: '+e); await loadHosts(); return; }
-  if(!j.ok){ showHostStatus('critical', j.error || 'Test failed.'); }
+  catch(e){ showHostStatus('critical',I18N.t('hosts.test_failed','Test failed: ')+e); await loadHosts(); return; }
+  if(!j.ok){ showHostStatus('critical', j.error || I18N.t('hosts.test_failed2','Test failed.')); }
   await loadHosts();
   wireRemedyButtons();
 }
