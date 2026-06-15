@@ -132,4 +132,4 @@ external deps would defeat the "agentless" promise.
   for review.
 - Leave the version bump to the maintainer; it happens on release, not per PR.
 
-Thanks again — every issue, suggestion, and PR helps. 🛰️
+Thanks again — every issue, suggestion, and PR helps. 📡

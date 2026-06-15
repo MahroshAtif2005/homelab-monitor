@@ -26,10 +26,17 @@ COPY probe.py /app/probe.py
 # probe.ps1 is the Windows-host probe: the hub pipes it over SSH to Windows
 # remotes (PowerShell, no install) and gets back the same JSON probe.py emits.
 COPY probe.ps1 /app/probe.ps1
-COPY static/dashboard.html /app/static/dashboard.html
-COPY static/favicon.svg    /app/static/favicon.svg
-COPY static/tariffs.json   /app/static/tariffs.json
-COPY static/homelab_run.py /app/static/homelab_run.py
+# Copy the whole static dir (dashboard, favicon, logo, tariffs, run client, …).
+# MUST stay after the Chart.js/html2canvas vendor step above: those curl'd files
+# already live in /app/static and COPY merges (it never wipes), so they survive.
+# Copying the dir (vs one COPY per file) means new static assets ship automatically
+# — there's no per-file line to forget. .dockerignore keeps the context lean.
+COPY static/ /app/static/
+
+# UI translations (i18n, #148). Served at /locales/<code>.json for non-English
+# locales (English is inlined in the dashboard, so it needs no file) and read by
+# the server-side notifier. Copying the dir means new locales ship automatically.
+COPY locales/ /app/locales/
 
 # Built-in MCP server (read-only): the FastMCP wrapper + its pure-stdlib client,
 # plus the CHANGELOG it serves as a resource, and the process launcher that runs

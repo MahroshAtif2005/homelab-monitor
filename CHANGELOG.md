@@ -5,6 +5,17 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [Unreleased] — `next`
+
+### Added
+- **Community: we're on Discord.** A "Join the Discord" button in the dashboard sidebar (a small social bar, ready to grow as more channels go live) and a Community section + badge in the README. Come chat, share ideas, and help shape the roadmap: <https://discord.gg/yFEf3N2mb9>
+
+### Changed
+- **New logo — radar, not satellite.** A designed radar mark is now *the* logo everywhere instead of a generic line-icon: dashboard sidebar brand + page header, favicon, README title, and the docs site. Two variants of the same artwork — a **transparent** radar for the dark in-app / docs UI (so it pops), and a **tiled** app-icon for the favicon and README. Radar fits what the tool actually does — sweep the fleet, surface the blips. The old satellite glyph is gone; section headings keep their own topical icons (e.g. "All hosts" now uses the monitor glyph) so the radar reads only as the brand.
+
+### Fixed
+- The brand logo 404'd in the container — `static/logo.svg` wasn't copied into the image. The Dockerfile now copies the whole `static/` dir instead of listing files one by one, so a new static asset can never be silently left out again.
+
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
 
