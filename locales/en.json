@@ -231,5 +231,19 @@
   "sys.card_system": "System",
   "sys.card_hardware": "Hardware",
   "sys.no_system": "No system info reported.",
-  "sys.no_hardware": "No hardware info reported."
+  "sys.no_hardware": "No hardware info reported.",
+  "sectag.ok": "OK",
+  "sectag.warn": "REVIEW",
+  "sectag.crit": "RISK",
+  "sectag.info": "N/A",
+  "kpi.containers": "Containers",
+  "kpi.running": "Running",
+  "kpi.need_attention": "Need attention",
+  "kpi.stopped": "Stopped",
+  "ct.docker_unavailable": "Docker unavailable",
+  "mcp.disabled_html": "<span class=\"badge warn\">Disabled</span> — set <code>ENABLE_MCP=1</code> to turn it on.",
+  "mcp.enabled_html": "<span class=\"badge ok\">Enabled</span> — serving on <code>{ep}</code>.",
+  "diag.banner_lead": "⚠️ {n} setup items need attention — some features are limited.",
+  "diag.banner_link": "See Setup &amp; requirements",
+  "common.dismiss": "Dismiss"
 }

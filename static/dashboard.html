@@ -2205,7 +2205,7 @@ function renderHealth(){
       const rem = r ? `<div class="diagrem">${r.where?`<div class="where">${esc(r.where)}</div>`:''}`
                       + `<pre>${esc(r.cmd||'')}</pre></div>` : '';
       return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.label)}</td>`
-        + `<td><span class="badge ${c.status}">${SEC_TAG[c.status]||esc(c.status)}</span></td>`
+        + `<td><span class="badge ${c.status}">${I18N.t('sectag.'+c.status, SEC_TAG[c.status]||esc(c.status))}</span></td>`
         + `<td class="muted">${esc(c.detail||'')}${rem}</td></tr>`;
     }).join('');
     if(dcard) dcard.hidden = false;
@@ -2218,10 +2218,10 @@ function renderHealth(){
     const ep = `http://${host}:${mcp.port||9810}/mcp`;
     const st = document.getElementById('mcpstatus'), conn = document.getElementById('mcpconn');
     if(mcp.enabled === false){
-      if(st) st.innerHTML = `<span class="badge warn">Disabled</span> — set <code>ENABLE_MCP=1</code> to turn it on.`;
+      if(st) st.innerHTML = I18N.t('mcp.disabled_html','<span class="badge warn">Disabled</span> — set <code>ENABLE_MCP=1</code> to turn it on.');
       if(conn) conn.hidden = true;
     } else {
-      if(st) st.innerHTML = `<span class="badge ok">Enabled</span> — serving on <code>${esc(ep)}</code>.`;
+      if(st) st.innerHTML = I18N.tf('mcp.enabled_html','<span class="badge ok">Enabled</span> — serving on <code>{ep}</code>.',{ep:esc(ep)});
       const cmd = document.getElementById('mcpcmd');
       if(cmd) cmd.textContent = `claude mcp add --transport http homelab ${ep}`;
       if(conn) conn.hidden = false;
@@ -2232,8 +2232,9 @@ function renderHealth(){
   if(banner){
     const bad = checks.filter(c=>c.status==='warn'||c.status==='fail');
     if((overall==='warn'||overall==='fail') && bad.length && !DIAG_DISMISSED){
-      banner.innerHTML = `⚠️ ${bad.length} setup item${bad.length>1?'s':''} need attention — some features are limited. `
-        + `<a href="#" id="diaggo">See Setup &amp; requirements</a><button class="x" id="diagx" title="Dismiss">×</button>`;
+      const _lead = I18N.tf('diag.banner_lead', `⚠️ ${bad.length} setup item${bad.length>1?'s':''} need attention — some features are limited.`, {n:bad.length});
+      banner.innerHTML = _lead + ` `
+        + `<a href="#" id="diaggo">${I18N.t('diag.banner_link','See Setup &amp; requirements')}</a><button class="x" id="diagx" title="${I18N.t('common.dismiss','Dismiss')}">×</button>`;
       banner.hidden = false;
       document.getElementById('diaggo').onclick = e=>{e.preventDefault(); showTab('overview');
         const dc=document.getElementById('diagcard'); if(dc) dc.scrollIntoView({behavior:'smooth'});};
@@ -2268,10 +2269,10 @@ function renderHealth(){
   // Containers
   const dk=HH.docker||{}, ds=dk.summary||{};
   document.getElementById('ctkpis').innerHTML = dk.available? [
-    {v:ds.total||0,l:'Containers'},{v:ds.running||0,l:'Running'},
-    {v:ds.problems||0,l:'Need attention'},{v:(ds.total||0)-(ds.running||0),l:'Stopped'},
+    {v:ds.total||0,l:I18N.t('kpi.containers','Containers')},{v:ds.running||0,l:I18N.t('kpi.running','Running')},
+    {v:ds.problems||0,l:I18N.t('kpi.need_attention','Need attention')},{v:(ds.total||0)-(ds.running||0),l:I18N.t('kpi.stopped','Stopped')},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('')
-    : `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">Docker unavailable</div><div class="d">${esc(dk.reason||'')}</div></div></div>`;
+    : `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">${I18N.t('ct.docker_unavailable','Docker unavailable')}</div><div class="d">${esc(dk.reason||'')}</div></div></div>`;
   const ctlist = dk.containers||[];
   // Table totals (footer): sum RAM, VRAM and disk across all containers — the
   // "total" is the table's, not a per-container limit.
@@ -3998,7 +3999,7 @@ async function renderSecurity(){
 
   const body = items.map(i =>
     `<tr class="${i.level}"><td><span class="sdot" style="background:${SC[i.level]}"></span>${esc(i.check)}</td>
-       <td><span class="badge ${i.level}">${i.tag||SEC_TAG[i.level]}</span></td>
+       <td><span class="badge ${i.level}">${i.tag||I18N.t('sectag.'+i.level, SEC_TAG[i.level]||i.level)}</span></td>
        <td class="muted">${i.detail}</td></tr>`).join('');
   el.innerHTML = summary +
     `<table class="sectbl" style="margin-top:14px"><thead><tr><th>${I18N.t('col.check','Check')}</th><th>${I18N.t('col.status','Status')}</th><th>${I18N.t('col.detail','Detail')}</th></tr></thead><tbody>${body}</tbody></table>`;
