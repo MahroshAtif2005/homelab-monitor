@@ -719,7 +719,7 @@ h2 .hic{ opacity:.9 }
     <h2 data-i18n="diag.title">🩺 Setup &amp; requirements</h2>
     <div class="fleet-meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
     <div style="overflow-x:auto">
-      <table class="sectbl" style="margin-top:10px"><thead><tr><th>Requirement</th><th>Status</th><th>Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
+      <table class="sectbl" style="margin-top:10px"><thead><tr><th data-i18n="col.requirement">Requirement</th><th data-i18n="col.status">Status</th><th data-i18n="col.detail">Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
     </div>
   </div>
   <div class="card" id="mcpcard">
@@ -741,8 +741,8 @@ h2 .hic{ opacity:.9 }
       <table class="fleet-tbl" id="fleet_tbl">
         <thead>
           <tr>
-            <th>Host</th><th>Status</th><th>OS / Arch</th><th>Updates</th><th>CPU</th><th>RAM</th><th>GPU</th>
-            <th>Load 1m</th><th>Uptime</th><th>Temp</th><th>Disks</th>
+            <th data-i18n="col.host">Host</th><th data-i18n="col.status">Status</th><th data-i18n="col.os_arch">OS / Arch</th><th data-i18n="col.updates">Updates</th><th data-i18n="col.cpu">CPU</th><th data-i18n="col.ram">RAM</th><th data-i18n="col.gpu">GPU</th>
+            <th data-i18n="col.load1m">Load 1m</th><th data-i18n="col.uptime">Uptime</th><th data-i18n="col.temp">Temp</th><th data-i18n="col.disks">Disks</th>
           </tr>
         </thead>
         <tbody><tr><td colspan="11" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
@@ -763,7 +763,7 @@ h2 .hic{ opacity:.9 }
       <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
     </div>
     <div class="card"><h2 data-i18n="gpu.services_title">📋 Services on the GPU (selected range)</h2>
-      <table><thead><tr><th>Service</th><th>Peak</th><th>Avg</th><th>% time</th></tr></thead><tbody id="sumtbl"></tbody></table>
+      <table><thead><tr><th data-i18n="col.service">Service</th><th data-i18n="col.peak">Peak</th><th data-i18n="col.avg">Avg</th><th data-i18n="col.pct_time">% time</th></tr></thead><tbody id="sumtbl"></tbody></table>
     </div>
   </div>
   <div class="card" id="pergpu-card" hidden><h2 data-i18n="gpu.pergpu_title">🎮 Per-GPU</h2>
@@ -792,8 +792,8 @@ h2 .hic{ opacity:.9 }
   <div class="card" id="costs-breakdown-card" hidden>
     <h2 data-i18n="costs.breakdown_title">🧾 Breakdown by process / container / model</h2>
     <table><thead><tr>
-      <th data-sort="name">Name</th><th data-sort="kind">Kind</th>
-      <th data-sort="avg_w">Avg W</th><th data-sort="energy_kwh">Energy</th><th data-sort="cost">Cost</th>
+      <th data-sort="name" data-i18n="col.name">Name</th><th data-sort="kind" data-i18n="col.kind">Kind</th>
+      <th data-sort="avg_w" data-i18n="col.avg_w">Avg W</th><th data-sort="energy_kwh" data-i18n="col.energy">Energy</th><th data-sort="cost" data-i18n="col.cost">Cost</th>
     </tr></thead><tbody id="costs-tbl"></tbody></table>
     <p class="cap">Click a row to drill into its power &amp; cost over time. GPU split by VRAM share; CPU split by CPU-time share of the measured package power.</p>
   </div>
@@ -824,7 +824,7 @@ h2 .hic{ opacity:.9 }
       <a href="#" id="runs-settings-link">Settings → Integrations</a>.
     </div>
     <table id="runs-table" style="margin-top:6px"><thead><tr>
-      <th>Run</th><th>Source</th><th>Status</th><th>Started</th><th>Duration</th><th>Metrics</th><th>Energy</th><th>Cost</th><th></th>
+      <th data-i18n="col.run">Run</th><th data-i18n="col.source">Source</th><th data-i18n="col.status">Status</th><th data-i18n="col.started">Started</th><th data-i18n="col.duration">Duration</th><th data-i18n="col.metrics">Metrics</th><th data-i18n="col.energy">Energy</th><th data-i18n="col.cost">Cost</th><th></th>
     </tr></thead><tbody id="runs-tbody"></tbody></table>
   </div>
   <div class="card" id="run-detail" hidden>
@@ -848,7 +848,7 @@ h2 .hic{ opacity:.9 }
     <h2 data-i18n="exp.sessions_title">📈 GPU activity sessions</h2>
     <div class="grid" id="sess-kpis"></div>
     <table style="margin-top:12px"><thead><tr>
-      <th>Started</th><th>Duration</th><th>Peak util</th><th>Peak VRAM</th><th>Avg power</th><th>Energy</th><th>Cost</th>
+      <th data-i18n="col.started">Started</th><th data-i18n="col.duration">Duration</th><th data-i18n="col.peak_util">Peak util</th><th data-i18n="col.peak_vram">Peak VRAM</th><th data-i18n="col.avg_power">Avg power</th><th data-i18n="col.energy">Energy</th><th data-i18n="col.cost">Cost</th>
     </tr></thead><tbody id="sess-tbl"></tbody></table>
     <p class="cap" id="sess-cap">Contiguous GPU-busy periods reconstructed from power &amp; utilisation history — each is a training run, batch job or inference burst. Energy is integrated from GPU power; cost uses your kWh price.</p>
   </div>
@@ -859,13 +859,13 @@ h2 .hic{ opacity:.9 }
   <div class="card"><h2 data-i18n="containers.title">📦 Docker containers</h2>
     <div class="grid" id="ctkpis"></div>
     <table style="margin-top:14px"><thead><tr>
-      <th>Container</th><th>State</th>
-      <th data-col="image">Image</th>
-      <th>Ports</th><th>Uptime</th>
-      <th title="Resident system RAM the container actually holds — anonymous + shared memory. Excludes reclaimable file cache (e.g. mmap'd model files), so rows sum sensibly against host RAM. GPU memory is the separate VRAM column.">RAM</th>
-      <th title="GPU memory held by this container's processes (nvidia-smi compute-apps, attributed via /proc/<pid>/cgroup). Blank when the container isn't using the GPU.">VRAM</th>
-      <th data-col="disk" title="Writable layer + the container's volumes &amp; read-write bind mounts (so model/data volumes are included, not just the thin writable layer). Mounts shared by several containers are excluded so they aren't counted against each one.">Disk</th>
-      <th>Status</th>
+      <th data-i18n="col.container">Container</th><th data-i18n="col.state">State</th>
+      <th data-col="image" data-i18n="col.image">Image</th>
+      <th data-i18n="col.ports">Ports</th><th data-i18n="col.uptime">Uptime</th>
+      <th title="Resident system RAM the container actually holds — anonymous + shared memory. Excludes reclaimable file cache (e.g. mmap'd model files), so rows sum sensibly against host RAM. GPU memory is the separate VRAM column." data-i18n="col.ram">RAM</th>
+      <th title="GPU memory held by this container's processes (nvidia-smi compute-apps, attributed via /proc/<pid>/cgroup). Blank when the container isn't using the GPU." data-i18n="col.vram">VRAM</th>
+      <th data-col="disk" title="Writable layer + the container's volumes &amp; read-write bind mounts (so model/data volumes are included, not just the thin writable layer). Mounts shared by several containers are excluded so they aren't counted against each one." data-i18n="col.disk">Disk</th>
+      <th data-i18n="col.status">Status</th>
     </tr></thead><tbody id="cttbl"></tbody></table>
   </div>
 </section>
@@ -1066,7 +1066,7 @@ h2 .hic{ opacity:.9 }
 
       <!-- Existing keys -->
       <table style="margin-top:6px"><thead><tr>
-        <th>Name</th><th>Key</th><th>Created</th><th>Expires</th><th>Last used</th><th>Runs</th><th></th>
+        <th data-i18n="col.name">Name</th><th data-i18n="col.key">Key</th><th data-i18n="col.created">Created</th><th data-i18n="col.expires">Expires</th><th data-i18n="col.last_used">Last used</th><th data-i18n="col.runs">Runs</th><th></th>
       </tr></thead><tbody id="intg_key_tbody"></tbody></table>
 
       <div style="margin-top:8px">
@@ -1229,7 +1229,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
     <p class="cap" id="netio_cap"></p>
   </div>
   <div class="card" id="nettalkers-card" hidden><h2 data-i18n="net.talkers_title">📊 Top talkers — containers</h2>
-    <table><thead><tr><th>Container</th><th>In</th><th>Out</th><th>Total</th></tr></thead><tbody id="nettalkers"></tbody></table>
+    <table><thead><tr><th data-i18n="col.container">Container</th><th data-i18n="col.in">In</th><th data-i18n="col.out">Out</th><th data-i18n="col.total">Total</th></tr></thead><tbody id="nettalkers"></tbody></table>
     <p class="cap">Total bytes each container moved over the selected range (its own network namespace).</p>
   </div>
   <div class="card"><h2 data-i18n="net.title">🌐 Network</h2>
@@ -2096,7 +2096,7 @@ function renderModels(){
       ${servingFor(svc)}
       ${modelSpark(svc,tot)}
       ${callersFor(svc)}
-      <table style="margin-top:12px"><thead><tr><th>Model</th><th>Status</th><th>Now</th><th>Peak</th><th>Avg</th><th>Peak·Avg</th></tr></thead><tbody>${rows}</tbody></table>
+      <table style="margin-top:12px"><thead><tr><th>${I18N.t('col.model','Model')}</th><th>${I18N.t('col.status','Status')}</th><th>${I18N.t('col.now','Now')}</th><th>${I18N.t('col.peak','Peak')}</th><th>${I18N.t('col.avg','Avg')}</th><th>${I18N.t('col.peak_avg','Peak·Avg')}</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }).join('');
 }
@@ -2352,7 +2352,7 @@ function renderServicesBlock(sd){
     || '<tr><td colspan="6" class="muted">No user-deployed or failed services found.</td></tr>';
   svc.innerHTML=`<div class="grid">${kpis}</div>
     <table style="margin-top:14px"><thead><tr>
-      <th>Unit</th><th>State</th><th>Ports</th><th>Uptime</th><th>Memory</th><th>Description</th>
+      <th>${I18N.t('col.unit','Unit')}</th><th>${I18N.t('col.state','State')}</th><th>${I18N.t('col.ports','Ports')}</th><th>${I18N.t('col.uptime','Uptime')}</th><th>${I18N.t('col.memory','Memory')}</th><th>${I18N.t('col.description','Description')}</th>
     </tr></thead><tbody>${rows}</tbody></table>
     <p class="cap">${win
       ? 'Showing this host\'s <b>Automatic</b>-start Windows services (green = running, amber = stopped). Manual and disabled services are hidden to keep the table readable.'
@@ -3891,11 +3891,11 @@ async function renderNetwork(){
   el.innerHTML =
     `<div class="kpirow">${kpis}</div>
      <div class="subhd">Interfaces</div>
-     <table class="ntbl"><thead><tr><th>Interface</th><th>Address</th><th>MAC</th><th>State</th><th>Speed</th><th>MTU</th><th>RX / TX</th></tr></thead><tbody>${ifrows}</tbody></table>
+     <table class="ntbl"><thead><tr><th>${I18N.t('col.interface','Interface')}</th><th>${I18N.t('col.address','Address')}</th><th>${I18N.t('col.mac','MAC')}</th><th>${I18N.t('col.state','State')}</th><th>${I18N.t('col.speed','Speed')}</th><th>${I18N.t('col.mtu','MTU')}</th><th>${I18N.t('col.rx_tx','RX / TX')}</th></tr></thead><tbody>${ifrows}</tbody></table>
      <div class="subhd">DNS</div><div style="font-family:var(--mono);font-size:13px;padding:2px 0">${dns}${search}</div>
      <div class="subhd">Listening sockets <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">· ${(net.listen||[]).length} total, public first</span></div>
      <div style="max-height:340px;overflow:auto;border:1px solid var(--bd);border-radius:9px;margin-top:6px">
-       <table class="ntbl" style="margin-top:0"><thead><tr><th>Proto</th><th>Bind</th><th>Port</th><th>Process</th><th>Exposure</th></tr></thead><tbody>${lrows}</tbody></table>
+       <table class="ntbl" style="margin-top:0"><thead><tr><th>${I18N.t('col.proto','Proto')}</th><th>${I18N.t('col.bind','Bind')}</th><th>${I18N.t('col.port','Port')}</th><th>${I18N.t('col.process','Process')}</th><th>${I18N.t('col.exposure','Exposure')}</th></tr></thead><tbody>${lrows}</tbody></table>
      </div>`;
 }
 
@@ -4001,7 +4001,7 @@ async function renderSecurity(){
        <td><span class="badge ${i.level}">${i.tag||SEC_TAG[i.level]}</span></td>
        <td class="muted">${i.detail}</td></tr>`).join('');
   el.innerHTML = summary +
-    `<table class="sectbl" style="margin-top:14px"><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>${body}</tbody></table>`;
+    `<table class="sectbl" style="margin-top:14px"><thead><tr><th>${I18N.t('col.check','Check')}</th><th>${I18N.t('col.status','Status')}</th><th>${I18N.t('col.detail','Detail')}</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function hostCapability(hostName, capId){
