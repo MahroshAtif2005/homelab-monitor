@@ -1771,7 +1771,7 @@ function renderData(){
   if(!D) return;
   const n=D.now, H=n.host||{}, tot=D.mem_total;
   setVer(D.version);
-  document.getElementById('lastup').textContent='updated '+new Date().toLocaleTimeString();
+  document.getElementById('lastup').textContent=I18N.tf('header.updated','updated {t}',{t:new Date().toLocaleTimeString()});
 
   // insights & at-a-glance cards used to live on the old Overview; that tab is
   // now the fleet table. The IDs may no longer exist on the page — guard the
@@ -1784,8 +1784,8 @@ function renderData(){
   // GPU now
   const memPct=Math.round(n.mem_used/tot*100);
   document.getElementById('gpukpis').innerHTML=[
-    {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:'VRAM in use',s:memPct+'% full'},
-    {v:Math.round(n.util)+'%',l:'GPU util',s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
+    {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:I18N.t('gpu.vram_in_use','VRAM in use'),s:I18N.tf('gpu.pct_full','{n}% full',{n:memPct})},
+    {v:Math.round(n.util)+'%',l:I18N.t('gpu.util_kpi','GPU util'),s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
   renderGpuDetail(n.gpu_extra||{}, n.power);
   renderPerGpu(n.gpus);
@@ -1794,10 +1794,10 @@ function renderData(){
   document.getElementById('nowtbl').innerHTML = n.procs.length? n.procs.map(p=>
     `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${esc(p.service)}</td><td>${fmtMB(p.mem)}</td>
      <td style="width:42%"><span class="mini" style="width:${Math.max(2,p.mem/tot*100)}%;background:${colorFor(p.service)}"></span></td></tr>`).join('')
-    : '<tr><td class="muted">GPU is idle.</td></tr>';
+    : '<tr><td class="muted">'+I18N.t('gpu.idle','GPU is idle.')+'</td></tr>';
   document.getElementById('sumtbl').innerHTML = D.summary.length? D.summary.map(s=>
     `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${esc(s.service)}</td><td>${fmtMB(s.peak)}</td><td>${fmtMB(s.avg)}</td><td>${s.present}%</td></tr>`).join('')
-    : '<tr><td class="muted">No GPU activity yet.</td></tr>';
+    : '<tr><td class="muted">'+I18N.t('gpu.no_activity','No GPU activity yet.')+'</td></tr>';
 
   // AI models — expandable rows + per-model VRAM timeline (see renderModels)
   renderModels();
@@ -1842,27 +1842,26 @@ function renderGpuDetail(x, powerNow){
   if(banner){
     if(x.throttled && (x.throttle||[]).length){
       banner.style.display='flex';
-      banner.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">GPU is throttling — running below rated clocks</div>`
-        +`<div class="d">Reason: <b>${(x.throttle||[]).map(esc).join(', ')}</b>. `
-        +`Your real throughput is lower than the util % suggests — check cooling or the power limit.</div></div>`;
+      banner.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">${I18N.t('gpu.throttling_title','GPU is throttling — running below rated clocks')}</div>`
+        +`<div class="d">`+I18N.tf('gpu.throttling_detail','Reason: <b>{reason}</b>. Your real throughput is lower than the util % suggests — check cooling or the power limit.',{reason:(x.throttle||[]).map(esc).join(', ')})+`</div></div>`;
     } else { banner.style.display='none'; }
   }
   const box=document.getElementById('gpu-detail'); if(!box) return;
   const chips=[];
   if(x.mem_util!=null && (x.mem_util>0 || x.clk_sm>0)){
     const mb = x.mem_util>=70 ? 'warn' : '';
-    chips.push({v:Math.round(x.mem_util)+'%', l:'Mem-BW util', c:mb,
-                t:'Memory-bandwidth utilisation. High here with low GPU util = memory-bound (the usual LLM-inference bottleneck).'});
+    chips.push({v:Math.round(x.mem_util)+'%', l:I18N.t('gpu.chip_membw','Mem-BW util'), c:mb,
+                t:I18N.t('gpu.chip_membw_t','Memory-bandwidth utilisation. High here with low GPU util = memory-bound (the usual LLM-inference bottleneck).')});
   }
-  if(x.clk_sm>0) chips.push({v:Math.round(x.clk_sm)+' MHz', l:'Core clock'});
-  if(x.clk_mem>0) chips.push({v:Math.round(x.clk_mem)+' MHz', l:'Mem clock'});
+  if(x.clk_sm>0) chips.push({v:Math.round(x.clk_sm)+' MHz', l:I18N.t('gpu.chip_coreclk','Core clock')});
+  if(x.clk_mem>0) chips.push({v:Math.round(x.clk_mem)+' MHz', l:I18N.t('gpu.chip_memclk','Mem clock')});
   if(x.power_limit>0){
     const head=Math.round((powerNow||0)/x.power_limit*100);
-    chips.push({v:`${Math.round(powerNow||0)} / ${Math.round(x.power_limit)} W`, l:`Power · ${head}% of cap`,
-                c: head>=98?'bad':head>=90?'warn':'', t:'Draw vs the card power limit. Pinned at ~100% = power-capped.'});
+    chips.push({v:`${Math.round(powerNow||0)} / ${Math.round(x.power_limit)} W`, l:I18N.tf('gpu.chip_power','Power · {n}% of cap',{n:head}),
+                c: head>=98?'bad':head>=90?'warn':'', t:I18N.t('gpu.chip_power_t','Draw vs the card power limit. Pinned at ~100% = power-capped.')});
   }
-  if(x.pstate) chips.push({v:x.pstate, l:'Perf state', t:'P0 = max performance; higher P-numbers = lower clocks.'});
-  if(x.temp_mem>0) chips.push({v:Math.round(x.temp_mem)+'°C', l:'Mem temp', c:x.temp_mem>=95?'bad':x.temp_mem>=85?'warn':''});
+  if(x.pstate) chips.push({v:x.pstate, l:I18N.t('gpu.chip_pstate','Perf state'), t:I18N.t('gpu.chip_pstate_t','P0 = max performance; higher P-numbers = lower clocks.')});
+  if(x.temp_mem>0) chips.push({v:Math.round(x.temp_mem)+'°C', l:I18N.t('gpu.chip_memtemp','Mem temp'), c:x.temp_mem>=95?'bad':x.temp_mem>=85?'warn':''});
   box.innerHTML = chips.map(c=>`<div class="gpu-chip ${c.c||''}"${c.t?` title="${esc(c.t)}"`:''}><div class="v">${esc(c.v)}</div><div class="l">${esc(c.l)}</div></div>`).join('');
 }
 
@@ -1878,19 +1877,19 @@ function renderPerGpu(gpus){
     const util = Math.round(g.util||0);
     const memUtil = Math.round(g.mem_util||0);
     const thr = (g.throttled && (g.throttle||[]).length)
-      ? `<span class="badge crit" title="Throttling: ${esc((g.throttle||[]).join(', '))}">${sic('flame')} throttling</span>` : '';
+      ? `<span class="badge crit" title="${I18N.tf('gpu.throttling_tip','Throttling: {x}',{x:esc((g.throttle||[]).join(', '))})}">${sic('flame')} ${I18N.t('gpu.throttling_badge','throttling')}</span>` : '';
     const clk = g.clk_sm>0 ? ` · ${Math.round(g.clk_sm)} MHz` : '';
     const cap = g.power_limit>0 ? `/${Math.round(g.power_limit)} W cap` : '';
     return `<div class="gpucard">
       <div class="gpucard-h"><b>GPU ${g.idx}</b> <span class="muted">${esc(g.name||'')}</span> ${thr}
         <span class="gpucard-stats">${util}% util · ${Math.round(g.power||0)} W${cap}${clk} · ${Math.round(g.temp||0)}°C${g.pstate?' · '+esc(g.pstate):''}</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">VRAM</span>
+      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('col.vram','VRAM')}</span>
         <span class="gpucard-bar"><span style="width:${memPct}%;background:${tint(memPct)}"></span></span>
         <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${memPct}%</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">Util</span>
+      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('gpu.percard_util','Util')}</span>
         <span class="gpucard-bar"><span style="width:${Math.min(100,util)}%;background:${tint(util)}"></span></span>
         <span class="gpucard-val">${util}%</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl" title="Memory-bandwidth utilisation — high here with low Util = memory-bound">Mem-BW</span>
+      <div class="gpucard-row"><span class="gpucard-lbl" title="${I18N.t('gpu.percard_membw_t','Memory-bandwidth utilisation — high here with low Util = memory-bound')}">${I18N.t('gpu.percard_membw','Mem-BW')}</span>
         <span class="gpucard-bar"><span style="width:${Math.min(100,memUtil)}%;background:${tint(memUtil)}"></span></span>
         <span class="gpucard-val">${memUtil}%</span></div>
     </div>`;
@@ -1957,16 +1956,16 @@ async function renderCost(){
   const split2 = w => { const x = sp[w]; if(!dual || !x) return '';
     return `<div class="s s2" style="opacity:.8">${sic('sun')} ${money(x.day_cost)} · ${sic('moon')} ${money(x.night_cost)}</div>`; };
   document.getElementById('cost-kpis').innerHTML = [
-    {v: j.current_w + ' W', l: 'Current draw'},
-    {v: j.avg_24h_w + ' W', l: '24h average'},
-    {v: j.avg_7d_w + ' W',  l: '7d average'},
-    {v: money(j.cost.today), l: 'Cost today',   s: (j.kwh.today||0).toFixed(2) + ' kWh', x: split2('today')},
-    {v: money(j.cost.d7),    l: 'Last 7 days',   s: (j.kwh.d7||0).toFixed(1) + ' kWh',   x: split2('d7')},
-    {v: money(j.cost.d30),   l: 'Last 30 days',  s: (j.kwh.d30||0).toFixed(1) + ' kWh',  x: split2('d30')},
+    {v: j.current_w + ' W', l: I18N.t('cost.current_draw','Current draw')},
+    {v: j.avg_24h_w + ' W', l: I18N.t('cost.avg_24h','24h average')},
+    {v: j.avg_7d_w + ' W',  l: I18N.t('cost.avg_7d','7d average')},
+    {v: money(j.cost.today), l: I18N.t('cost.today','Cost today'),   s: (j.kwh.today||0).toFixed(2) + ' kWh', x: split2('today')},
+    {v: money(j.cost.d7),    l: I18N.t('cost.last_7d','Last 7 days'),   s: (j.kwh.d7||0).toFixed(1) + ' kWh',   x: split2('d7')},
+    {v: money(j.cost.d30),   l: I18N.t('cost.last_30d','Last 30 days'),  s: (j.kwh.d30||0).toFixed(1) + ' kWh',  x: split2('d30')},
   ].map(t => `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div>${t.x||''}</div>`).join('');
   const labels = fmtLabels(j.series.labels);
   mk('costchart', {type:'line', data:{labels, datasets:[
-    {label:'Cumulative cost ('+cur+')', data:j.series.cost_cum, borderColor:'#3fb950',
+    {label:I18N.tf('cost.chart_cum','Cumulative cost ({cur})',{cur}), data:j.series.cost_cum, borderColor:'#3fb950',
      backgroundColor:'#3fb95033', fill:true, pointRadius:0, tension:.25}]},
     options:{responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
       scales:{x:{grid:{color:cv('--free')}, ticks:{color:cv('--mut'), maxTicksLimit:10, autoSkip:true}},
@@ -1976,8 +1975,8 @@ async function renderCost(){
   if(cap){
     const t = j.tariff || {};
     cap.textContent = dual
-      ? `At ${cur}${t.price_day}/kWh day · ${cur}${t.price_night}/kWh night ${t.night_start}–${t.night_end} · integrated from GPU power samples · ${j.range} range`
-      : `At ${cur}${j.kwh_price}/kWh · integrated from GPU power samples · ${j.range} range`;
+      ? I18N.tf('cost.cap_dual','At {cur}{day}/kWh day · {cur}{night}/kWh night {ns}–{ne} · integrated from GPU power samples · {range} range',{cur,day:t.price_day,night:t.price_night,ns:t.night_start,ne:t.night_end,range:j.range})
+      : I18N.tf('cost.cap_single','At {cur}{price}/kWh · integrated from GPU power samples · {range} range',{cur,price:j.kwh_price,range:j.range});
   }
 }
 
@@ -2003,18 +2002,18 @@ async function renderCosts(force){
   const cur=j.currency||'$', money=v=>cur+(+v||0).toFixed(2);
   const m=(j.machines||[])[0]||{}, nowW=m.now_w||{};
   const sub=document.getElementById('costs-sub');
-  if(sub) sub.textContent = j.rapl_available ? '· GPU + CPU package measured' : '· GPU measured · CPU power unavailable (RAPL)';
+  if(sub) sub.textContent = j.rapl_available ? I18N.t('cost.sub_rapl','· GPU + CPU package measured') : I18N.t('cost.sub_norapl','· GPU measured · CPU power unavailable (RAPL)');
   document.getElementById('costs-kpis').innerHTML=[
-    {v:(nowW.total||0)+' W', l:'Total draw now', s:[nowW.gpu!=null?'gpu '+nowW.gpu+'W':'', nowW.cpu!=null?'cpu '+nowW.cpu+'W':''].filter(Boolean).join(' · ')},
-    {v:money(m.cost&&m.cost.today), l:'Cost today', s:(m.cost_range!=null?money(m.cost_range)+' this range':'')},
-    {v:money(m.cost&&m.cost.d7),  l:'Last 7 days'},
-    {v:money(m.cost&&m.cost.d30), l:'Last 30 days', s:((m.energy_kwh&&m.energy_kwh.total)||0).toFixed(1)+' kWh range'},
+    {v:(nowW.total||0)+' W', l:I18N.t('cost.total_now','Total draw now'), s:[nowW.gpu!=null?'gpu '+nowW.gpu+'W':'', nowW.cpu!=null?'cpu '+nowW.cpu+'W':''].filter(Boolean).join(' · ')},
+    {v:money(m.cost&&m.cost.today), l:I18N.t('cost.today','Cost today'), s:(m.cost_range!=null?I18N.tf('cost.this_range','{v} this range',{v:money(m.cost_range)}):'')},
+    {v:money(m.cost&&m.cost.d7),  l:I18N.t('cost.last_7d','Last 7 days')},
+    {v:money(m.cost&&m.cost.d30), l:I18N.t('cost.last_30d','Last 30 days'), s:I18N.tf('cost.kwh_range','{v} kWh range',{v:((m.energy_kwh&&m.energy_kwh.total)||0).toFixed(1)})},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
   const C=j.components||{}, labels=fmtLabels(C.labels||[]);
   const ds=[];
   const add=(key,label,col,dash)=>{ if(C[key]&&C[key].length) ds.push({label,data:C[key],backgroundColor:col+'59',borderColor:col,fill:true,pointRadius:0,tension:.2,borderDash:dash||[]}); };
-  add('gpu','GPU (measured)','#3fb950'); add('cpu','CPU (measured)','#4dabf7'); add('dram','DRAM (measured)','#e3b341');
-  add('other','Other (set)','#6b7280',[4,3]);
+  add('gpu',I18N.t('cost.comp_gpu','GPU (measured)'),'#3fb950'); add('cpu',I18N.t('cost.comp_cpu','CPU (measured)'),'#4dabf7'); add('dram',I18N.t('cost.comp_dram','DRAM (measured)'),'#e3b341');
+  add('other',I18N.t('cost.comp_other','Other (set)'),'#6b7280',[4,3]);
   mk('costscomp',{type:'line',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10,autoSkip:true}},
       y:{stacked:true,min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}}},
@@ -2042,11 +2041,11 @@ async function drillEntity(name,kind){
   document.getElementById('costs-drill-title').textContent=`${name} — ${R}: ${(j.energy_kwh||0).toFixed(3)} kWh · ${cur}${(j.cost||0).toFixed(2)}`;
   const res=document.getElementById('costs-drill-res');
   if(res) res.textContent=(j.resources&&j.resources.gpu_vram_peak_mb)
-    ? 'Peak VRAM held '+fmtMB(j.resources.gpu_vram_peak_mb)+' · peak power '+j.peak_w+' W · avg '+j.avg_w+' W'
-    : 'Peak power '+j.peak_w+' W · avg '+j.avg_w+' W';
+    ? I18N.tf('cost.drill_res_vram','Peak VRAM held {vram} · peak power {peak} W · avg {avg} W',{vram:fmtMB(j.resources.gpu_vram_peak_mb),peak:j.peak_w,avg:j.avg_w})
+    : I18N.tf('cost.drill_res','Peak power {peak} W · avg {avg} W',{peak:j.peak_w,avg:j.avg_w});
   mk('costsdrill',{type:'line',data:{labels,datasets:[
-    {label:'Power (W)',data:j.series.watts,borderColor:'#a371f7',backgroundColor:'#a371f733',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
-    {label:'Cumulative '+cur,data:j.series.cost_cum,borderColor:'#3fb950',pointRadius:0,yAxisID:'y1',tension:.2}]},
+    {label:I18N.t('cost.chart_power','Power (W)'),data:j.series.watts,borderColor:'#a371f7',backgroundColor:'#a371f733',fill:true,pointRadius:0,yAxisID:'y',tension:.2},
+    {label:I18N.tf('cost.chart_cum2','Cumulative {cur}',{cur}),data:j.series.cost_cum,borderColor:'#3fb950',pointRadius:0,yAxisID:'y1',tension:.2}]},
     options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
       scales:{x:{grid:{color:cv('--free')},ticks:{color:cv('--mut'),maxTicksLimit:10}},
         y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
