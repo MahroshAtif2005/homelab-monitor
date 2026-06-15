@@ -25,7 +25,7 @@ try:
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, Response, send_file, after_this_request, g
+from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -5304,6 +5304,22 @@ def favicon():
     <link rel="icon"> points elsewhere (during early page load, or for tabs that
     open without rendering HTML). Serve the SVG we ship in static/."""
     return app.send_static_file("favicon.svg")
+
+_LOCALES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "locales")
+
+@app.route("/locales/<path:fn>")
+def locales(fn):
+    """Serve UI translation files (i18n, #148). The dashboard fetches
+    /locales/<code>.json for any non-English locale; English is inlined, so it
+    needs no fetch. send_from_directory guards against path traversal."""
+    if not fn.endswith(".json"):
+        return ("Not found", 404)
+    try:
+        resp = send_from_directory(_LOCALES_DIR, fn)
+    except Exception:
+        return ("Not found", 404)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 def _mcp_enabled():
     return os.environ.get("ENABLE_MCP", "1").strip().lower() not in ("0", "false", "no")

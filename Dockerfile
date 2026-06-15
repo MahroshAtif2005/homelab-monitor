@@ -33,6 +33,11 @@ COPY probe.ps1 /app/probe.ps1
 # — there's no per-file line to forget. .dockerignore keeps the context lean.
 COPY static/ /app/static/
 
+# UI translations (i18n, #148). Served at /locales/<code>.json for non-English
+# locales (English is inlined in the dashboard, so it needs no file) and read by
+# the server-side notifier. Copying the dir means new locales ship automatically.
+COPY locales/ /app/locales/
+
 # Built-in MCP server (read-only): the FastMCP wrapper + its pure-stdlib client,
 # plus the CHANGELOG it serves as a resource, and the process launcher that runs
 # the dashboard and the MCP server side-by-side in this one container.
