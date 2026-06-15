@@ -3436,36 +3436,11 @@ async function renderRuns(){
 }
 
 async function deleteRun(id, run){
-  const nm=(run&&run.name)||'this run';
-
-  if(!confirm(`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`))
-    return;
-
-  try{
-    const r=await fetch('/api/runs/'+encodeURIComponent(id),{
-      method:'DELETE'
-    });
-
-    if(!r.ok && r.status!==404)
-      throw new Error('HTTP '+r.status);
-  }
-  catch(e){
-    toast('critical','Could not delete the run: '+e);
-    return;
-  }
-
-  const det=document.getElementById('run-detail');
-
-  // close the detail if it was this run
-  if(det && !det.hidden && CURRENT_RUN===id){
-    det.hidden=true;
-  }
-
   const nm=(run&&run.name)||I18N.t('exp.this_run','this run');
   if(!confirm(I18N.tf('confirm.delete_run',`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`,{nm}))) return;
   try{ const r=await fetch('/api/runs/'+encodeURIComponent(id),{method:'DELETE'});
     if(!r.ok && r.status!==404) throw new Error('HTTP '+r.status); }
-  catch(e){ alert(I18N.t('toast.delete_run_fail','Could not delete the run: ')+e); return; }
+  catch(e){ toast('critical', I18N.t('toast.delete_run_fail','Could not delete the run: ')+e); return; }
   const det=document.getElementById('run-detail');           // close the detail if it was this run
   if(det && !det.hidden && CURRENT_RUN===id){ det.hidden=true; }
   renderRuns();
