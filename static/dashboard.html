@@ -1638,18 +1638,18 @@ function mountShell(){
   const ISSUE_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0z"/></svg>';
   side.innerHTML = '<div class="sbrand"><button type="button" class="sbrand-link" id="homeBrand" aria-label="'+I18N.t('brand.home_aria','Go to Overview')+'" title="'+I18N.t('brand.home_aria','Go to Overview')+'"><span class="logo"><img src="/static/logo.svg" alt="" width="22" height="22"></span><span class="nm">'+I18N.t('brand.name','HomeLab Monitor')+'</span></button></div>'
     + '<div class="ghbox">'
-    +   '<a class="ghstar" id="ghstar" href="'+REPO+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.star_title','Star HomeLab Monitor on GitHub — it genuinely helps the project grow')+'">'
-    +     STAR_SVG + '<span id="ghlabel">'+I18N.t('sidebar.star','Star on GitHub')+'</span>'
+    +   '<a class="ghstar" id="ghstar" href="'+REPO+'" target="_blank" rel="noopener" data-i18n-attr="title:sidebar.star_title" title="Star HomeLab Monitor on GitHub — it genuinely helps the project grow">'
+    +     STAR_SVG + '<span id="ghlabel" data-i18n="sidebar.star">Star on GitHub</span>'
     +     '<span class="cnt" id="ghcount">…</span>'
     +     '<span class="sparkles" id="ghsparkles" aria-hidden="true"></span></a>'
     +   '<div class="ghlinks">'
-    +     '<a href="'+REPO+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.repo_title','Browse the source on GitHub')+'">'+GH_SVG+I18N.t('sidebar.repo','Repo')+'</a>'
-    +     '<a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener" title="'+I18N.t('sidebar.issue_title','Report a bug or request a feature')+'">'+ISSUE_SVG+I18N.t('sidebar.issue','Issue')+'</a>'
+    +     '<a href="'+REPO+'" target="_blank" rel="noopener" data-i18n-attr="title:sidebar.repo_title" title="Browse the source on GitHub">'+GH_SVG+'<span data-i18n="sidebar.repo">Repo</span></a>'
+    +     '<a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener" data-i18n-attr="title:sidebar.issue_title" title="Report a bug or request a feature">'+ISSUE_SVG+'<span data-i18n="sidebar.issue">Issue</span></a>'
     +   '</div>'
-    +   '<div class="star-cta cta-pre">'+I18N.t('sidebar.cta_pre','If it helps your homelab, a ⭐ helps mine back.')+'</div>'
-    +   '<div class="star-cta cta-post">'+I18N.tf('sidebar.cta_post_html','Thanks for the star! Got an idea or a bug? <a href="{issuesUrl}" target="_blank" rel="noopener">Open an issue</a>.',{issuesUrl:REPO+'/issues/new/choose'})+'</div>'
-    +   '<div class="social" aria-label="'+I18N.t('sidebar.social_aria','Community and social')+'">'
-    +     '<a class="soc discord" href="'+DISCORD+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.discord_title','Join the HomeLab Monitor community on Discord — chat, share ideas, get help')+'">'+DISCORD_SVG+'<span>'+I18N.t('sidebar.discord','Join the Discord')+'</span></a>'
+    +   '<div class="star-cta cta-pre" data-i18n="sidebar.cta_pre">If it helps your homelab, a ⭐ helps mine back.</div>'
+    +   '<div class="star-cta cta-post" data-i18n-html="sidebar.cta_post_html">Thanks for the star! Got an idea or a bug? <a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener">Open an issue</a>.</div>'
+    +   '<div class="social" data-i18n-attr="aria-label:sidebar.social_aria" aria-label="Community and social">'
+    +     '<a class="soc discord" href="'+DISCORD+'" target="_blank" rel="noopener" data-i18n-attr="title:sidebar.discord_title" title="Join the HomeLab Monitor community on Discord — chat, share ideas, get help">'+DISCORD_SVG+'<span data-i18n="sidebar.discord">Join the Discord</span></a>'
     // more social links (LinkedIn, YouTube) drop in here as extra '.soc' anchors once those channels go live
     +   '</div>'
     + '</div>'
@@ -1665,9 +1665,9 @@ function mountShell(){
   const foot = document.getElementById('foot');
   foot.insertAdjacentHTML('beforeend',
     '<div class="footrow">'
-    + '<button class="thtoggle" id="themeBtn"><span class="thicon">☾</span><span class="thlabel">'+I18N.t('footer.theme.dark','Dark')+'</span></button>'
-    + '<button class="thtoggle" id="densityBtn">▤ <span class="dlabel">'+I18N.t('footer.density.compact','Compact')+'</span></button></div>'
-    + '<div class="themeswitch" id="themeswitch"><button data-th="dark">'+I18N.t('footer.theme.dark','Dark')+'</button><button data-th="light">'+I18N.t('footer.theme.light','Light')+'</button><button data-th="system">'+I18N.t('footer.theme.system','System')+'</button></div>');
+    + '<button class="thtoggle" id="themeBtn"><span class="thicon">☾</span><span class="thlabel" data-i18n="footer.theme.dark">Dark</span></button>'
+    + '<button class="thtoggle" id="densityBtn">▤ <span class="dlabel" data-i18n="footer.density.compact">Compact</span></button></div>'
+    + '<div class="themeswitch" id="themeswitch"><button data-th="dark" data-i18n="footer.theme.dark">Dark</button><button data-th="light" data-i18n="footer.theme.light">Light</button><button data-th="system" data-i18n="footer.theme.system">System</button></div>');
   ['header', '.topnav', '.sub'].forEach(sel => { const el = document.querySelector('.content > ' + sel); if(el) el.remove(); });
 }
 
@@ -2938,7 +2938,7 @@ function useLanSuggestion(host, ip){
   // Focus the user portion so they type to replace.
   tgt.focus();
   tgt.setSelectionRange(0, 4);  // selects "user"
-  showHostStatus('info','Prefilled — replace "user" with the SSH user, then Add host.');
+  showHostStatus('info',I18N.t('hosts.prefilled','Prefilled — replace "user" with the SSH user, then Add host.'));
 }
 function renderChecks(checks, hostName){
   // We can only run-on-remote once SSH is reachable. If the connect check
@@ -3187,7 +3187,7 @@ function renderHostBar(){
     const label = h.is_local ? (h.label || I18N.t('host.local','Local')) : h.name;
     return `<button class="hpill ${h.name===CURRENT_HOST?'on':''}" data-h="${esc(h.name)}">
       <span class="pdot ${dot}"></span><span>${esc(label)}</span></button>`;
-  }).join('') + `<button class="hpill add" id="hpill_add" title="Manage hosts">+ Add host</button>`;
+  }).join('') + `<button class="hpill add" id="hpill_add" title="${I18N.t('hostbar.manage','Manage hosts')}">${I18N.t('hostbar.add','+ Add host')}</button>`;
   bar.querySelectorAll('.hpill[data-h]').forEach(b => b.onclick = () => setHost(b.dataset.h));
   document.getElementById('hpill_add').onclick = () => showTab('hosts');
 }
@@ -4104,13 +4104,20 @@ initTheme();
 })();
 document.addEventListener('lang:changed', ()=>{
   // Re-render whatever is on screen so JS-built strings pick up the new locale.
+  // (Static markup is handled by I18N.hydrate(); this covers the JS-rendered views,
+  // including ones that may have rendered in English before the locale fetch landed.)
   const safe = fn => { try{ fn(); }catch(e){} };
-  safe(buildNav); safe(applyTheme);
-  safe(()=>{ if(typeof D!=='undefined' && D) renderData(); });
-  safe(()=>{ if(typeof renderHealth==='function') renderHealth(); });
+  safe(buildNav); safe(applyTheme); safe(buildLangSwitch);
+  safe(()=>{ if(typeof FLEET!=='undefined' && FLEET) renderFleet(); });   // host bar + fleet table
+  safe(()=>{ if(typeof D!=='undefined' && D) renderData(); });           // GPU / containers / system / models
+  safe(()=>{ if(typeof HH!=='undefined' && HH) renderHealth(); });       // overview / diagnostics / KPIs
   if(TAB==='services')    safe(()=>renderServicesTab());
   if(TAB==='experiments') safe(()=>renderExperiments(true));
   if(TAB==='costs')       safe(()=>renderCosts(true));
+  if(TAB==='network')     safe(()=>renderNetwork());
+  if(TAB==='security')    safe(()=>renderSecurity());
+  if(TAB==='hosts')       safe(()=>loadHosts());
+  if(TAB==='disks')       safe(()=>{ const r=document.getElementById('disksbody'); if(r) r.dataset.sig=''; renderDisksTab(); });
 });
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();

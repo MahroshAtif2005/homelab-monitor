@@ -26,7 +26,7 @@
       "diag.lbl.nvidia",
       "diag.lbl.dbus"
     ],
-    "coverage": 0.9637
+    "coverage": 0.9639
   },
   "nav.group.monitoring": "监控",
   "nav.group.ai": "AI",
@@ -54,7 +54,7 @@
   "sidebar.issue": "反馈",
   "sidebar.issue_title": "报告缺陷或请求功能",
   "sidebar.cta_pre": "如果它对你的家庭实验室有帮助，一个 ⭐ 也能反过来帮到我。",
-  "sidebar.cta_post_html": "感谢加星！有想法或发现缺陷？<a href=\"{issuesUrl}\" target=\"_blank\" rel=\"noopener\">提交 issue</a>。",
+  "sidebar.cta_post_html": "感谢加星！有想法或发现缺陷？<a href=\"https://github.com/SikamikanikoBG/homelab-monitor/issues/new/choose\" target=\"_blank\" rel=\"noopener\">提交 issue</a>。",
   "sidebar.discord": "加入 Discord",
   "sidebar.discord_title": "加入 HomeLab Monitor 的 Discord 社区 — 交流、分享想法、获取帮助",
   "sidebar.social_aria": "社区与社交",
@@ -578,5 +578,8 @@
   "diag.lbl.dbus": "systemd D-Bus",
   "diag.lbl.data": "历史存储",
   "diag.lbl.host_metrics": "主机指标",
-  "diag.lbl.proc": "主机可读 (WMI)"
+  "diag.lbl.proc": "主机可读 (WMI)",
+  "hostbar.manage": "管理主机",
+  "hostbar.add": "+ 添加主机",
+  "hosts.prefilled": "已预填 — 将 \"user\" 替换为 SSH 用户名，然后点击“添加主机”。"
 }

@@ -31,7 +31,7 @@
   "sidebar.issue": "Issue",
   "sidebar.issue_title": "Report a bug or request a feature",
   "sidebar.cta_pre": "If it helps your homelab, a ⭐ helps mine back.",
-  "sidebar.cta_post_html": "Thanks for the star! Got an idea or a bug? <a href=\"{issuesUrl}\" target=\"_blank\" rel=\"noopener\">Open an issue</a>.",
+  "sidebar.cta_post_html": "Thanks for the star! Got an idea or a bug? <a href=\"https://github.com/SikamikanikoBG/homelab-monitor/issues/new/choose\" target=\"_blank\" rel=\"noopener\">Open an issue</a>.",
   "sidebar.discord": "Join the Discord",
   "sidebar.discord_title": "Join the HomeLab Monitor community on Discord — chat, share ideas, get help",
   "sidebar.social_aria": "Community and social",
@@ -555,5 +555,8 @@
   "diag.lbl.dbus": "systemd D-Bus",
   "diag.lbl.data": "History storage",
   "diag.lbl.host_metrics": "Host metrics",
-  "diag.lbl.proc": "Host readable (WMI)"
+  "diag.lbl.proc": "Host readable (WMI)",
+  "hostbar.manage": "Manage hosts",
+  "hostbar.add": "+ Add host",
+  "hosts.prefilled": "Prefilled — replace \"user\" with the SSH user, then Add host."
 }
