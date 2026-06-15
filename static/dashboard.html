@@ -2424,7 +2424,7 @@ async function startSelfUpdate(){
   if(!confirm('Update to v'+latest+' now?\n\nThe monitor will pull the new image and restart itself. The dashboard will be briefly unavailable, then reload automatically. If the new version fails its health-check it rolls back to the current one.')) return;
   btn.disabled = true; btn.textContent = 'Updating…';
   document.getElementById('updselflog').hidden = false;
-  selfUpdateStatus('info', 'Starting the update…');
+  selfUpdateStatus('info', I18N.t('toast.update_starting','Starting the update…'));
   try{
     const r = await fetch('/api/update/app', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
     const j = await r.json().catch(()=>({}));
@@ -2453,7 +2453,7 @@ function pollSelfUpdate(){
       // Expected while the container is mid-restart — keep retrying until the deadline.
       if(Date.now() > deadline){
         clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-        selfUpdateStatus('warning', 'Lost contact with the monitor while it restarted. Reload the page to check its status.');
+        selfUpdateStatus('warning', I18N.t('toast.update_lost_contact','Lost contact with the monitor while it restarted. Reload the page to check its status.'));
       }
       return;
     }
@@ -2465,7 +2465,7 @@ function pollSelfUpdate(){
       setTimeout(()=>location.reload(), 2500);
     } else if(state === 'failed'){
       clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-      selfUpdateStatus('critical', (st.error||'Update failed.')+' The current version is still running.');
+      selfUpdateStatus('critical', (st.error||I18N.t('toast.update_failed','Update failed.'))+' The current version is still running.');
       document.getElementById('updnowbtn').disabled = false;
       document.getElementById('updnowbtn').textContent = '⬆ Update now';
     } else if(state === 'rolled_back'){
@@ -2474,11 +2474,11 @@ function pollSelfUpdate(){
       document.getElementById('updnowbtn').disabled = false;
       document.getElementById('updnowbtn').textContent = '⬆ Update now';
     } else {
-      selfUpdateStatus('info', state==='restarting' ? 'Restarting on the new version…' : 'Working…');
+      selfUpdateStatus('info', state==='restarting' ? I18N.t('toast.update_restarting','Restarting on the new version…') : I18N.t('toast.update_working','Working…'));
     }
     if(Date.now() > deadline && SELF_UPDATE_POLL){
       clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-      selfUpdateStatus('warning', 'Still working after 3 minutes — reload the page to check its status.');
+      selfUpdateStatus('warning', I18N.t('toast.update_slow','Still working after 3 minutes — reload the page to check its status.'));
     }
   }, 2000);
 }
@@ -2690,10 +2690,10 @@ async function saveAlerts(){
   document.getElementById('al_telegram_token').value='';
   const mtok=document.getElementById('al_mlflow_token'); if(mtok) mtok.value='';
   await loadAlerts();
-  showAlertStatus('ok','Settings saved.');
+  showAlertStatus('ok',I18N.t('toast.settings_saved','Settings saved.'));
 }
 async function testAlerts(){
-  showAlertStatus('info','Sending test alert…');
+  showAlertStatus('info',I18N.t('toast.sending_test','Sending test alert…'));
   let j; try{ j=await(await fetch('/api/notify/test',{method:'POST'})).json(); }
   catch(e){ showAlertStatus('critical','Test failed: '+e); return; }
   if(j.ok){
@@ -2715,14 +2715,14 @@ function hideBackupStatus(){
   if(el) el.style.display='none';
 }
 function downloadBackup(){
-  showBackupStatus('info','Preparing backup…');
+  showBackupStatus('info',I18N.t('toast.preparing_backup','Preparing backup…'));
   window.location.href='/api/backup';
-  setTimeout(()=>showBackupStatus('ok','Download started — check your browser downloads.'), 800);
+  setTimeout(()=>showBackupStatus('ok',I18N.t('toast.download_started','Download started — check your browser downloads.')), 800);
 }
 async function restoreBackup(file){
   if(!file) return;
-  if(!confirm('Restore replaces ALL current database contents (history, alerts, hosts). Continue?')) return;
-  showBackupStatus('info','Restoring backup…');
+  if(!confirm(I18N.t('confirm.restore','Restore replaces ALL current database contents (history, alerts, hosts). Continue?'))) return;
+  showBackupStatus('info',I18N.t('toast.restoring_backup','Restoring backup…'));
   const body=new FormData();
   body.append('backup', file);
   let j;
@@ -2870,7 +2870,7 @@ function beginEditHost(name){
        body: JSON.stringify({ssh_target: v})})).json(); }
     catch(e){ showHostStatus('critical','Edit failed: '+e); await loadHosts(); return; }
     if(!j.ok){ showHostStatus('critical', j.error || 'Edit failed.'); await loadHosts(); return; }
-    showHostStatus('ok','Updated — re-running Test.');
+    showHostStatus('ok',I18N.t('toast.host_updated','Updated — re-running Test.'));
     await loadHosts();
     testHost(name);
   };
@@ -2998,14 +2998,14 @@ const KNOWN_HOSTS_PATH = '/data/.ssh/known_hosts';
 async function addHost(){
   const name   = document.getElementById('h_name').value.trim();
   const target = document.getElementById('h_target').value.trim();
-  if(!name || !target){ showHostStatus('warning','Name and SSH target are both required.'); return; }
+  if(!name || !target){ showHostStatus('warning',I18N.t('toast.host_fields_required','Name and SSH target are both required.')); return; }
   let j; try{ j = await(await fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},
     body: JSON.stringify({name, ssh_target: target})})).json(); }
   catch(e){ showHostStatus('critical','Add failed: '+e); return; }
   if(!j.ok){ showHostStatus('critical', j.error || 'Add failed.'); return; }
   document.getElementById('h_name').value='';
   document.getElementById('h_target').value='';
-  showHostStatus('ok','Host added — hit Test to check connectivity.');
+  showHostStatus('ok',I18N.t('toast.host_added','Host added — hit Test to check connectivity.'));
   await loadHosts();
 }
 async function testHost(name){
@@ -3111,7 +3111,7 @@ function renderRunResult(panel, host, j){
   panel.appendChild(result);
   panel.querySelector('.hbtn-retest').onclick = () => { panel.remove(); testHost(host); };
   panel.querySelector('.hbtn-close').onclick  = () => panel.remove();
-  if(ok){ showHostStatus('ok','Command ran successfully — re-test to confirm the fix.'); }
+  if(ok){ showHostStatus('ok',I18N.t('toast.cmd_ok','Command ran successfully — re-test to confirm the fix.')); }
 }
 async function deleteHost(name){
   if(!confirm(`Remove host '${name}'? (history isn't deleted; only the registration.)`)) return;
@@ -4448,7 +4448,7 @@ async function loadIntegrations(){
   if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)`;
 }
 async function deleteKey(id){
-  if(!confirm('Revoke this API key? Any client still using it will stop working immediately.')) return;
+  if(!confirm(I18N.t('confirm.revoke_key','Revoke this API key? Any client still using it will stop working immediately.'))) return;
   try{ await fetch('/api/integration/keys/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){ intgStatus('err','Failed: '+e); return; }
   intgStatus('ok','Key revoked.'); loadIntegrations();
 }

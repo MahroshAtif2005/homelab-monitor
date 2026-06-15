@@ -189,5 +189,22 @@
   "os.winadmin": "Windows (admin user)",
   "header.host_label": "Host:",
   "host.local": "Local",
-  "fleet.loading": "Loading fleet…"
+  "fleet.loading": "Loading fleet…",
+  "toast.settings_saved": "Settings saved.",
+  "toast.sending_test": "Sending test alert…",
+  "toast.preparing_backup": "Preparing backup…",
+  "toast.download_started": "Download started — check your browser downloads.",
+  "toast.restoring_backup": "Restoring backup…",
+  "toast.update_starting": "Starting the update…",
+  "toast.update_lost_contact": "Lost contact with the monitor while it restarted. Reload the page to check its status.",
+  "toast.update_slow": "Still working after 3 minutes — reload the page to check its status.",
+  "toast.update_restarting": "Restarting on the new version…",
+  "toast.update_working": "Working…",
+  "toast.update_failed": "Update failed.",
+  "toast.host_fields_required": "Name and SSH target are both required.",
+  "toast.host_added": "Host added — hit Test to check connectivity.",
+  "toast.cmd_ok": "Command ran successfully — re-test to confirm the fix.",
+  "toast.host_updated": "Updated — re-running Test.",
+  "confirm.restore": "Restore replaces ALL current database contents (history, alerts, hosts). Continue?",
+  "confirm.revoke_key": "Revoke this API key? Any client still using it will stop working immediately."
 }
