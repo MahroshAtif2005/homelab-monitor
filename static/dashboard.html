@@ -745,7 +745,7 @@ h2 .hic{ opacity:.9 }
             <th data-i18n="col.load1m">Load 1m</th><th data-i18n="col.uptime">Uptime</th><th data-i18n="col.temp">Temp</th><th data-i18n="col.disks">Disks</th>
           </tr>
         </thead>
-        <tbody><tr><td colspan="11" class="muted" style="padding:14px">Loading fleet…</td></tr></tbody>
+        <tbody><tr><td colspan="11" class="muted" style="padding:14px" data-i18n="fleet.loading">Loading fleet…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1739,23 +1739,23 @@ async function loadData(){
   if(TAB==='disks') renderDisksTab();   // populate/refresh disk cards (sig-guarded; won't wipe a scan)
 }
 function fmtMcpAge(sec){
-  if(sec < 60) return sec + 's ago';
-  if(sec < 3600) return Math.floor(sec / 60) + 'm ago';
-  return Math.floor(sec / 3600) + 'h ago';
+  if(sec < 60) return I18N.tf('time.ago_s','{n}s ago',{n:sec});
+  if(sec < 3600) return I18N.tf('time.ago_m','{n}m ago',{n:Math.floor(sec / 60)});
+  return I18N.tf('time.ago_h','{n}h ago',{n:Math.floor(sec / 3600)});
 }
 function renderMcpPill(s){
   const el = document.getElementById('mcppill');
   if(!el) return;
   if(!s || !s.enabled || s.state === 'off'){ el.hidden = true; return; }
   el.hidden = false;
-  const labels = {active: 'MCP active', idle: 'MCP idle', down: 'MCP down'};
-  el.textContent = labels[s.state] || 'MCP';
+  const labels = {active: I18N.t('mcp.active','MCP active'), idle: I18N.t('mcp.idle','MCP idle'), down: I18N.t('mcp.down','MCP down')};
+  el.textContent = labels[s.state] || I18N.t('header.mcp_pill','MCP');
   el.className = 'mcp-pill ' + (s.state || 'idle');
   const tip = [];
-  if(s.last_activity_age_s != null) tip.push('Last activity: ' + fmtMcpAge(s.last_activity_age_s));
-  else tip.push('Last activity: never');
-  if(s.active_requests > 0) tip.push('Active requests: ' + s.active_requests);
-  if(s.port) tip.push('Port ' + s.port);
+  const _age = s.last_activity_age_s != null ? fmtMcpAge(s.last_activity_age_s) : I18N.t('time.never','never');
+  tip.push(I18N.tf('mcp.last_activity','Last activity: {v}',{v:_age}));
+  if(s.active_requests > 0) tip.push(I18N.tf('mcp.active_requests','Active requests: {n}',{n:s.active_requests}));
+  if(s.port) tip.push(I18N.tf('mcp.port','Port {n}',{n:s.port}));
   el.title = tip.join(' · ');
 }
 async function loadHealth(){
@@ -2770,12 +2770,12 @@ function showHostStatus(level, text){
   setTimeout(()=>{el.style.display='none';}, 6000);
 }
 function relTime(ts){
-  if(!ts) return 'never tested';
+  if(!ts) return I18N.t('time.never_tested','never tested');
   const s = Math.max(1, Math.round(Date.now()/1000 - ts));
-  if(s<60) return s+'s ago';
-  if(s<3600) return Math.round(s/60)+'m ago';
-  if(s<86400) return Math.round(s/3600)+'h ago';
-  return Math.round(s/86400)+'d ago';
+  if(s<60) return I18N.tf('time.ago_s','{n}s ago',{n:s});
+  if(s<3600) return I18N.tf('time.ago_m','{n}m ago',{n:Math.round(s/60)});
+  if(s<86400) return I18N.tf('time.ago_h','{n}h ago',{n:Math.round(s/3600)});
+  return I18N.tf('time.ago_d','{n}d ago',{n:Math.round(s/86400)});
 }
 let KEY_CMDS = {};
 const KEY_OS = [['linux','Linux / macOS'],['windows','Windows (standard user)'],['winadmin','Windows (admin user)']];
@@ -2783,7 +2783,7 @@ function renderKeyChooser(sel){
   const bar = document.getElementById('key_os');
   if(bar){
     bar.innerHTML = KEY_OS.map(([k,l]) =>
-      `<button class="osvar${k===sel?' on':''}" type="button" data-k="${k}">${l}</button>`).join('');
+      `<button class="osvar${k===sel?' on':''}" type="button" data-k="${k}">${I18N.t('os.'+k, l)}</button>`).join('');
     bar.querySelectorAll('.osvar').forEach(b => b.onclick = () => renderKeyChooser(b.dataset.k));
   }
   const box = document.getElementById('key_cmd');
@@ -3183,10 +3183,10 @@ function renderHostBar(){
   const hosts = FLEET.hosts || [];
   // If CURRENT_HOST no longer exists (was deleted), fall back to local.
   if(!hosts.some(h => h.name === CURRENT_HOST)) CURRENT_HOST = 'local';
-  bar.innerHTML = `<span class="label">Host:</span>` + hosts.map(h => {
+  bar.innerHTML = `<span class="label">${I18N.t('header.host_label','Host:')}</span>` + hosts.map(h => {
     const dot = h.is_local ? 'ok' : statusOfFleetRow(h)==='online' ? 'ok' :
                 statusOfFleetRow(h)==='warn' ? 'warn' : 'fail';
-    const label = h.is_local ? (h.label || 'Local') : h.name;
+    const label = h.is_local ? (h.label || I18N.t('host.local','Local')) : h.name;
     return `<button class="hpill ${h.name===CURRENT_HOST?'on':''}" data-h="${esc(h.name)}">
       <span class="pdot ${dot}"></span><span>${esc(label)}</span></button>`;
   }).join('') + `<button class="hpill add" id="hpill_add" title="Manage hosts">+ Add host</button>`;
