@@ -407,6 +407,10 @@ body{background:var(--canvas)}
 .themeswitch{display:flex;border:1px solid var(--bd);border-radius:6px;overflow:hidden}
 .themeswitch button{border:0;border-right:1px solid var(--bd);background:var(--card);color:var(--mut);font:inherit;font-size:11px;padding:4px 9px;cursor:pointer}
 .themeswitch button:last-child{border-right:0}.themeswitch button.on{background:var(--hover);color:var(--tx);font-weight:600}
+/* language switcher (i18n #148) — sits in the footer next to the theme controls */
+.langswitch{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
+.langswitch select{border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);font:inherit;font-size:11px;padding:3px 6px;cursor:pointer}
+.langswitch select:hover{border-color:var(--mut)}
 .main{min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:8px;padding:9px 16px;border-bottom:1px solid var(--bd);background:var(--canvas);flex-wrap:wrap;position:sticky;top:0;z-index:6}
 .topbar .envlbl{color:var(--mut);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
@@ -654,7 +658,7 @@ h2 .hic{ opacity:.9 }
 .subtabs{ gap:2px }
 </style></head><body><div class="app"><aside class="side" id="sidebar"></aside><main class="main"><div class="topbar" id="topbar"></div><div class="content">
 <header><h1><img class="brandlogo" src="/static/logo.svg" alt="" width="26" height="26"> HomeLab Monitor</h1><span class="ver" id="ver">v…</span>
-<button type="button" class="upd" id="updbadge" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> available</button>
+<button type="button" class="upd" id="updbadge" data-i18n-attr="title:header.update_title" title="A newer release is available — click for details">⬆ <span id="updlatest">v…</span> <span data-i18n="header.update_available">available</span></button>
 <button type="button" class="upd osupd" id="osupdbadge" title="One or more machines have OS/kernel updates pending — click for details">⬆ <span id="osupdtext">updates</span></button>
 <span class="live"><span id="mcppill" class="mcp-pill" hidden>MCP</span><span class="pulse"></span><span id="lastup">connecting…</span></span></header>
 <p class="sub">One small container for your home lab — GPU &amp; local-AI, Docker containers, systemd services and host health, all on one page. Everything is discovered automatically; nothing is hardcoded.</p>
@@ -674,16 +678,16 @@ h2 .hic{ opacity:.9 }
 <div class="card" id="controls" hidden><div class="ranges">
 <button class="rb" data-r="1h">1h</button><button class="rb" data-r="6h">6h</button><button class="rb" data-r="24h">24h</button>
 <button class="rb" data-r="7d">7d</button><button class="rb" data-r="30d">30d</button><button class="rb" data-r="all">All</button>
-<span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> auto-refresh</label>
+<span class="spacer"></span><label class="tg"><input type="checkbox" id="auto" checked> <span data-i18n="range.autorefresh">auto-refresh</span></label>
 </div>
 <span class="ctrl-spring"></span>
 <div class="sharewrap" id="sharewrap">
-  <button class="sharebtn" id="sharebtn" type="button" aria-haspopup="true" aria-expanded="false" title="Snapshot or share this view">
+  <button class="sharebtn" id="sharebtn" type="button" aria-haspopup="true" aria-expanded="false" data-i18n-attr="title:share.button_title" title="Snapshot or share this view">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 16a3 3 0 0 0-2.3 1.1l-6.8-3.9a3 3 0 0 0 0-2.4l6.8-3.9A3 3 0 1 0 15 4l-.1.5-6.8 3.9a3 3 0 1 0 0 5.2l6.8 3.9.1.5A3 3 0 1 0 18 16z"/></svg>
-    Share<span class="caret">▾</span>
+    <span data-i18n="share.button">Share</span><span class="caret">▾</span>
   </button>
   <div class="sharepop" id="sharepop" role="dialog" aria-label="Share this view">
-    <h3>Share this view <button class="x" id="sharex" type="button" aria-label="Close">×</button></h3>
+    <h3><span data-i18n="share.title">Share this view</span> <button class="x" id="sharex" type="button" data-i18n-attr="aria-label:share.close" aria-label="Close">×</button></h3>
     <div class="shareprev" id="shareprev"><div class="ph"><div class="spin"></div>Rendering snapshot…</div></div>
     <div class="sharefn" id="sharefn">&nbsp;</div>
     <div class="shareact">
@@ -712,14 +716,14 @@ h2 .hic{ opacity:.9 }
     <p class="cap" id="ai-band-cap"></p>
   </div>
   <div class="card" id="diagcard" hidden>
-    <h2>🩺 Setup &amp; requirements</h2>
+    <h2 data-i18n="diag.title">🩺 Setup &amp; requirements</h2>
     <div class="fleet-meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
     <div style="overflow-x:auto">
       <table class="sectbl" style="margin-top:10px"><thead><tr><th>Requirement</th><th>Status</th><th>Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
     </div>
   </div>
   <div class="card" id="mcpcard">
-    <h2>AI agent (MCP)</h2>
+    <h2 data-i18n="mcp.title">AI agent (MCP)</h2>
     <div class="fleet-meta">A read-only <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP</a> server is built in, so Claude — or any MCP client — can connect and explore this homelab with full dashboard parity. <span id="mcpstatus"></span></div>
     <div id="mcpconn" style="margin-top:10px" hidden>
       <div class="muted">Connect with the Claude CLI (then ask it about your fleet):</div>
@@ -731,7 +735,7 @@ h2 .hic{ opacity:.9 }
     </div>
   </div>
   <div class="card">
-    <h2>🖥 All hosts</h2>
+    <h2 data-i18n="fleet.title">🖥 All hosts</h2>
     <div class="fleet-meta" id="fleet_meta">Every registered host at a glance. Click a row to focus that host in the other tabs.</div>
     <div style="overflow-x:auto">
       <table class="fleet-tbl" id="fleet_tbl">
@@ -751,25 +755,25 @@ h2 .hic{ opacity:.9 }
 <section data-tab="gpu" hidden>
   <div id="gpu-throttle" class="ins crit" style="display:none;margin-bottom:14px"></div>
   <div class="cols">
-    <div class="card"><h2>🎮 GPU right now</h2>
+    <div class="card"><h2 data-i18n="gpu.now_title">🎮 GPU right now</h2>
       <div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
       <div id="gpu-detail" class="gpu-detail"></div>
       <div style="margin:14px 0 6px" class="muted" >VRAM allocation</div>
       <div class="bar" id="vrambar"></div>
       <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
     </div>
-    <div class="card"><h2>📋 Services on the GPU (selected range)</h2>
+    <div class="card"><h2 data-i18n="gpu.services_title">📋 Services on the GPU (selected range)</h2>
       <table><thead><tr><th>Service</th><th>Peak</th><th>Avg</th><th>% time</th></tr></thead><tbody id="sumtbl"></tbody></table>
     </div>
   </div>
-  <div class="card" id="pergpu-card" hidden><h2>🎮 Per-GPU</h2>
+  <div class="card" id="pergpu-card" hidden><h2 data-i18n="gpu.pergpu_title">🎮 Per-GPU</h2>
     <div id="pergpu"></div>
     <p class="cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
   </div>
-  <div class="card"><h2>📊 VRAM by service over time</h2>
+  <div class="card"><h2 data-i18n="gpu.vram_title">📊 VRAM by service over time</h2>
     <div class="chartbox"><canvas id="vram"></canvas></div>
     <p class="cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
-  <div class="card"><h2>⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
+  <div class="card"><h2 data-i18n="gpu.util_title">⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
 </section>
 
 <!-- ───────── Costs ───────── -->
@@ -786,7 +790,7 @@ h2 .hic{ opacity:.9 }
     </div>
   </div>
   <div class="card" id="costs-breakdown-card" hidden>
-    <h2>🧾 Breakdown by process / container / model</h2>
+    <h2 data-i18n="costs.breakdown_title">🧾 Breakdown by process / container / model</h2>
     <table><thead><tr>
       <th data-sort="name">Name</th><th data-sort="kind">Kind</th>
       <th data-sort="avg_w">Avg W</th><th data-sort="energy_kwh">Energy</th><th data-sort="cost">Cost</th>
@@ -827,7 +831,7 @@ h2 .hic{ opacity:.9 }
     <h2 id="run-detail-title">Run</h2>
     <div id="run-detail-meta" class="cap"></div>
     <div id="run-metric-charts"></div>
-    <h2 style="margin-top:6px;font-size:13px">⚡ GPU power &amp; utilisation during this run</h2>
+    <h2 style="margin-top:6px;font-size:13px" data-i18n="exp.run_resource_title">⚡ GPU power &amp; utilisation during this run</h2>
     <div class="chartbox short"><canvas id="run-resource"></canvas></div>
     <p class="cap" id="run-cost-cap"></p>
   </div>
@@ -836,12 +840,12 @@ h2 .hic{ opacity:.9 }
     <div id="train-body"></div>
   </div>
   <div class="card" id="devtools-card" hidden>
-    <h2>🧰 Notebooks &amp; tools</h2>
+    <h2 data-i18n="exp.devtools_title">🧰 Notebooks &amp; tools</h2>
     <div id="devtools-body"></div>
     <p class="cap">Auto-discovered DS/AI web tools running on the hub. A 🟡 VRAM tag means a kernel/process is holding GPU memory — often a forgotten notebook squatting on VRAM.</p>
   </div>
   <div class="card">
-    <h2>📈 GPU activity sessions</h2>
+    <h2 data-i18n="exp.sessions_title">📈 GPU activity sessions</h2>
     <div class="grid" id="sess-kpis"></div>
     <table style="margin-top:12px"><thead><tr>
       <th>Started</th><th>Duration</th><th>Peak util</th><th>Peak VRAM</th><th>Avg power</th><th>Energy</th><th>Cost</th>
@@ -852,7 +856,7 @@ h2 .hic{ opacity:.9 }
 
 <!-- ───────── Containers ───────── -->
 <section data-tab="containers" hidden>
-  <div class="card"><h2>📦 Docker containers</h2>
+  <div class="card"><h2 data-i18n="containers.title">📦 Docker containers</h2>
     <div class="grid" id="ctkpis"></div>
     <table style="margin-top:14px"><thead><tr>
       <th>Container</th><th>State</th>
@@ -1104,7 +1108,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <!-- ───────── Backup (Settings) ───────── -->
 <section data-tab="backup" hidden>
   <div class="card">
-    <h2>💾 Backup &amp; Restore</h2>
+    <h2 data-i18n="backup.title">💾 Backup &amp; Restore</h2>
     <p class="cap" style="margin:-4px 0 12px">
       Export your SQLite history, events, alert settings, and host registry — or restore a snapshot after a container recreate or disk move.
       SSH keys under <code>/data/.ssh</code> are <b>not</b> included; back those up separately if needed.</p>
@@ -1125,7 +1129,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <!-- ───────── Hosts (multi-machine monitoring — Issue #35) ───────── -->
 <section data-tab="hosts" hidden>
   <div class="card">
-    <h2>🌐 Hosts</h2>
+    <h2 data-i18n="hosts.title">🌐 Hosts</h2>
     <p class="cap" style="margin:-4px 0 14px">
       Monitor your other machines from this hub — agentless, read-only, over SSH.
       Three quick steps: authorize the hub's key on a machine, add it here, then Test.
@@ -1186,16 +1190,16 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 
 <!-- ───────── System (host detail) ───────── -->
 <section data-tab="host" hidden>
-  <div class="card"><h2>🖥️ System</h2>
+  <div class="card"><h2 data-i18n="host.title">🖥️ System</h2>
     <div class="grid" id="hostkpis"></div>
     <div id="disks" style="margin-top:14px"></div>
     <div id="sysinfo" style="margin-top:16px"></div>
   </div>
-  <div class="card" id="topproc-card" hidden><h2>🧠 Top processes</h2>
+  <div class="card" id="topproc-card" hidden><h2 data-i18n="host.topproc_title">🧠 Top processes</h2>
     <div class="topproc-grid" id="topproc"></div>
     <p class="cap" id="topproc_cap"></p>
   </div>
-  <div class="card" id="cost-card" hidden><h2>💰 Power &amp; cost</h2>
+  <div class="card" id="cost-card" hidden><h2 data-i18n="host.cost_title">💰 Power &amp; cost</h2>
     <div id="cost-disabled" class="topproc-empty" hidden>
       Set a price per kWh in <a href="#alerts" id="cost-settings-link">Settings</a> to see what your GPU costs to run.
     </div>
@@ -1205,11 +1209,11 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <p class="cap" id="cost_cap"></p>
     </div>
   </div>
-  <div class="card"><h2>🧠 Memory map — containers &amp; services</h2>
+  <div class="card"><h2 data-i18n="host.ramtree_title">🧠 Memory map — containers &amp; services</h2>
     <div id="ramtree" class="treemap"></div>
     <p class="cap" id="ramtree_cap"></p>
   </div>
-  <div class="card"><h2>🖥️ CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
+  <div class="card"><h2 data-i18n="host.cpuram_title">🖥️ CPU, RAM &amp; load</h2><div class="chartbox short"><canvas id="host"></canvas></div></div>
 </section>
 
 <!-- ───────── Disks (WizTree-style usage treemaps) ───────── -->
@@ -1219,23 +1223,23 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 
 <!-- ───────── Network ───────── -->
 <section data-tab="network" hidden>
-  <div class="card" id="netio-card" hidden><h2>📶 Throughput</h2>
+  <div class="card" id="netio-card" hidden><h2 data-i18n="net.throughput_title">📶 Throughput</h2>
     <div class="grid" id="netio-kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
     <div class="chartbox short" style="margin-top:12px"><canvas id="netchart"></canvas></div>
     <p class="cap" id="netio_cap"></p>
   </div>
-  <div class="card" id="nettalkers-card" hidden><h2>📊 Top talkers — containers</h2>
+  <div class="card" id="nettalkers-card" hidden><h2 data-i18n="net.talkers_title">📊 Top talkers — containers</h2>
     <table><thead><tr><th>Container</th><th>In</th><th>Out</th><th>Total</th></tr></thead><tbody id="nettalkers"></tbody></table>
     <p class="cap">Total bytes each container moved over the selected range (its own network namespace).</p>
   </div>
-  <div class="card"><h2>🌐 Network</h2>
+  <div class="card"><h2 data-i18n="net.title">🌐 Network</h2>
     <div id="netbody"></div>
   </div>
 </section>
 
 <!-- ───────── Security ───────── -->
 <section data-tab="security" hidden>
-  <div class="card"><h2>🛡️ Security</h2>
+  <div class="card"><h2 data-i18n="security.title">🛡️ Security</h2>
     <div id="secbody"></div>
     <p class="cap" style="margin-top:12px">Read-only, agentless — no changes are made to any host. Items shown in grey
        (⚪) couldn't be read without elevated privileges on that machine.</p>
@@ -1333,6 +1337,148 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
   </aside>
 </div>
 <script>
+// ── i18n (issue #148) ─────────────────────────────────────────────────────────
+// Dependency-free, English-default-inline. The English path needs NO locale file
+// and renders synchronously — every t(key, 'English') returns its inline English
+// until a locale is loaded, and static markup keeps its English text alongside a
+// data-i18n="key" attribute. So an un-translated (or half-translated) UI degrades
+// to English, never to raw keys, and English behaviour is unchanged.
+// Only a non-English locale triggers a fetch of /locales/<code>.json + a re-render.
+// Locale files are the single source of truth — shared with the server-side
+// notifier (PR 2) and the translator workflow (scripts/i18n-sync.py).
+//
+// Opt markup in with:
+//   data-i18n="key"            → textContent (keeps any leading emoji for applyIcons)
+//   data-i18n-html="key"       → innerHTML  (strings containing inline markup/links)
+//   data-i18n-attr="title:key;placeholder:key2"  → attributes
+const I18N = {
+  locale: 'en',
+  dict: {},                 // active non-English strings ({} for English)
+  available: [{code:'en', name:'English', nativeName:'English', dir:'ltr'}],
+  COVERAGE_MIN: 0.9,        // a locale must translate ≥90% of its keys to appear in the switcher
+  KNOWN: ['zh-CN'],         // non-English locale files to probe (mirror scripts/i18n-sync.py)
+  debug: new URLSearchParams(location.search).has('i18n'),
+
+  t(key, fallback){
+    const v = this.dict[key];
+    if(v != null && v !== '') return v;
+    return fallback != null ? fallback : key;
+  },
+  // interpolating variant: tf('k','{n} left',{n:3})
+  tf(key, fallback, vars){
+    let s = this.t(key, fallback);
+    if(vars) for(const k in vars) s = s.split('{'+k+'}').join(vars[k]);
+    return s;
+  },
+  saved(){ return localStorage.getItem('hl_lang') || 'en'; },
+
+  // Coverage = fraction of keys actually translated. A scaffold straight from
+  // i18n-sync.py lists still-English keys in _meta.untranslated, so an unfinished
+  // translation reports low coverage and stays hidden (no half-Chinese UI shipped).
+  _coverage(d){
+    const todo = (d._meta && d._meta.untranslated) || [];
+    const keys = Object.keys(d).filter(k => k !== '_meta');
+    if(!keys.length) return 0;
+    return Math.max(0, (keys.length - todo.length) / keys.length);
+  },
+  async discover(){
+    for(const code of this.KNOWN){
+      try{
+        const d = await (await fetch('/locales/'+code+'.json',{cache:'no-cache'})).json();
+        const meta = d._meta || {}, cov = this._coverage(d);
+        if(this.debug || cov >= this.COVERAGE_MIN)
+          this.available.push({code, name:meta.name||code, nativeName:meta.nativeName||code,
+                               dir:meta.dir||'ltr', coverage:cov, _dict:d});
+      }catch(e){ /* missing / malformed locale — skip */ }
+    }
+  },
+  async set(code){
+    if(code==='en' || !code){ this.locale='en'; this.dict={}; }
+    else{
+      const entry = this.available.find(a=>a.code===code);
+      let d = entry && entry._dict;
+      if(!d){ try{ d = await (await fetch('/locales/'+code+'.json',{cache:'no-cache'})).json(); }catch(e){ d={}; } }
+      this.locale=code; this.dict=d||{};
+    }
+    localStorage.setItem('hl_lang', this.locale);
+    const meta = this.available.find(a=>a.code===this.locale) || {dir:'ltr'};
+    document.documentElement.lang = this.locale;
+    document.documentElement.dir  = meta.dir || 'ltr';
+    this.hydrate(document);
+    document.dispatchEvent(new CustomEvent('lang:changed',{detail:{locale:this.locale}}));
+  },
+  // Snapshot the original English of every opted-in node into data-i18n-def
+  // BEFORE applyIcons() mutates heading text (it strips the leading emoji). Run
+  // once at boot so the English fallback always carries its emoji — otherwise a
+  // round-trip through another locale would drop heading icons.
+  captureDefaults(root){
+    root = root || document;
+    root.querySelectorAll('[data-i18n]').forEach(el=>{
+      if(el.getAttribute('data-i18n-def')==null) el.setAttribute('data-i18n-def', el.textContent);
+    });
+    root.querySelectorAll('[data-i18n-html]').forEach(el=>{
+      if(el.getAttribute('data-i18n-def')==null) el.setAttribute('data-i18n-def', el.innerHTML);
+    });
+    root.querySelectorAll('[data-i18n-attr]').forEach(el=>{
+      el.getAttribute('data-i18n-attr').split(';').forEach(pair=>{
+        const idx = pair.indexOf(':'); if(idx<0) return;
+        const attr = pair.slice(0,idx).trim(); if(!attr) return;
+        const defAttr = 'data-i18n-def-'+attr;
+        if(el.getAttribute(defAttr)==null) el.setAttribute(defAttr, el.getAttribute(attr) ?? '');
+      });
+    });
+  },
+  hydrate(root){
+    root = root || document;
+    root.querySelectorAll('[data-i18n]').forEach(el=>{
+      const def = el.getAttribute('data-i18n-def') ?? el.textContent;
+      el.setAttribute('data-i18n-def', def);              // remember English once
+      el.textContent = this.t(el.getAttribute('data-i18n'), def);
+      el.removeAttribute('data-ic');                       // let applyIcons re-run after the swap
+    });
+    root.querySelectorAll('[data-i18n-html]').forEach(el=>{
+      const def = el.getAttribute('data-i18n-def') ?? el.innerHTML;
+      el.setAttribute('data-i18n-def', def);
+      el.innerHTML = this.t(el.getAttribute('data-i18n-html'), def);
+    });
+    root.querySelectorAll('[data-i18n-attr]').forEach(el=>{
+      el.getAttribute('data-i18n-attr').split(';').forEach(pair=>{
+        const idx = pair.indexOf(':'); if(idx<0) return;
+        const attr = pair.slice(0,idx).trim(), key = pair.slice(idx+1).trim();
+        if(!attr||!key) return;
+        const defAttr = 'data-i18n-def-'+attr;
+        const def = el.getAttribute(defAttr) ?? el.getAttribute(attr) ?? '';
+        el.setAttribute(defAttr, def);
+        el.setAttribute(attr, this.t(key, def));
+      });
+    });
+    if(typeof applyIcons==='function') applyIcons(root);   // re-iconify headings after the text swap
+    if(this.debug) this._markUntranslated(root);
+  },
+  // Dev aid (append ?i18n to the URL): outline any opted-in node still showing English.
+  _markUntranslated(root){
+    (root||document).querySelectorAll('[data-i18n],[data-i18n-html]').forEach(el=>{
+      const key = el.getAttribute('data-i18n') || el.getAttribute('data-i18n-html');
+      const ok = this.locale==='en' || (this.dict[key]!=null && this.dict[key]!=='');
+      el.style.outline = ok ? '' : '2px dashed #f85149';
+      if(!ok) el.title = 'i18n: missing "'+key+'" for '+this.locale;
+    });
+  },
+};
+function buildLangSwitch(){
+  const foot = document.getElementById('foot'); if(!foot) return;
+  if(I18N.available.length < 2 && !I18N.debug){            // nothing to switch to → ship no lonely control
+    const ex = document.getElementById('langswitch'); if(ex) ex.remove(); return;
+  }
+  let wrap = document.getElementById('langswitch');
+  if(!wrap){ wrap = document.createElement('div'); wrap.id='langswitch'; wrap.className='langswitch'; foot.appendChild(wrap); }
+  wrap.innerHTML = '<span class="thicon" aria-hidden="true">🌐</span>'
+    + '<select id="langsel" aria-label="'+I18N.t('footer.lang.label','Language')+'">'
+    + I18N.available.map(a=>`<option value="${a.code}"${a.code===I18N.locale?' selected':''}>${a.nativeName}</option>`).join('')
+    + '</select>';
+  document.getElementById('langsel').onchange = async e => { await I18N.set(e.target.value); buildNav(); buildLangSwitch(); };
+}
+
 // ── Tab registry. Add a monitor: append one entry here + a matching <section
 //    data-tab="..."> above + a render in renderData()/renderHealth(). ──────────
 const TABS = [
@@ -1461,7 +1607,7 @@ function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86
 // ── Tab navigation ────────────────────────────────────────────────────────────
 // rev6: nav rows live in a grouped sidebar (Monitoring / AI / Settings), always
 // visible — no gear drawer. tdot = per-section attention square (set in renderHealth).
-const tabBtn = t => `<button class="nrow" data-t="${t.id}"><span>${t.label}</span><span class="tdot" id="ndot-${t.id}" style="display:none"></span></button>`;
+const tabBtn = t => `<button class="nrow" data-t="${t.id}"><span>${I18N.t('nav.'+t.id, t.label)}</span><span class="tdot" id="ndot-${t.id}" style="display:none"></span></button>`;
 const isSettingsTab = id => !!(TABS.find(t=>t.id===id)||{}).settings;
 function buildNav(){
   const nl = document.getElementById('navlist'); if(!nl) return;
@@ -1472,7 +1618,9 @@ function buildNav(){
     const rows = TABS.filter(t => (t.zone||'monitoring')===z);
     return rows.length ? `<div class="navgroup">${label}</div>` + rows.map(tabBtn).join('') : '';
   };
-  nl.innerHTML = group('Monitoring','monitoring') + group('AI','ai') + group('Settings','settings');
+  nl.innerHTML = group(I18N.t('nav.group.monitoring','Monitoring'),'monitoring')
+               + group(I18N.t('nav.group.ai','AI'),'ai')
+               + group(I18N.t('nav.group.settings','Settings'),'settings');
   nl.querySelectorAll('.nrow').forEach(b => b.onclick = () => showTab(b.dataset.t));
 }
 // Drawer is gone; keep the name as a no-op so showTab() needn't change shape.
@@ -1488,20 +1636,20 @@ function mountShell(){
   const STAR_SVG  = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>';
   const GH_SVG    = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>';
   const ISSUE_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0zM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0z"/></svg>';
-  side.innerHTML = '<div class="sbrand"><button type="button" class="sbrand-link" id="homeBrand" aria-label="Go to Overview" title="Go to Overview"><span class="logo"><img src="/static/logo.svg" alt="" width="22" height="22"></span><span class="nm">HomeLab Monitor</span></button></div>'
+  side.innerHTML = '<div class="sbrand"><button type="button" class="sbrand-link" id="homeBrand" aria-label="'+I18N.t('brand.home_aria','Go to Overview')+'" title="'+I18N.t('brand.home_aria','Go to Overview')+'"><span class="logo"><img src="/static/logo.svg" alt="" width="22" height="22"></span><span class="nm">'+I18N.t('brand.name','HomeLab Monitor')+'</span></button></div>'
     + '<div class="ghbox">'
-    +   '<a class="ghstar" id="ghstar" href="'+REPO+'" target="_blank" rel="noopener" title="Star HomeLab Monitor on GitHub — it genuinely helps the project grow">'
-    +     STAR_SVG + '<span id="ghlabel">Star on GitHub</span>'
+    +   '<a class="ghstar" id="ghstar" href="'+REPO+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.star_title','Star HomeLab Monitor on GitHub — it genuinely helps the project grow')+'">'
+    +     STAR_SVG + '<span id="ghlabel">'+I18N.t('sidebar.star','Star on GitHub')+'</span>'
     +     '<span class="cnt" id="ghcount">…</span>'
     +     '<span class="sparkles" id="ghsparkles" aria-hidden="true"></span></a>'
     +   '<div class="ghlinks">'
-    +     '<a href="'+REPO+'" target="_blank" rel="noopener" title="Browse the source on GitHub">'+GH_SVG+'Repo</a>'
-    +     '<a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener" title="Report a bug or request a feature">'+ISSUE_SVG+'Issue</a>'
+    +     '<a href="'+REPO+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.repo_title','Browse the source on GitHub')+'">'+GH_SVG+I18N.t('sidebar.repo','Repo')+'</a>'
+    +     '<a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener" title="'+I18N.t('sidebar.issue_title','Report a bug or request a feature')+'">'+ISSUE_SVG+I18N.t('sidebar.issue','Issue')+'</a>'
     +   '</div>'
-    +   '<div class="star-cta cta-pre">If it helps your homelab, a ⭐ helps mine back.</div>'
-    +   '<div class="star-cta cta-post">Thanks for the star! Got an idea or a bug? <a href="'+REPO+'/issues/new/choose" target="_blank" rel="noopener">Open an issue</a>.</div>'
-    +   '<div class="social" aria-label="Community and social">'
-    +     '<a class="soc discord" href="'+DISCORD+'" target="_blank" rel="noopener" title="Join the HomeLab Monitor community on Discord — chat, share ideas, get help">'+DISCORD_SVG+'<span>Join the Discord</span></a>'
+    +   '<div class="star-cta cta-pre">'+I18N.t('sidebar.cta_pre','If it helps your homelab, a ⭐ helps mine back.')+'</div>'
+    +   '<div class="star-cta cta-post">'+I18N.tf('sidebar.cta_post_html','Thanks for the star! Got an idea or a bug? <a href="{issuesUrl}" target="_blank" rel="noopener">Open an issue</a>.',{issuesUrl:REPO+'/issues/new/choose'})+'</div>'
+    +   '<div class="social" aria-label="'+I18N.t('sidebar.social_aria','Community and social')+'">'
+    +     '<a class="soc discord" href="'+DISCORD+'" target="_blank" rel="noopener" title="'+I18N.t('sidebar.discord_title','Join the HomeLab Monitor community on Discord — chat, share ideas, get help')+'">'+DISCORD_SVG+'<span>'+I18N.t('sidebar.discord','Join the Discord')+'</span></a>'
     // more social links (LinkedIn, YouTube) drop in here as extra '.soc' anchors once those channels go live
     +   '</div>'
     + '</div>'
@@ -1517,9 +1665,9 @@ function mountShell(){
   const foot = document.getElementById('foot');
   foot.insertAdjacentHTML('beforeend',
     '<div class="footrow">'
-    + '<button class="thtoggle" id="themeBtn"><span class="thicon">☾</span><span class="thlabel">Dark</span></button>'
-    + '<button class="thtoggle" id="densityBtn">▤ Compact</button></div>'
-    + '<div class="themeswitch" id="themeswitch"><button data-th="dark">Dark</button><button data-th="light">Light</button><button data-th="system">System</button></div>');
+    + '<button class="thtoggle" id="themeBtn"><span class="thicon">☾</span><span class="thlabel">'+I18N.t('footer.theme.dark','Dark')+'</span></button>'
+    + '<button class="thtoggle" id="densityBtn">▤ <span class="dlabel">'+I18N.t('footer.density.compact','Compact')+'</span></button></div>'
+    + '<div class="themeswitch" id="themeswitch"><button data-th="dark">'+I18N.t('footer.theme.dark','Dark')+'</button><button data-th="light">'+I18N.t('footer.theme.light','Light')+'</button><button data-th="system">'+I18N.t('footer.theme.system','System')+'</button></div>');
   ['header', '.topnav', '.sub'].forEach(sel => { const el = document.querySelector('.content > ' + sel); if(el) el.remove(); });
 }
 
@@ -1532,7 +1680,7 @@ function applyTheme(){
   const ts = document.getElementById('themeswitch');
   if(ts) ts.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.th===themePref));
   const icon = themePref==='system' ? '◐' : (r==='dark'?'☾':'☀');
-  const name = themePref==='system' ? 'System' : (r==='dark'?'Dark':'Light');
+  const name = themePref==='system' ? I18N.t('footer.theme.system','System') : (r==='dark'?I18N.t('footer.theme.dark','Dark'):I18N.t('footer.theme.light','Light'));
   const ic = document.querySelector('#themeBtn .thicon'), nm = document.querySelector('#themeBtn .thlabel');
   if(ic) ic.textContent = icon; if(nm) nm.textContent = name;
   if(typeof buildCharts === 'function') buildCharts();   // re-colour charts for the new theme
@@ -3943,8 +4091,33 @@ function refreshLocalOnlyNotices(){
 // ── Wire-up ───────────────────────────────────────────────────────────────────
 mountShell();
 buildNav();
+I18N.captureDefaults();  // record English (incl. heading emoji) before applyIcons strips it
 applyIcons();        // swap heading emoji for the SVG icon family (static markup + brand logo)
 initTheme();
+// i18n (#148): English is rendered inline above (zero fetch, zero flash). After
+// first paint, discover translated locales, populate the switcher, and — if a
+// non-English locale is saved & sufficiently complete — apply it and re-render.
+(async function(){
+  await I18N.discover();
+  buildLangSwitch();
+  const want = I18N.saved();
+  if(want !== 'en' && I18N.available.some(a=>a.code===want)){
+    await I18N.set(want);
+    buildNav();
+  } else if(I18N.debug){
+    I18N.hydrate(document);   // installs the untranslated-node outlines in debug mode
+  }
+})();
+document.addEventListener('lang:changed', ()=>{
+  // Re-render whatever is on screen so JS-built strings pick up the new locale.
+  const safe = fn => { try{ fn(); }catch(e){} };
+  safe(buildNav); safe(applyTheme);
+  safe(()=>{ if(typeof D!=='undefined' && D) renderData(); });
+  safe(()=>{ if(typeof renderHealth==='function') renderHealth(); });
+  if(TAB==='services')    safe(()=>renderServicesTab());
+  if(TAB==='experiments') safe(()=>renderExperiments(true));
+  if(TAB==='costs')       safe(()=>renderCosts(true));
+});
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
   if(TAB==='experiments') renderExperiments(true);
