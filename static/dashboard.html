@@ -3235,11 +3235,11 @@ function renderAiBand(){
 }
 function paintAiBand(g,x,loaded,serving){
   const sub=document.getElementById('ai-band-sub');
-  if(sub) sub.textContent = serving.length ? '· live serving telemetry active' : (loaded.length?'· models resident':'');
+  if(sub) sub.textContent = serving.length ? I18N.t('aiband.sub_serving','· live serving telemetry active') : (loaded.length?I18N.t('aiband.sub_resident','· models resident'):'');
   // throttle banner mirrors the GPU tab so it's visible from the landing page
   const tb=document.getElementById('ai-band-throttle');
   if(tb){ if(x.throttled && (x.throttle||[]).length){ tb.style.display='flex';
-      tb.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">GPU throttling — ${(x.throttle||[]).map(esc).join(', ')}</div><div class="d">Real throughput is below what the util % implies.</div></div>`;
+      tb.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">${I18N.tf('aiband.throttle_t','GPU throttling — {reason}',{reason:(x.throttle||[]).map(esc).join(', ')})}</div><div class="d">${I18N.t('aiband.throttle_d','Real throughput is below what the util % implies.')}</div></div>`;
     } else tb.style.display='none'; }
   const tokS=serving.reduce((a,s)=>a+(s.tok_per_s||0),0);
   const running=serving.reduce((a,s)=>a+(s.running||0),0);
@@ -3248,26 +3248,26 @@ function paintAiBand(g,x,loaded,serving){
   const memTot=g.mem_total||0, memUsed=g.mem_used||0, power=Math.round(g.power||0);
   const cur=(AI_COST&&AI_COST.currency)||'$';
   const tiles=[];
-  tiles.push({v:String(loaded.length), l:'Models loaded', s:vramCommit?fmtMB(vramCommit)+' VRAM':''});
+  tiles.push({v:String(loaded.length), l:I18N.t('aiband.models_loaded','Models loaded'), s:vramCommit?fmtMB(vramCommit)+' VRAM':''});
   if(g.available){
-    tiles.push({v:Math.round(g.util||0)+'%', l:'GPU util', s:(x.mem_util!=null?'mem-BW '+Math.round(x.mem_util)+'%':'')});
-    tiles.push({v:fmtMB(memUsed), l:'VRAM in use', s:memTot?fmtMB(Math.max(0,memTot-memUsed))+' free':''});
-    tiles.push({v:power+' W', l:'GPU power', s:x.power_limit?Math.round(power/x.power_limit*100)+'% of cap':''});
+    tiles.push({v:Math.round(g.util||0)+'%', l:I18N.t('gpu.util_kpi','GPU util'), s:(x.mem_util!=null?I18N.tf('aiband.membw','mem-BW {n}%',{n:Math.round(x.mem_util)}):'')});
+    tiles.push({v:fmtMB(memUsed), l:I18N.t('gpu.vram_in_use','VRAM in use'), s:memTot?I18N.tf('aiband.free','{v} free',{v:fmtMB(Math.max(0,memTot-memUsed))}):''});
+    tiles.push({v:power+' W', l:I18N.t('aiband.gpu_power','GPU power'), s:x.power_limit?I18N.tf('aiband.of_cap','{n}% of cap',{n:Math.round(power/x.power_limit*100)}):''});
   }
   if(serving.length){
-    tiles.push({v:tokS?tokS.toFixed(0):'0', l:'Tokens / sec', s:(running||waiting)?`${running} running · ${waiting} queued`:'idle'});
-    if(tokS>0 && power>0) tiles.push({v:(tokS/power).toFixed(1), l:'Tokens / Joule', s:'efficiency @ '+power+' W'});
+    tiles.push({v:tokS?tokS.toFixed(0):'0', l:I18N.t('aiband.tok_sec','Tokens / sec'), s:(running||waiting)?I18N.tf('aiband.run_queue','{running} running · {waiting} queued',{running,waiting}):I18N.t('aiband.idle','idle')});
+    if(tokS>0 && power>0) tiles.push({v:(tokS/power).toFixed(1), l:I18N.t('aiband.tok_joule','Tokens / Joule'), s:I18N.tf('aiband.efficiency','efficiency @ {n} W',{n:power})});
   }
   if(AI_COST && AI_COST.enabled){
-    tiles.push({v:cur+(AI_COST.cost&&AI_COST.cost.today!=null?AI_COST.cost.today.toFixed(2):'0.00'), l:'GPU cost today',
+    tiles.push({v:cur+(AI_COST.cost&&AI_COST.cost.today!=null?AI_COST.cost.today.toFixed(2):'0.00'), l:I18N.t('aiband.cost_today','GPU cost today'),
                 s:(AI_COST.kwh&&AI_COST.kwh.today!=null?AI_COST.kwh.today.toFixed(2)+' kWh':'')});
   }
   document.getElementById('ai-band-kpis').innerHTML = tiles.map(t=>
     `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
   const cap=document.getElementById('ai-band-cap');
   if(cap) cap.textContent = g.available
-    ? 'Live snapshot of this hub’s GPU + model servers. Tokens/sec and efficiency come from vLLM/TGI /metrics when present.'
-    : 'No GPU detected on the hub — showing model servers only.';
+    ? I18N.t('aiband.cap_gpu','Live snapshot of this hub’s GPU + model servers. Tokens/sec and efficiency come from vLLM/TGI /metrics when present.')
+    : I18N.t('aiband.cap_nogpu','No GPU detected on the hub — showing model servers only.');
 }
 
 // ── Runs (pushed from notebooks / MLflow) — the primary Experiments view ──────
@@ -3629,12 +3629,12 @@ function _dskId(mount){ return 'dsk_'+mount.replace(/[^a-z0-9]/gi,'_'); }
 function renderDisksTab(){
   const root=document.getElementById('disksbody'); if(!root) return;
   if(CURRENT_HOST!=='local'){
-    root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">Local host only</div>'
-      +'<div class="d">Disk-content analysis reads the host filesystem directly, so it runs on the hub\'s own machine. Switch the host selector back to <b>Local</b> to use it.</div></div></div></div>';
+    root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'+I18N.t('disks.local_only','Local host only')+'</div>'
+      +'<div class="d">'+I18N.t('disks.local_only_d','Disk-content analysis reads the host filesystem directly, so it runs on the hub\'s own machine. Switch the host selector back to <b>Local</b> to use it.')+'</div></div></div></div>';
     return;
   }
   const disks=(currentHostBlock().disks)||[];
-  if(!disks.length){ root.innerHTML='<div class="card"><div class="muted">No disks reported yet.</div></div>'; return; }
+  if(!disks.length){ root.innerHTML='<div class="card"><div class="muted">'+I18N.t('disks.none','No disks reported yet.')+'</div></div>'; return; }
   // Only (re)build the cards if the set of mounts changed — otherwise we'd wipe
   // an in-progress scan/treemap on every 15s refresh.
   const sig=disks.map(d=>d.mount).join('|');
@@ -3642,10 +3642,10 @@ function renderDisksTab(){
     root.dataset.sig=sig;
     root.innerHTML=disks.map(d=>{
       const id=_dskId(d.mount);
-      return `<div class="card"><h2>💾 ${esc(d.mount)} <span class="muted" style="font-weight:400;font-size:13px">— ${d.used} / ${d.total} GB · ${d.pct}% used</span></h2>
+      return `<div class="card"><h2>💾 ${esc(d.mount)} <span class="muted" style="font-weight:400;font-size:13px">${I18N.tf('disks.usage','— {used} / {total} GB · {pct}% used',{used:d.used,total:d.total,pct:d.pct})}</span></h2>
         <div class="tm-crumb" id="${id}_crumb"></div>
-        <div class="treemap" id="${id}_tm" style="height:300px"><div class="tm-empty muted">Click <b>Scan contents</b> to see what's using this disk.</div></div>
-        <div class="hstep-actions"><button class="btn-mini" id="${id}_scan">🔍 Scan contents</button>
+        <div class="treemap" id="${id}_tm" style="height:300px"><div class="tm-empty muted">${I18N.t('disks.scan_hint','Click <b>Scan contents</b> to see what\'s using this disk.')}</div></div>
+        <div class="hstep-actions"><button class="btn-mini" id="${id}_scan">${I18N.t('disks.scan_btn','🔍 Scan contents')}</button>
           <span class="muted" id="${id}_st" style="font-size:12px;align-self:center"></span></div></div>`;
     }).join('');
     disks.forEach(d=>{ const id=_dskId(d.mount);
@@ -3659,7 +3659,7 @@ function renderDisksTab(){
 async function scanDisk(mount, path, id, rescan){
   const tm=document.getElementById(id+'_tm'), st=document.getElementById(id+'_st');
   if(!tm) return;
-  tm.innerHTML='<div class="tm-empty muted">⏳ Scanning <b>'+esc(path)+'</b>… large disks can take a while (cached after the first run).</div>';
+  tm.innerHTML='<div class="tm-empty muted">'+I18N.tf('disks.scanning','⏳ Scanning <b>{path}</b>… large disks can take a while (cached after the first run).',{path:esc(path)})+'</div>';
   if(st) st.textContent='';
   // breadcrumb bookkeeping
   if(rescan || !_diskCrumbs[id]) _diskCrumbs[id]=[{name:mount, path:mount}];
@@ -3670,12 +3670,12 @@ async function scanDisk(mount, path, id, rescan){
   let data=null;
   for(let tries=0; tries<200; tries++){
     let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)+(rescan&&tries===0?'&rescan=1':''))).json(); }
-    catch(e){ tm.innerHTML='<div class="tm-empty muted">Scan request failed: '+esc(String(e))+'</div>'; return; }
+    catch(e){ tm.innerHTML='<div class="tm-empty muted">'+I18N.t('disks.scan_failed','Scan request failed: ')+esc(String(e))+'</div>'; return; }
     if(j.state==='done'){ data=j; break; }
     if(j.state==='error'){ tm.innerHTML='<div class="tm-empty muted">⚠️ '+esc(j.error||'scan error')+'</div>'; return; }
     await new Promise(r=>setTimeout(r,1500));
   }
-  if(!data){ tm.innerHTML='<div class="tm-empty muted">Still scanning — try again in a moment, or Rescan.</div>'; return; }
+  if(!data){ tm.innerHTML='<div class="tm-empty muted">'+I18N.t('disks.still_scanning','Still scanning — try again in a moment, or Rescan.')+'</div>'; return; }
   const entries=data.entries||[];
   const sumSub=entries.reduce((s,e)=>s+e.bytes,0);
   const loose=Math.max(0,(data.total||0)-sumSub);
@@ -3688,10 +3688,10 @@ async function scanDisk(mount, path, id, rescan){
     return node;
   }
   const leaves=entries.map(mk);
-  if(loose>0) leaves.push({label:'(loose files)', value:loose, color:'#5b6470', title:'Files directly in '+path});
-  if(path===mount && data.free) leaves.push({label:'Free space', value:data.free, color:'#2f3741'});
+  if(loose>0) leaves.push({label:I18N.t('disks.loose','(loose files)'), value:loose, color:'#5b6470', title:I18N.tf('disks.loose_t','Files directly in {path}',{path})});
+  if(path===mount && data.free) leaves.push({label:I18N.t('disks.free','Free space'), value:data.free, color:'#2f3741'});
   renderTreemap(tm, leaves, {height:360, fmt:fmtBytes});
-  if(st) st.innerHTML='scanned '+relTime(data.at)+' · '+fmtBytes(data.total)+' across '+entries.length+' folders · <b>click any folder to drill deeper</b>';
+  if(st) st.innerHTML=I18N.tf('disks.scanned','scanned {when} · {size} across {n} folders · <b>click any folder to drill deeper</b>',{when:relTime(data.at),size:fmtBytes(data.total),n:entries.length});
 }
 function renderDiskCrumb(id, mount){
   const el=document.getElementById(id+'_crumb'); if(!el) return;
@@ -3720,8 +3720,8 @@ async function renderHostTab(){
   const dk = document.getElementById('disks');
   if(!HOST_DATA || !HOST_DATA.online){
     hk.innerHTML = '';
-    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : 'no data yet';
-    dk.innerHTML = `<div class="muted" style="padding:12px 2px">⏳ <b>${esc(CURRENT_HOST)}</b> — ${err}. Probes run every ${FLEET ? (FLEET.interval||10) : 10}s; new hosts take one cycle to populate.</div>`;
+    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : I18N.t('host.no_data','no data yet');
+    dk.innerHTML = I18N.tf('host.probe_wait','<div class="muted" style="padding:12px 2px">⏳ <b>{host}</b> — {err}. Probes run every {i}s; new hosts take one cycle to populate.</div>',{host:esc(CURRENT_HOST),err,i:(FLEET ? (FLEET.interval||10) : 10)});
     return;
   }
   const ramPct = h.ram_total ? Math.round((h.ram_used||0)*100/h.ram_total) : 0;
@@ -3757,9 +3757,8 @@ function currentHostBlock(){
 function waitingHostMsg(){
   if(CURRENT_HOST === 'local') return null;
   if(!HOST_DATA || !HOST_DATA.online){
-    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : 'no data yet';
-    return `<div class="muted" style="padding:12px 2px">⏳ <b>${esc(CURRENT_HOST)}</b> — ${err}. `
-         + `Probes run every ${FLEET ? (FLEET.interval||10) : 10}s; new hosts take one cycle to populate.</div>`;
+    const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : I18N.t('host.no_data','no data yet');
+    return I18N.tf('host.probe_wait','<div class="muted" style="padding:12px 2px">⏳ <b>{host}</b> — {err}. Probes run every {i}s; new hosts take one cycle to populate.</div>',{host:esc(CURRENT_HOST),err,i:(FLEET ? (FLEET.interval||10) : 10)});
   }
   return null;
 }
@@ -3855,14 +3854,14 @@ async function renderNetwork(){
   const wait = waitingHostMsg();
   if(wait){ el.innerHTML = wait; return; }
   const net = currentHostBlock().net;
-  if(!net){ el.innerHTML = '<div class="muted" style="padding:12px 2px">No network info reported for this host yet.</div>'; return; }
+  if(!net){ el.innerHTML = '<div class="muted" style="padding:12px 2px">'+I18N.t('net.none','No network info reported for this host yet.')+'</div>'; return; }
   const upCount = (net.ifaces||[]).filter(i=>i.state==='up').length;
   const kpis = [
-    {v:net.primary_ip||'—', l:'Primary IP', s:net.primary_iface?'('+esc(net.primary_iface)+')':''},
-    {v:net.gateway||'—',    l:'Gateway'},
-    {v:upCount,             l:'Interfaces up', s:'of '+(net.ifaces||[]).length},
-    {v:(net.listen||[]).length, l:'Listening ports'},
-    {v:net.established_count!=null?net.established_count:'—', l:'Established conns'},
+    {v:net.primary_ip||'—', l:I18N.t('net.primary_ip','Primary IP'), s:net.primary_iface?'('+esc(net.primary_iface)+')':''},
+    {v:net.gateway||'—',    l:I18N.t('net.gateway','Gateway')},
+    {v:upCount,             l:I18N.t('net.ifaces_up','Interfaces up'), s:I18N.tf('net.of_n','of {n}',{n:(net.ifaces||[]).length})},
+    {v:(net.listen||[]).length, l:I18N.t('net.listen_ports','Listening ports')},
+    {v:net.established_count!=null?net.established_count:'—', l:I18N.t('net.established','Established conns')},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
 
   const ifrows = (net.ifaces||[]).map(i=>{
@@ -3874,23 +3873,23 @@ async function renderNetwork(){
       <td>${esc(ips)}</td><td>${i.mac?esc(i.mac):'—'}</td>
       <td><span style="color:${stc}">${esc(i.state||'?')}</span></td>
       <td>${sp}</td><td>${i.mtu||'—'}</td><td>${io}</td></tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">No interfaces.</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="muted">'+I18N.t('net.no_ifaces','No interfaces.')+'</td></tr>';
 
   const dns = (net.dns||[]).length ? esc((net.dns||[]).join(', ')) : '—';
-  const search = (net.search||[]).length ? '  ·  search: '+esc((net.search||[]).join(' ')) : '';
+  const search = (net.search||[]).length ? '  ·  '+I18N.t('net.search','search: ')+esc((net.search||[]).join(' ')) : '';
 
   const lrows = (net.listen||[]).map(s=>{
-    const tag = s.exposed ? '<span class="exptag pub">🌐 all interfaces</span>' : '<span class="exptag loc">🔒 local</span>';
+    const tag = s.exposed ? '<span class="exptag pub">'+I18N.t('net.exp_all','🌐 all interfaces')+'</span>' : '<span class="exptag loc">'+I18N.t('net.exp_local','🔒 local')+'</span>';
     return `<tr><td>${esc(s.proto)}</td><td>${esc(s.addr)}</td><td>${s.port}</td>
       <td>${s.proc?esc(s.proc):'—'}</td><td>${tag}</td></tr>`;
-  }).join('') || '<tr><td colspan="5" class="muted">No listening sockets reported.</td></tr>';
+  }).join('') || '<tr><td colspan="5" class="muted">'+I18N.t('net.no_sockets','No listening sockets reported.')+'</td></tr>';
 
   el.innerHTML =
     `<div class="kpirow">${kpis}</div>
-     <div class="subhd">Interfaces</div>
+     <div class="subhd">${I18N.t('net.sub_ifaces','Interfaces')}</div>
      <table class="ntbl"><thead><tr><th>${I18N.t('col.interface','Interface')}</th><th>${I18N.t('col.address','Address')}</th><th>${I18N.t('col.mac','MAC')}</th><th>${I18N.t('col.state','State')}</th><th>${I18N.t('col.speed','Speed')}</th><th>${I18N.t('col.mtu','MTU')}</th><th>${I18N.t('col.rx_tx','RX / TX')}</th></tr></thead><tbody>${ifrows}</tbody></table>
-     <div class="subhd">DNS</div><div style="font-family:var(--mono);font-size:13px;padding:2px 0">${dns}${search}</div>
-     <div class="subhd">Listening sockets <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">· ${(net.listen||[]).length} total, public first</span></div>
+     <div class="subhd">${I18N.t('net.sub_dns','DNS')}</div><div style="font-family:var(--mono);font-size:13px;padding:2px 0">${dns}${search}</div>
+     <div class="subhd">${I18N.t('net.sub_listen','Listening sockets')} <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">${I18N.tf('net.total_public','· {n} total, public first',{n:(net.listen||[]).length})}</span></div>
      <div style="max-height:340px;overflow:auto;border:1px solid var(--bd);border-radius:9px;margin-top:6px">
        <table class="ntbl" style="margin-top:0"><thead><tr><th>${I18N.t('col.proto','Proto')}</th><th>${I18N.t('col.bind','Bind')}</th><th>${I18N.t('col.port','Port')}</th><th>${I18N.t('col.process','Process')}</th><th>${I18N.t('col.exposure','Exposure')}</th></tr></thead><tbody>${lrows}</tbody></table>
      </div>`;
@@ -3905,79 +3904,79 @@ async function renderSecurity(){
   const wait = waitingHostMsg();
   if(wait){ el.innerHTML = wait; return; }
   const h = currentHostBlock(), sec = h.sec;
-  if(!sec){ el.innerHTML = '<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">No security info yet</div><div class="d">Nothing has been reported for this host.</div></div></div>'; return; }
+  if(!sec){ el.innerHTML = '<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'+I18N.t('sec.empty_t','No security info yet')+'</div><div class="d">'+I18N.t('sec.empty_d','Nothing has been reported for this host.')+'</div></div></div>'; return; }
   const items = [];                                  // {check, level, detail, tag?}
   const add = (check, level, detail, tag) => items.push({check, level, detail, tag});
 
   // Firewall
   const fw = sec.firewall || {};
-  if(!fw.backend)            add('Firewall','warn', 'no firewall detected');
-  else if(fw.active===true)  add('Firewall','ok',   `${esc(fw.backend)} — active`+(fw.open_ports?` · ${fw.open_ports} ports open`:''));
-  else if(fw.active===false) add('Firewall','warn', `${esc(fw.backend)} — inactive`);
-  else                       add('Firewall','info', `${esc(fw.backend)} — state needs elevated read`);
+  if(!fw.backend)            add(I18N.t('sec.firewall','Firewall'),'warn', I18N.t('sec.fw_none','no firewall detected'));
+  else if(fw.active===true)  add(I18N.t('sec.firewall','Firewall'),'ok',   I18N.tf('sec.fw_active','{backend} — active',{backend:esc(fw.backend)})+(fw.open_ports?I18N.tf('sec.fw_ports',' · {n} ports open',{n:fw.open_ports}):''));
+  else if(fw.active===false) add(I18N.t('sec.firewall','Firewall'),'warn', I18N.tf('sec.fw_inactive','{backend} — inactive',{backend:esc(fw.backend)}));
+  else                       add(I18N.t('sec.firewall','Firewall'),'info', I18N.tf('sec.fw_elevated','{backend} — state needs elevated read',{backend:esc(fw.backend)}));
 
   // SSH server
   const sh = sec.ssh;
-  if(!sh) add('SSH server','info','config not readable (needs elevated read)');
+  if(!sh) add(I18N.t('sec.ssh','SSH server'),'info',I18N.t('sec.ssh_unreadable','config not readable (needs elevated read)'));
   else {
     const root = (sh.permit_root||'').toLowerCase(), pw = (sh.password_auth||'').toLowerCase();
     const bad = root==='yes' || pw==='yes';
     const parts = [];
-    if(sh.permit_root!=null)   parts.push('root login: '+esc(sh.permit_root));
-    if(sh.password_auth!=null) parts.push('password auth: '+esc(sh.password_auth));
-    if(sh.port!=null)          parts.push('port '+sh.port);
-    add('SSH server', bad?'warn':'ok', parts.join(' · ')||'configured');
+    if(sh.permit_root!=null)   parts.push(I18N.t('sec.ssh_root','root login: ')+esc(sh.permit_root));
+    if(sh.password_auth!=null) parts.push(I18N.t('sec.ssh_pw','password auth: ')+esc(sh.password_auth));
+    if(sh.port!=null)          parts.push(I18N.t('sec.ssh_port','port ')+sh.port);
+    add(I18N.t('sec.ssh','SSH server'), bad?'warn':'ok', parts.join(' · ')||I18N.t('sec.ssh_configured','configured'));
   }
 
   // SELinux / AppArmor (MAC)
   const se = sec.selinux;
-  if(se==null)                add('SELinux','info','unknown');
-  else if(se==='enforcing')   add('SELinux','ok','enforcing');
-  else if(se==='permissive')  add('SELinux','warn','permissive');
-  else                        add('SELinux','info','disabled');
+  if(se==null)                add(I18N.t('sec.selinux','SELinux'),'info',I18N.t('sec.unknown','unknown'));
+  else if(se==='enforcing')   add(I18N.t('sec.selinux','SELinux'),'ok',I18N.t('sec.enforcing','enforcing'));
+  else if(se==='permissive')  add(I18N.t('sec.selinux','SELinux'),'warn',I18N.t('sec.permissive','permissive'));
+  else                        add(I18N.t('sec.selinux','SELinux'),'info',I18N.t('sec.disabled','disabled'));
   const aa = sec.apparmor;
-  if(aa==null)                add('AppArmor','info','unknown');
-  else                        add('AppArmor', aa==='enabled'?'ok':'info', aa);
+  if(aa==null)                add(I18N.t('sec.apparmor','AppArmor'),'info',I18N.t('sec.unknown','unknown'));
+  else                        add(I18N.t('sec.apparmor','AppArmor'), aa==='enabled'?'ok':'info', aa);
 
   // fail2ban
   const fb = sec.fail2ban || {};
-  if(!fb.installed)           add('fail2ban','info','not installed');
-  else if(fb.active===true)   add('fail2ban','ok','installed · active');
-  else if(fb.active===false)  add('fail2ban','warn','installed · inactive');
-  else                        add('fail2ban','info','installed · state needs elevated read');
+  if(!fb.installed)           add(I18N.t('sec.fail2ban','fail2ban'),'info',I18N.t('sec.not_installed','not installed'));
+  else if(fb.active===true)   add(I18N.t('sec.fail2ban','fail2ban'),'ok',I18N.t('sec.installed_active','installed · active'));
+  else if(fb.active===false)  add(I18N.t('sec.fail2ban','fail2ban'),'warn',I18N.t('sec.installed_inactive','installed · inactive'));
+  else                        add(I18N.t('sec.fail2ban','fail2ban'),'info',I18N.t('sec.installed_elevated','installed · state needs elevated read'));
 
   // Reboot required
   const rb = sec.reboot_required;
-  if(rb==null)                add('Reboot needed','info','unknown');
-  else                        add('Reboot needed', rb?'warn':'ok', rb?'yes — pending':'no');
+  if(rb==null)                add(I18N.t('sec.reboot','Reboot needed'),'info',I18N.t('sec.unknown','unknown'));
+  else                        add(I18N.t('sec.reboot','Reboot needed'), rb?'warn':'ok', rb?I18N.t('sec.reboot_yes','yes — pending'):I18N.t('sec.reboot_no','no'));
 
   // Auto-updates
   const au = sec.auto_updates;
-  if(au==null)                add('Auto-updates','info','unknown');
-  else                        add('Auto-updates', au?'ok':'warn', au?'enabled':'disabled');
+  if(au==null)                add(I18N.t('sec.auto_updates','Auto-updates'),'info',I18N.t('sec.unknown','unknown'));
+  else                        add(I18N.t('sec.auto_updates','Auto-updates'), au?'ok':'warn', au?I18N.t('sec.au_enabled','enabled'):I18N.t('sec.au_disabled','disabled'));
 
   // Pending package updates (counts the host's package manager already computed —
   // cached, no refresh). null ⇒ couldn't read; 0 ⇒ up to date; >0 ⇒ behind.
   const upd = sec.updates;
-  if(upd==null || upd.count==null) add('Updates available','info','needs elevated read / unknown');
-  else if(upd.count===0)           add('Updates available','ok','up to date');
+  if(upd==null || upd.count==null) add(I18N.t('sec.updates','Updates available'),'info',I18N.t('sec.upd_unknown','needs elevated read / unknown'));
+  else if(upd.count===0)           add(I18N.t('sec.updates','Updates available'),'ok',I18N.t('sec.upd_uptodate','up to date'));
   else {
-    const bits = [`${upd.count} update${upd.count===1?'':'s'} pending`];
-    if(upd.security)             bits.push(`${upd.security} security`);
-    if(upd.kernel)               bits.push('kernel update pending');
-    add('Updates available', upd.security ? 'crit' : 'warn', bits.join(' · '));
+    const bits = [I18N.tf('sec.upd_pending',`${upd.count} update${upd.count===1?'':'s'} pending`,{n:upd.count})];
+    if(upd.security)             bits.push(I18N.tf('sec.upd_security','{n} security',{n:upd.security}));
+    if(upd.kernel)               bits.push(I18N.t('sec.upd_kernel','kernel update pending'));
+    add(I18N.t('sec.updates','Updates available'), upd.security ? 'crit' : 'warn', bits.join(' · '));
   }
 
   // Newer OS release (hub-side check via endoflife.date; attached to the host block).
   const nr = (currentHostBlock().os_upgrade||{}).new_release;
-  if(nr) add('New OS release','warn', `${esc(nr.label)} available — you're on ${esc(nr.current)}`);
+  if(nr) add(I18N.t('sec.new_os','New OS release'),'warn', I18N.tf('sec.new_os_d',"{label} available — you're on {current}",{label:esc(nr.label),current:esc(nr.current)}));
 
   // Exposed ports (derived from the network listen list)
   const uniq = [...new Set(((currentHostBlock().net||{}).listen||[]).filter(s=>s.exposed).map(s=>s.port))].sort((a,b)=>a-b);
   if(uniq.length){
     const lvl = uniq.length>8 ? 'warn' : 'info';
-    const shown = uniq.slice(0,24).join(', ') + (uniq.length>24 ? `, +${uniq.length-24} more` : '');
-    add('Exposed ports', lvl, `${uniq.length} bound to all interfaces · ${shown}`);
+    const shown = uniq.slice(0,24).join(', ') + (uniq.length>24 ? I18N.tf('sec.exposed_more',', +{n} more',{n:uniq.length-24}) : '');
+    add(I18N.t('sec.exposed','Exposed ports'), lvl, I18N.tf('sec.exposed_d','{n} bound to all interfaces · {shown}',{n:uniq.length,shown}));
   }
 
   // Issues first so problems are immediately visible.
@@ -3985,13 +3984,13 @@ async function renderSecurity(){
   items.sort((a,b)=>rank[a.level]-rank[b.level]);
   const nCrit = items.filter(i=>i.level==='crit').length;
   const nWarn = items.filter(i=>i.level==='warn').length;
-  const who = CURRENT_HOST==='local' ? (h.os&&h.os.hostname||'this host') : CURRENT_HOST;
+  const who = CURRENT_HOST==='local' ? (h.os&&h.os.hostname||I18N.t('sec.this_host','this host')) : CURRENT_HOST;
 
   // Summary uses the app's existing insight card (.ins) so it matches everywhere else.
   let summary;
-  if(nCrit)      summary = `<div class="ins critical"><div class="ic">🛑</div><div><div class="t">${nCrit} risk${nCrit>1?'s':''} need attention</div><div class="d">on ${esc(who)}${nWarn?` · ${nWarn} more to review`:''}</div></div></div>`;
-  else if(nWarn) summary = `<div class="ins warning"><div class="ic">⚠️</div><div><div class="t">${nWarn} item${nWarn>1?'s':''} to review</div><div class="d">on ${esc(who)} — nothing critical</div></div></div>`;
-  else           summary = `<div class="ins ok"><div class="ic">✅</div><div><div class="t">All clear</div><div class="d">on ${esc(who)} — no issues found in what could be read</div></div></div>`;
+  if(nCrit)      summary = `<div class="ins critical"><div class="ic">🛑</div><div><div class="t">${I18N.tf('sec.sum_risks',`${nCrit} risk${nCrit>1?'s':''} need attention`,{n:nCrit})}</div><div class="d">${I18N.tf('sec.sum_on','on {who}',{who:esc(who)})}${nWarn?I18N.tf('sec.sum_more',' · {n} more to review',{n:nWarn}):''}</div></div></div>`;
+  else if(nWarn) summary = `<div class="ins warning"><div class="ic">⚠️</div><div><div class="t">${I18N.tf('sec.sum_items',`${nWarn} item${nWarn>1?'s':''} to review`,{n:nWarn})}</div><div class="d">${I18N.tf('sec.sum_on_nothing','on {who} — nothing critical',{who:esc(who)})}</div></div></div>`;
+  else           summary = `<div class="ins ok"><div class="ic">✅</div><div><div class="t">${I18N.t('sec.sum_allclear','All clear')}</div><div class="d">${I18N.tf('sec.sum_on_clean','on {who} — no issues found in what could be read',{who:esc(who)})}</div></div></div>`;
 
   const body = items.map(i =>
     `<tr class="${i.level}"><td><span class="sdot" style="background:${SC[i.level]}"></span>${esc(i.check)}</td>
