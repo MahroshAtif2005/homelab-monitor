@@ -816,7 +816,7 @@ h2 .hic{ opacity:.9 }
     <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">🧪 Runs
       <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— pushed from your notebooks &amp; MLflow, priced with real GPU energy</span>
       <select id="runs-status" style="margin-left:auto;padding:4px 8px;font-size:12px">
-        <option value="">all status</option><option value="running">running</option>
+        <option value="" data-i18n="opt.runs_all">all status</option><option value="running">running</option>
         <option value="finished">finished</option><option value="failed">failed</option><option value="killed">killed</option>
       </select></h2>
     <div id="runs-empty" class="topproc-empty" hidden>
@@ -881,9 +881,9 @@ h2 .hic{ opacity:.9 }
 <section data-tab="alerts" hidden>
   <div class="card">
     <div class="subtabs" id="set-subtabs">
-      <button type="button" class="subtab on" data-sp="alerts">🔔 Alerts</button>
-      <button type="button" class="subtab"    data-sp="costs">💰 Costs</button>
-      <button type="button" class="subtab"    data-sp="integrations">🧪 Integrations</button>
+      <button type="button" class="subtab on" data-sp="alerts" data-i18n="set.tab_alerts">🔔 Alerts</button>
+      <button type="button" class="subtab"    data-sp="costs" data-i18n="set.tab_costs">💰 Costs</button>
+      <button type="button" class="subtab"    data-sp="integrations" data-i18n="set.tab_integrations">🧪 Integrations</button>
     </div>
 
     <!-- ── Alerts sub-page ── -->
@@ -902,7 +902,7 @@ h2 .hic{ opacity:.9 }
       </label>
 
       <div>
-        <div class="flabel">Discord webhook URL</div>
+        <div class="flabel" data-i18n="set.discord_url">Discord webhook URL</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_discord" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -911,7 +911,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="flabel">ntfy.sh topic</div>
+        <div class="flabel" data-i18n="set.ntfy_topic">ntfy.sh topic</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="text" id="al_ntfy_topic" placeholder="my-homelab-alerts" autocomplete="off" spellcheck="false"
                  style="flex:2;min-width:180px">
@@ -922,7 +922,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="flabel">Telegram bot token</div>
+        <div class="flabel" data-i18n="set.telegram_token">Telegram bot token</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_token" placeholder="123456:ABC-DEF…" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -931,7 +931,7 @@ h2 .hic{ opacity:.9 }
       </div>
 
       <div>
-        <div class="flabel">Telegram chat ID</div>
+        <div class="flabel" data-i18n="set.telegram_chat">Telegram chat ID</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_telegram_chat_id" placeholder="-1001234567890" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -941,22 +941,22 @@ h2 .hic{ opacity:.9 }
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
-          <div class="flabel">Minimum severity</div>
+          <div class="flabel" data-i18n="set.min_severity">Minimum severity</div>
           <select id="al_minlevel" class="field">
-            <option value="warning">warning</option>
-            <option value="critical">critical only</option>
+            <option value="warning" data-i18n="opt.sev_warning">warning</option>
+            <option value="critical" data-i18n="opt.sev_critical">critical only</option>
           </select>
         </div>
         <div>
-          <div class="flabel">Disk alert threshold (%)</div>
+          <div class="flabel" data-i18n="set.disk_threshold">Disk alert threshold (%)</div>
           <input type="number" id="al_disk" min="50" max="99" step="1"
                  class="field">
         </div>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <button class="rb on" id="al_save">Save</button>
-        <button class="rb"    id="al_test">Send test alert</button>
+        <button class="rb on" id="al_save" data-i18n="btn.save">Save</button>
+        <button class="rb"    id="al_test" data-i18n="btn.test_alert">Send test alert</button>
       </div>
       <p class="cap" style="margin-top:6px">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
         GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
@@ -971,30 +971,30 @@ h2 .hic{ opacity:.9 }
 
       <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
       <div>
-        <div class="flabel">Don't know your rates? Pick your country</div>
+        <div class="flabel" data-i18n="set.country_label">Don't know your rates? Pick your country</div>
         <select id="al_country" class="field">
-          <option value="">— Select to prefill a typical estimate —</option>
+          <option value="" data-i18n="set.country_default">— Select to prefill a typical estimate —</option>
         </select>
         <div class="cap" id="al_tariff_src" style="margin-top:4px">Indicative estimate — always edit to match your own bill.</div>
       </div>
 
       <!-- Mode toggle: Single average / Day & Night -->
       <div style="margin-top:4px">
-        <div class="flabel">Tariff</div>
+        <div class="flabel" data-i18n="set.tariff">Tariff</div>
         <div class="seg" role="tablist" style="display:inline-flex;border:1px solid var(--bd);border-radius:7px;overflow:hidden">
-          <button type="button" id="al_mode_single" class="rb on" style="border:0;border-radius:0">Single average</button>
-          <button type="button" id="al_mode_dual"   class="rb"    style="border:0;border-radius:0;border-left:1px solid var(--bd)">Day &amp; Night</button>
+          <button type="button" id="al_mode_single" class="rb on" style="border:0;border-radius:0" data-i18n="set.tariff_single">Single average</button>
+          <button type="button" id="al_mode_dual"   class="rb"    style="border:0;border-radius:0;border-left:1px solid var(--bd)" data-i18n="set.tariff_dual">Day &amp; Night</button>
         </div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
-          <div class="flabel" id="al_kwh_label">Price (per kWh)</div>
+          <div class="flabel" id="al_kwh_label" data-i18n="set.price_kwh">Price (per kWh)</div>
           <input type="number" id="al_kwh" min="0" step="0.0001" placeholder="e.g. 0.30"
                  class="field">
         </div>
         <div>
-          <div class="flabel">Currency symbol</div>
+          <div class="flabel" data-i18n="set.currency">Currency symbol</div>
           <input type="text" id="al_currency" maxlength="4" placeholder="$"
                  class="field">
         </div>
@@ -1003,17 +1003,17 @@ h2 .hic{ opacity:.9 }
       <!-- Night fields: shown only in Day & Night mode -->
       <div id="al_night_wrap" hidden style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
         <div>
-          <div class="flabel">Night price (per kWh)</div>
+          <div class="flabel" data-i18n="set.night_price">Night price (per kWh)</div>
           <input type="number" id="al_kwh_night" min="0" step="0.0001" placeholder="e.g. 0.15"
                  class="field">
         </div>
         <div>
-          <div class="flabel">Night starts</div>
+          <div class="flabel" data-i18n="set.night_start">Night starts</div>
           <input type="time" id="al_night_start" value="22:00"
                  class="field">
         </div>
         <div>
-          <div class="flabel">Night ends</div>
+          <div class="flabel" data-i18n="set.night_end">Night ends</div>
           <input type="time" id="al_night_end" value="06:00"
                  class="field">
         </div>
@@ -1021,14 +1021,14 @@ h2 .hic{ opacity:.9 }
       <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
 
       <div style="max-width:340px">
-        <div class="flabel">Rest-of-system baseline (W) — optional</div>
+        <div class="flabel" data-i18n="set.baseline">Rest-of-system baseline (W) — optional</div>
         <input type="number" id="al_idle_w" min="0" step="1" placeholder="e.g. 60 (mainboard, fans, disks)"
                class="field">
         <div class="cap" style="margin-top:4px">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <button class="rb on" id="al_save_costs">Save</button>
+        <button class="rb on" id="al_save_costs" data-i18n="btn.save">Save</button>
       </div>
       </div>
     </div><!-- /set-pane-costs -->
@@ -1043,24 +1043,24 @@ h2 .hic{ opacity:.9 }
       <!-- Create a key -->
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:8px 0">
         <div style="flex:2;min-width:160px">
-          <div class="flabel">New key name</div>
+          <div class="flabel" data-i18n="set.key_name">New key name</div>
           <input type="text" id="intg_key_name" placeholder="e.g. colab-laptop" autocomplete="off"
                  class="field">
         </div>
         <div style="flex:1;min-width:120px">
-          <div class="flabel">Expires in</div>
+          <div class="flabel" data-i18n="set.key_expires">Expires in</div>
           <select id="intg_key_exp" class="field">
-            <option value="">Never</option><option value="7">7 days</option><option value="30">30 days</option>
+            <option value="" data-i18n="opt.never">Never</option><option value="7">7 days</option><option value="30">30 days</option>
             <option value="90">90 days</option><option value="365">1 year</option>
           </select>
         </div>
-        <button class="rb on" id="intg_key_create">Create key</button>
+        <button class="rb on" id="intg_key_create" data-i18n="btn.create_key">Create key</button>
       </div>
       <div id="intg_key_reveal" hidden style="margin:6px 0">
-        <div class="flabel">Your new key — copy it now, it won't be shown again</div>
+        <div class="flabel" data-i18n="set.key_reveal">Your new key — copy it now, it won't be shown again</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <input type="text" id="intg_key_value" readonly style="flex:1;min-width:240px;border:1px solid var(--ok)">
-          <button class="rb" id="intg_key_copy">Copy</button>
+          <button class="rb" id="intg_key_copy" data-i18n="btn.copy">Copy</button>
         </div>
       </div>
 
@@ -1084,21 +1084,21 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="cap" style="margin:4px 0">Mirror runs from an MLflow tracking server — they appear under Runs with GPU cost attached. Synced every ~5 min.</div>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
         <div>
-          <div class="flabel">MLflow tracking URI</div>
+          <div class="flabel" data-i18n="set.mlflow_uri">MLflow tracking URI</div>
           <input type="text" id="al_mlflow_uri" placeholder="http://mlflow.lan:5000"
                  class="field">
         </div>
         <div>
-          <div class="flabel">MLflow bearer token (optional)</div>
+          <div class="flabel" data-i18n="set.mlflow_token">MLflow bearer token (optional)</div>
           <input type="text" id="al_mlflow_token" placeholder="only for a secured MLflow" autocomplete="off"
                  class="field">
           <div class="cap" id="al_mlflow_token_state" style="margin-top:4px"></div>
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-        <button class="rb on" id="al_save_intg">Save</button>
-        <button class="rb" id="intg_mlflow_test">Test connection</button>
-        <button class="rb" id="intg_mlflow_sync">Sync now</button>
+        <button class="rb on" id="al_save_intg" data-i18n="btn.save">Save</button>
+        <button class="rb" id="intg_mlflow_test" data-i18n="btn.test_conn">Test connection</button>
+        <button class="rb" id="intg_mlflow_sync" data-i18n="btn.sync_now">Sync now</button>
       </div>
       <div id="intg_status" class="cap" style="margin-top:6px"></div>
     </div><!-- /set-pane-integrations -->
@@ -1116,8 +1116,8 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
     <div id="backupstatus" class="ins info" style="display:none"></div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-      <button class="rb on" id="bk_download">Download backup</button>
-      <button class="rb" id="bk_restore_btn">Restore from file…</button>
+      <button class="rb on" id="bk_download" data-i18n="btn.download_backup">Download backup</button>
+      <button class="rb" id="bk_restore_btn" data-i18n="btn.restore_file">Restore from file…</button>
       <input type="file" id="bk_file" accept=".db,application/x-sqlite3" hidden>
     </div>
 
@@ -1168,7 +1168,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="hosts-form">
         <input type="text" class="hosts-input" id="h_name"   placeholder="name (e.g. ardi)"             autocomplete="off" spellcheck="false">
         <input type="text" class="hosts-input" id="h_target" placeholder="user@host   or   user@host:port" autocomplete="off" spellcheck="false">
-        <button class="rb on" id="h_add">Add host</button>
+        <button class="rb on" id="h_add" data-i18n="btn.add_host">Add host</button>
       </div>
       <div id="lansuggest" style="display:none"></div>
     </div>
