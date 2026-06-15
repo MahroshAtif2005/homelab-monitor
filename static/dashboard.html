@@ -1850,10 +1850,35 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       </div>
       <p class="cap" style="margin-top:6px" data-i18n-html="alerts.triggers">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
         GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
+
+      <!-- ── Routing rules ── -->
+      <div style="margin-top:24px;border-top:1px solid var(--bd);padding-top:16px;max-width:800px">
+        <h2 class="card-sub" data-i18n="rules.title" data-i18n-def="📋 Routing rules">📋 Routing rules</h2>
+        <p class="cap" data-i18n-html="rules.intro" data-i18n-def="Per-service rules control which channels receive which alerts. If no rule matches, the default (all configured channels) applies. Wildcards (<code>*</code>, <code>?</code>) work in the pattern column.">Per-service rules control which channels receive which alerts.
+          If no rule matches, the default (all configured channels) applies.
+          Wildcards (<code>*</code>, <code>?</code>) work in the pattern column.</p>
+
+        <div id="rules-status" class="ins info" style="display:none;margin:8px 0"></div>
+
+        <table id="rules-table" style="width:100%;border-collapse:collapse;margin-top:8px;font-size:13px">
+          <thead>
+            <tr style="border-bottom:1px solid var(--bd)">
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.kind" data-i18n-def="Kind">Kind</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.pattern" data-i18n-def="Pattern">Pattern</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.channel" data-i18n-def="Channel">Channel</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.min_level" data-i18n-def="Min level">Min level</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.enabled" data-i18n-def="On">On</th>
+              <th style="text-align:left;padding:4px 6px"></th>
+            </tr>
+          </thead>
+          <tbody id="rules-body"></tbody>
+        </table>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="rb" id="rules-add-btn" data-i18n="rules.add" data-i18n-def="+ Add rule">+ Add rule</button>
+        </div>
+      </div>
     </div>
     </div><!-- /set-pane-alerts -->
-
-    <!-- ── Costs sub-page ── -->
     <div id="set-pane-costs" hidden>
       <p class="cap" style="margin:2px 0 12px" data-i18n-html="costset.intro">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
@@ -2694,7 +2719,7 @@ function showTab(id){
   // snapshot tabs it simply has no effect.
   document.getElementById('controls').hidden = false;
   buildCharts();   // charts can only size on a visible canvas, so build on show
-  if(id==='alerts') loadAlerts();
+  if(id==='alerts'){ loadAlerts(); loadRules(); }
   if(id==='uptime') loadUptime();
   if(id==='hosts')  loadHosts();
   // Multi-host: scope notice on tabs that are still local-only, plus
@@ -3956,6 +3981,128 @@ async function testAlerts(){
   }
 }
 
+// ── Routing rules ─────────────────────────────────────────────────────────────
+let RULES = [];
+const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
+const RULE_CHANNELS = ['all','discord','ntfy','telegram'];
+const RULE_LEVELS = ['info','warning','critical'];
+function showRulesStatus(level, text){
+  const el=document.getElementById('rules-status');
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+async function loadRules(){
+  let j; try{ j=await(await fetch('/api/notify/rules')).json(); }catch(e){ return; }
+  RULES = j.rules || [];
+  renderRules();
+}
+function ruleOptions(values, selected){
+  return values.map(v=>`<option value="${v}"${selected===v?' selected':''}>${v}</option>`).join('');
+}
+function renderRules(){
+  const tbody=document.getElementById('rules-body');
+  tbody.innerHTML='';
+  for(const r of RULES){
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid var(--bd)';
+    tr.dataset.id=r.id;
+    tr.innerHTML=`
+      <td style="padding:4px 6px"><select class="field" data-field="match_kind" aria-label="${I18N.t('rules.kind_label','Match kind')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_KINDS,r.match_kind)}</select></td>
+      <td style="padding:4px 6px"><input class="field" data-field="match_pattern" value="${esc(r.match_pattern)}" aria-label="${I18N.t('rules.pattern_label','Match pattern')}" style="width:100px;font-size:12px;padding:2px 4px"></td>
+      <td style="padding:4px 6px"><select class="field" data-field="channel" aria-label="${I18N.t('rules.channel_label','Channel')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_CHANNELS,r.channel)}</select></td>
+      <td style="padding:4px 6px"><select class="field" data-field="min_level" aria-label="${I18N.t('rules.min_level_label','Minimum level')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_LEVELS,r.min_level)}</select></td>
+      <td style="padding:4px 6px"><input type="checkbox" data-field="enabled" aria-label="${I18N.t('rules.enabled_label','Enabled')}" ${r.enabled?'checked':''}></td>
+      <td style="padding:4px 6px;white-space:nowrap">
+        <button class="rb" data-action="save" aria-label="${I18N.t('rules.save_label','Save rule')}" style="font-size:11px;padding:2px 6px">💾</button>
+        <button class="rb" data-action="test" aria-label="${I18N.t('rules.test_label','Test rule')}" style="font-size:11px;padding:2px 6px">🧪</button>
+        <button class="rb" data-action="delete" aria-label="${I18N.t('rules.delete_label','Delete rule')}" style="font-size:11px;padding:2px 6px">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  // Wire row actions
+  tbody.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.onclick = async (e) => {
+      const tr=btn.closest('tr');
+      const id=tr ? tr.dataset.id : null;
+      const action=btn.dataset.action;
+      if(action==='delete'){
+        if(!confirm(I18N.t('rules.confirm_delete','Delete this rule?'))) return;
+        let j; try{ j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({action:'delete',id:parseInt(id)})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok){ await loadRules(); showRulesStatus('ok',I18N.t('rules.status_deleted','Rule deleted.')); }
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_delete_failed','Delete failed'));
+      }else if(action==='save'){
+        const fields={};
+        tr.querySelectorAll('[data-field]').forEach(el=>{
+          const key=el.dataset.field;
+          if(el.type==='checkbox') fields[key]=el.checked;
+          else fields[key]=el.value;
+        });
+        let j;
+        try{
+          if(id){
+            j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({action:'update',id:parseInt(id),...fields})})).json();
+          }else{
+            j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({action:'add',...fields})})).json();
+          }
+        }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok){ await loadRules(); showRulesStatus('ok',id?I18N.t('rules.status_saved','Rule saved.'):I18N.t('rules.status_added','Rule added.')); }
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_save_failed','Save failed'));
+      }else if(action==='test'){
+        const fields={};
+        tr.querySelectorAll('[data-field]').forEach(el=>{
+          const key=el.dataset.field;
+          if(el.type==='checkbox') fields[key]=el.checked;
+          else fields[key]=el.value;
+        });
+        showRulesStatus('info',I18N.t('rules.status_sending_test','Sending test…'));
+        let j; try{ j=await(await fetch('/api/notify/rules/test',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({...fields,level:'warning'})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok) showRulesStatus('ok',I18N.t('rules.status_test_sent','Test sent to: {channels}.',{channels:(j.channels||[]).join(', ')}));
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_test_failed','Test failed'));
+      }
+    };
+  });
+  // Add-rule button
+  document.getElementById('rules-add-btn').onclick = () => {
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid var(--bd)';
+    tr.innerHTML=`
+      <td style="padding:4px 6px"><select class="field" data-field="match_kind" aria-label="${I18N.t('rules.kind_label','Match kind')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_KINDS,'container')}</select></td>
+      <td style="padding:4px 6px"><input class="field" data-field="match_pattern" value="*" aria-label="${I18N.t('rules.pattern_label','Match pattern')}" style="width:100px;font-size:12px;padding:2px 4px"></td>
+      <td style="padding:4px 6px"><select class="field" data-field="channel" aria-label="${I18N.t('rules.channel_label','Channel')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_CHANNELS,'all')}</select></td>
+      <td style="padding:4px 6px"><select class="field" data-field="min_level" aria-label="${I18N.t('rules.min_level_label','Minimum level')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_LEVELS,'warning')}</select></td>
+      <td style="padding:4px 6px"><input type="checkbox" data-field="enabled" aria-label="${I18N.t('rules.enabled_label','Enabled')}" checked></td>
+      <td style="padding:4px 6px;white-space:nowrap">
+        <button class="rb" data-action="save" aria-label="${I18N.t('rules.save_label','Save rule')}" style="font-size:11px;padding:2px 6px">💾</button>
+        <button class="rb" data-action="discard" aria-label="${I18N.t('rules.discard_label','Discard rule')}" style="font-size:11px;padding:2px 6px">✕</button>
+      </td>`;
+    tr.querySelector('[data-action="discard"]').onclick = () => { tr.remove(); };
+    tr.querySelector('[data-action="save"]').onclick = async () => {
+      const fields={};
+      tr.querySelectorAll('[data-field]').forEach(el=>{
+        const key=el.dataset.field;
+        if(el.type==='checkbox') fields[key]=el.checked;
+        else fields[key]=el.value;
+      });
+      let j; try{ j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'add',...fields})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+      if(j.ok){ await loadRules(); showRulesStatus('ok',I18N.t('rules.status_added','Rule added.')); }
+      else showRulesStatus('critical',j.error||I18N.t('rules.status_save_failed','Save failed'));
+    };
+    document.getElementById('rules-body').appendChild(tr);
+  };
+}
+
 // ── Backup (settings) tab ─────────────────────────────────────────────────────
 function showBackupStatus(level,text){
   toast(level,text);
@@ -3983,7 +4130,7 @@ async function restoreBackup(file){
   document.getElementById('bk_file').value='';
   if(j.ok){
     showBackupStatus('ok', j.message || 'Backup restored.');
-    loadData(); loadHealth(); loadFleet(); loadHosts(); loadAlerts();
+    loadData(); loadHealth(); loadFleet(); loadHosts(); loadAlerts(); loadRules();
   }else{
     showBackupStatus('critical', j.error || 'Restore failed.');
   }

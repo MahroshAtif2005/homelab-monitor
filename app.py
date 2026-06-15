@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, fnmatch
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
@@ -143,6 +143,14 @@ CREATE TABLE IF NOT EXISTS run_metrics(run_id TEXT NOT NULL, ts INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS api_keys(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER);
+CREATE TABLE IF NOT EXISTS notification_rules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  match_kind TEXT NOT NULL DEFAULT 'container',
+  match_pattern TEXT NOT NULL DEFAULT '*',
+  channel TEXT NOT NULL DEFAULT 'all',
+  min_level TEXT NOT NULL DEFAULT 'warning',
+  enabled INTEGER NOT NULL DEFAULT 1
+);
 CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
 CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
 CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
@@ -4283,7 +4291,62 @@ def dispatch_alert(s, level, title, detail, host=None):
         except Exception as e: out.append(("telegram", False, str(e)))
     return out
 
-def _emit(s, key, level, title, detail):
+def _dispatch_to_channels(s, level, title, detail, channels):
+    """Dispatch to a specific set of channels only."""
+    if "discord" in channels and s.get("discord_webhook_url"):
+        try: send_discord(s["discord_webhook_url"], level, title, detail)
+        except Exception as e: print("notifier discord error:", e, flush=True)
+    if "ntfy" in channels and s.get("ntfy_topic"):
+        try: send_ntfy(s.get("ntfy_server") or "https://ntfy.sh",
+                       s["ntfy_topic"], level, title, detail)
+        except Exception as e: print("notifier ntfy error:", e, flush=True)
+    if "telegram" in channels and s.get("telegram_token") and s.get("telegram_chat_id"):
+        try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
+                               level, title, detail)
+        except Exception as e: print("notifier telegram error:", e, flush=True)
+
+def _match_kind(key):
+    prefix = key.split(":")[0] if ":" in key else key
+    if prefix in ("container", "systemd", "uptime"):
+        return prefix
+    if prefix in ("gpu", "oom"):
+        return "gpu"
+    if prefix == "disk":
+        return "host"
+    return "host"
+
+def _alert_name(key):
+    parts = key.split(":")
+    return ":".join(parts[1:]) if len(parts) > 1 else key
+
+def _apply_rules(key, level, rules):
+    """Return set of channels if rules match, or None for default behavior."""
+    if not rules:
+        return None
+    kind = _match_kind(key)
+    name = _alert_name(key)
+    channels = set()
+    for rule in rules:
+        if not rule.get("enabled", True):
+            continue
+        if rule["match_kind"] != kind:
+            continue
+        if not fnmatch.fnmatch(name, rule["match_pattern"]):
+            continue
+        if LEVELS.get(level, 0) < LEVELS.get(rule.get("min_level", "warning"), 0):
+            continue
+        if rule["channel"] == "all":
+            channels.update(["discord", "ntfy", "telegram"])
+        else:
+            channels.add(rule["channel"])
+    return channels if channels else None
+
+def get_notification_rules():
+    with LOCK:
+        rows = DB.execute("SELECT id, match_kind, match_pattern, channel, min_level, enabled FROM notification_rules ORDER BY id").fetchall()
+    return [{"id": r[0], "match_kind": r[1], "match_pattern": r[2], "channel": r[3], "min_level": r[4], "enabled": bool(r[5])} for r in rows]
+
+def _emit(s, key, level, title, detail, rules=None):
     """Fire an alert once per edge. Skips below the configured min level."""
     if LEVELS.get(level, 0) < LEVELS.get(s.get("alert_min_level", "warning"), 1):
         return
@@ -4291,9 +4354,13 @@ def _emit(s, key, level, title, detail):
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
-    for ch, ok, err in dispatch_alert(s, level, title, detail):
-        if not ok:
-            print(f"notifier {ch} error:", err, flush=True)
+    channels = _apply_rules(key, level, rules)
+    if channels is not None:
+        _dispatch_to_channels(s, level, title, detail, channels)
+    else:
+        for ch, ok, err in dispatch_alert(s, level, title, detail):
+            if not ok:
+                print(f"notifier {ch} error:", err, flush=True)
 
 def _clear(key):
     with _NOTIFIER_LOCK:
@@ -4306,6 +4373,7 @@ def notify_scan():
     if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
             or (s.get("telegram_token") and s.get("telegram_chat_id"))):
         return
+    rules = get_notification_rules()
 
     # ── Docker containers: edge-trigger on crit/warn, clear on ok ─────────────
     docker = HEALTH.get("docker") or {}
@@ -4316,10 +4384,10 @@ def notify_scan():
             st   = ct.get("status")
             if st == "crit":
                 _emit(s, key, "critical", f"🔴 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}")
+                      f"{name}: {ct.get('status_text','')}", rules=rules)
             elif st == "warn":
                 _emit(s, key, "warning", f"🟠 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}")
+                      f"{name}: {ct.get('status_text','')}", rules=rules)
             elif st == "ok":
                 _clear(key)
 
@@ -4331,7 +4399,8 @@ def notify_scan():
             key  = f"systemd:{name}"
             if svc.get("status") == "crit":
                 _emit(s, key, "critical", f"🔴 systemd unit failed: {name}",
-                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})")
+                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})",
+                      rules=rules)
             elif svc.get("status") == "ok":
                 _clear(key)
 
@@ -4344,7 +4413,7 @@ def notify_scan():
         if free < PRESSURE_MB:
             _emit(s, key, "warning", "🟠 GPU VRAM pressure",
                   f"Only {round(free)} MB free of {round(mem_total)} MB "
-                  f"({round(100*mem_used/mem_total)}% used).")
+                  f"({round(100*mem_used/mem_total)}% used).", rules=rules)
         else:
             _clear(key)
 
@@ -4361,7 +4430,8 @@ def notify_scan():
         if pct >= disk_thr:
             level = "critical" if pct >= 95 else "warning"
             _emit(s, key, level, f"{'🔴' if level=='critical' else '🟠'} Disk {mp} at {pct}%",
-                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).")
+                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).",
+                  rules=rules)
         else:
             _clear(key)
 
@@ -4381,9 +4451,13 @@ def notify_scan():
                 continue
             if LEVELS["critical"] < LEVELS.get(s.get("alert_min_level", "warning"), 1):
                 continue
-            for ch, ok, err in dispatch_alert(
-                    s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
-                if not ok: print(f"notifier {ch} error:", err, flush=True)
+            channels = _apply_rules(key, "critical", rules)
+            if channels is not None:
+                _dispatch_to_channels(s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500], channels)
+            else:
+                for ch, ok, err in dispatch_alert(
+                        s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
+                    if not ok: print(f"notifier {ch} error:", err, flush=True)
     except Exception as e:
         print("notify_scan oom error:", e, flush=True)
 
@@ -4441,8 +4515,11 @@ def notify_uptime(s):
       • DOWN      — fired once after `fail_threshold` consecutive failures (anti-flap).
       • RECOVERED — fired once when it comes back, quoting the downtime duration.
       • SLOW      — optional warning when an up endpoint exceeds latency_warn_ms.
-    Honours per-check alerts_enabled plus the global min-level/channel gating in _emit."""
+    Honours per-check alerts_enabled plus the global min-level/channel gating in _emit.
+    Routing rules (match_kind='uptime') are respected, so uptime alerts can be
+    steered to specific channels or muted like any other alert."""
     now = int(time.time())
+    rules = get_notification_rules()
     for c in list_uptime_checks():
         cid = c["id"]
         down_key, slow_key, rec_key = f"uptime:down:{cid}", f"uptime:slow:{cid}", f"uptime:rec:{cid}"
@@ -4459,7 +4536,7 @@ def notify_uptime(s):
                 _uptime_down_since[cid] = _uptime_streak_start(cid, now)
             _clear(rec_key)   # re-arm recovery so the eventual comeback fires once
             _emit(s, down_key, "critical", f"🔴 {c['label']} is DOWN",
-                  f"{tgt} — {_uptime_down_reason(st)}")
+                  f"{tgt} — {_uptime_down_reason(st)}", rules=rules)
             _clear(slow_key)
         elif st["state"] == "up":
             with _NOTIFIER_LOCK:
@@ -4472,13 +4549,13 @@ def notify_uptime(s):
                 # default min-level (a recovery the user never sees is worse than a
                 # slightly louder one). It clears the moment the check drops again.
                 _emit(s, rec_key, "warning", f"🟢 {c['label']} recovered",
-                      f"{tgt} — back up after {dur} down.")
+                      f"{tgt} — back up after {dur} down.", rules=rules)
             else:
                 _clear(rec_key)
             lw, lat = c.get("latency_warn_ms"), st.get("last_latency_ms")
             if lw and lat is not None and lat > lw:
                 _emit(s, slow_key, "warning", f"🐢 {c['label']} is slow",
-                      f"{tgt} — {round(lat)} ms (warns above {lw} ms).")
+                      f"{tgt} — {round(lat)} ms (warns above {lw} ms).", rules=rules)
             else:
                 _clear(slow_key)
 
@@ -6647,6 +6724,65 @@ def api_update_app_status():
     st["log"] = _tail_lines(_update_log_path(), 200)
     st["self_update_enabled"] = ALLOW_SELF_UPDATE
     return jsonify(st)
+
+@app.route("/api/notify/rules", methods=["GET", "POST"])
+def api_notify_rules():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        action = body.get("action", "add")
+        if action == "add":
+            with LOCK:
+                DB.execute("INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) VALUES (?, ?, ?, ?, ?)",
+                           (body.get("match_kind", "container"), body.get("match_pattern", "*"),
+                            body.get("channel", "all"), body.get("min_level", "warning"),
+                            1 if body.get("enabled", True) else 0))
+                DB.commit()
+        elif action == "update":
+            rule_id = body.get("id")
+            if not rule_id:
+                return jsonify({"ok": False, "error": "id required"}), 400
+            with LOCK:
+                DB.execute("UPDATE notification_rules SET match_kind=?, match_pattern=?, channel=?, min_level=?, enabled=? WHERE id=?",
+                           (body.get("match_kind"), body.get("match_pattern"),
+                            body.get("channel"), body.get("min_level"),
+                            1 if body.get("enabled", True) else 0, rule_id))
+                DB.commit()
+        elif action == "delete":
+            rule_id = body.get("id")
+            if not rule_id:
+                return jsonify({"ok": False, "error": "id required"}), 400
+            with LOCK:
+                DB.execute("DELETE FROM notification_rules WHERE id=?", (rule_id,))
+                DB.commit()
+        else:
+            return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
+        return jsonify({"ok": True, "rules": get_notification_rules()})
+    return jsonify({"rules": get_notification_rules()})
+
+@app.route("/api/notify/rules/test", methods=["POST"])
+def api_notify_rules_test():
+    """Test a notification rule by sending a sample alert that would match it."""
+    body = request.get_json(silent=True) or {}
+    s = get_settings()
+    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+        return jsonify({"ok": False, "error": "No notification channels configured."}), 400
+    test_rule = {
+        "match_kind": body.get("match_kind", "container"),
+        "match_pattern": body.get("match_pattern", "*"),
+        "channel": body.get("channel", "all"),
+        "min_level": body.get("min_level", "warning"),
+        "enabled": True,
+    }
+    test_key = f"{test_rule['match_kind']}:test-rule"
+    channels = _apply_rules(test_key, body.get("level", "warning"), [test_rule])
+    if channels is None:
+        return jsonify({"ok": False, "error": "Rule would not match — check kind and pattern."}), 400
+    _dispatch_to_channels(s, body.get("level", "warning"),
+                          "🔔 HomeLab Monitor — rule test",
+                          f"Test of rule: {test_rule['match_kind']} / {test_rule['match_pattern']} → {test_rule['channel']} @ {test_rule['min_level']}",
+                          channels)
+    return jsonify({"ok": True, "channels": list(channels)})
 
 @app.route("/")
 def index():
