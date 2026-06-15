@@ -1662,7 +1662,6 @@ function showTab(id){
   document.getElementById('controls').hidden = false;
   buildCharts();   // charts can only size on a visible canvas, so build on show
   if(id==='alerts') loadAlerts();
-  if(id==='backup') hideBackupStatus();
   if(id==='hosts')  loadHosts();
   // Multi-host: scope notice on tabs that are still local-only, plus
   // host-aware renderers on the ones that already speak per-host.
@@ -2593,10 +2592,6 @@ async function testAlerts(){
 function showBackupStatus(level,text){
   toast(level,text);
 }
-function hideBackupStatus(){
-  const el=document.getElementById('backupstatus');
-  if(el) el.style.display='none';
-}
 function downloadBackup(){
   showBackupStatus('info','Preparing backup…');
   window.location.href='/api/backup';
@@ -2648,9 +2643,7 @@ async function copyText(text){
 }
 function showHostStatus(level, text){
   const el=document.getElementById('hoststatus');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
-  setTimeout(()=>{el.style.display='none';}, 6000);
+  toast(level, text);
 }
 function relTime(ts){
   if(!ts) return 'never tested';
