@@ -91,6 +91,127 @@ h2{font-size:14px;margin:0 0 13px;font-weight:600;letter-spacing:.02em;text-tran
 .ins:last-child{margin-bottom:0}.ins .ic{font-size:17px;line-height:1.3}.ins .t{font-weight:600}.ins .d{color:var(--mut);font-size:13px}
 .ins.critical{border-left:3px solid var(--crit)}.ins.warning{border-left:3px solid var(--warn)}
 .ins.ok{border-left:3px solid var(--ok)}.ins.info{border-left:3px solid var(--info)}
+
+/* Toast notifications */
+#toast-container{
+  position:fixed;
+  top:24px;
+  right:24px;
+  z-index:9999;
+
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+
+  pointer-events:none;
+}
+
+.toast{
+  position:relative;
+  overflow:hidden;
+
+  pointer-events:auto;
+
+  min-width:340px;
+  max-width:460px;
+
+  margin:0;
+  border-radius:14px;
+
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+
+  box-shadow:
+    0 10px 30px rgba(0,0,0,.35),
+    inset 0 1px 0 rgba(255,255,255,.05);
+
+  animation:toastin .22s ease;
+}
+
+.toast .ic{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  min-width:28px;
+}
+
+.toast .t{
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:.01em;
+}
+
+/* Success */
+.toast.ok{
+  border-left:4px solid var(--ok);
+  box-shadow:
+    0 10px 30px rgba(0,0,0,.35),
+    0 0 14px rgba(34,197,94,.15);
+}
+
+/* Info */
+.toast.info{
+  border-left:4px solid var(--info);
+  box-shadow:
+    0 10px 30px rgba(0,0,0,.35),
+    0 0 14px rgba(59,130,246,.15);
+}
+
+/* Warning */
+.toast.warning{
+  border-left:4px solid var(--warn);
+  box-shadow:
+    0 10px 30px rgba(0,0,0,.35),
+    0 0 14px rgba(245,158,11,.15);
+}
+
+/* Error */
+.toast.critical{
+  border-left:4px solid var(--crit);
+  box-shadow:
+    0 10px 30px rgba(0,0,0,.35),
+    0 0 14px rgba(239,68,68,.18);
+}
+
+/* Progress bar */
+.toast::after{
+  content:"";
+  position:absolute;
+  left:0;
+  bottom:0;
+
+  height:3px;
+  width:100%;
+
+  background:currentColor;
+  opacity:.55;
+
+  animation:toastlife 3s linear forwards;
+}
+
+@keyframes toastin{
+  from{
+    opacity:0;
+    transform:translateY(-10px) scale(.98);
+  }
+  to{
+    opacity:1;
+    transform:none;
+  }
+}
+
+@keyframes toastlife{
+  from{width:100%;}
+  to{width:0;}
+}
+
+@media(prefers-reduced-motion:reduce){
+  .toast,
+  .toast::after{
+    animation:none;
+  }
+}
+
 /* overview status cards */
 .ovgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:11px}
 .ov{display:block;text-align:left;background:var(--inset);border:1px solid var(--bd);border-left:3px solid var(--info);border-radius:9px;padding:13px 15px;cursor:pointer;color:inherit;font:inherit}
@@ -2387,11 +2508,36 @@ async function loadAlerts(){
     : 'No bot token saved yet.';
   ALERTS_LOADED=true;
 }
-function showAlertStatus(level, text){
-  const el=document.getElementById('alertstatus');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
-  setTimeout(()=>{el.style.display='none';}, 6000);
+
+function toast(level,text){
+  const host=document.getElementById('toast-container');
+  if(!host) return;
+
+  const el=document.createElement('div');
+
+  el.className='ins toast '+level;
+
+  el.innerHTML=
+    `<div class="ic">${ICON[level]||'•'}</div>
+     <div>
+       <div class="t">${esc(text)}</div>
+     </div>`;
+
+  host.appendChild(el);
+
+  const remove=()=>{
+    if(el.parentNode){
+      el.parentNode.removeChild(el);
+    }
+  };
+
+  el.onclick=remove;
+
+    setTimeout(remove,3000);
+  }
+
+function showAlertStatus(level,text){
+  toast(level,text);
 }
 async function saveAlerts(){
   const body={
@@ -2444,10 +2590,8 @@ async function testAlerts(){
 }
 
 // ── Backup (settings) tab ─────────────────────────────────────────────────────
-function showBackupStatus(level, text){
-  const el=document.getElementById('backupstatus');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+function showBackupStatus(level,text){
+  toast(level,text);
 }
 function hideBackupStatus(){
   const el=document.getElementById('backupstatus');
@@ -3038,16 +3182,37 @@ async function renderRuns(){
   tb.querySelectorAll('button[data-del]').forEach(btn=>btn.onclick=e=>{ e.stopPropagation(); deleteRun(btn.dataset.del, runs.find(x=>x.id===btn.dataset.del)); });
   tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openRun(tr.dataset.id));
 }
+
 async function deleteRun(id, run){
   const nm=(run&&run.name)||'this run';
-  if(!confirm(`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`)) return;
-  try{ const r=await fetch('/api/runs/'+encodeURIComponent(id),{method:'DELETE'});
-    if(!r.ok && r.status!==404) throw new Error('HTTP '+r.status); }
-  catch(e){ alert('Could not delete the run: '+e); return; }
-  const det=document.getElementById('run-detail');           // close the detail if it was this run
-  if(det && !det.hidden && CURRENT_RUN===id){ det.hidden=true; }
+
+  if(!confirm(`Delete "${nm}"? Its logged metrics are removed too. This can't be undone.`))
+    return;
+
+  try{
+    const r=await fetch('/api/runs/'+encodeURIComponent(id),{
+      method:'DELETE'
+    });
+
+    if(!r.ok && r.status!==404)
+      throw new Error('HTTP '+r.status);
+  }
+  catch(e){
+    toast('critical','Could not delete the run: '+e);
+    return;
+  }
+
+  const det=document.getElementById('run-detail');
+
+  // close the detail if it was this run
+  if(det && !det.hidden && CURRENT_RUN===id){
+    det.hidden=true;
+  }
+
   renderRuns();
+  toast('ok','Run deleted.');
 }
+
 let CURRENT_RUN=null;
 async function openRun(id){
   CURRENT_RUN=id;
@@ -4166,7 +4331,17 @@ async function deleteKey(id){
   try{ await fetch('/api/integration/keys/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){ intgStatus('err','Failed: '+e); return; }
   intgStatus('ok','Key revoked.'); loadIntegrations();
 }
-function intgStatus(level,msg){ const el=document.getElementById('intg_status'); if(el){ el.textContent=msg; el.style.color = level==='ok'?'var(--ok)':level==='err'?'var(--crit)':'var(--mut)'; } }
+
+function intgStatus(level,msg){
+  const map={
+    ok:'ok',
+    err:'critical',
+    info:'info'
+  };
+
+  toast(map[level]||'info',msg);
+}
+
 (function wireIntegrations(){
   const cr=document.getElementById('intg_key_create');
   if(cr) cr.onclick=async()=>{
@@ -4189,6 +4364,7 @@ function intgStatus(level,msg){ const el=document.getElementById('intg_status');
   const rs=document.getElementById('runs-status');
   if(rs) rs.onchange=()=>renderRuns();
 })();
+
 document.getElementById('bk_download').onclick = downloadBackup;
 document.getElementById('bk_restore_btn').onclick = () => document.getElementById('bk_file').click();
 document.getElementById('bk_file').onchange = e => { const f=e.target.files&&e.target.files[0]; if(f) restoreBackup(f); };
@@ -4320,4 +4496,11 @@ document.getElementById('logdrawer-scrim').onclick=closeLogDrawer;
 document.getElementById('logdrawer-copy').onclick=copyLogs;
 document.getElementById('logdrawer-follow').onchange=e=>{ if(LOG_NAME) startLogStream(LOG_NAME, e.target.checked); };
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !document.getElementById('logdrawer').hidden) closeLogDrawer(); });
-</script></body></html>
+</script>
+
+<div id="toast-container"
+     role="status"
+     aria-live="polite">
+</div>
+
+</body></html>
