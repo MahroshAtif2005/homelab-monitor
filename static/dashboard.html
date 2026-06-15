@@ -1808,11 +1808,11 @@ function renderData(){
   if(CURRENT_HOST === 'local'){
     const ramPct = H.ram_total? Math.round(H.ram_used/H.ram_total*100):0;
     document.getElementById('hostkpis').innerHTML=[
-      {v:Math.round(H.cpu||0)+'%',l:'CPU utilization',s:(H.cores||'?')+' cores'},
-      {v:ramPct+'%',l:'RAM used',s:fmtMB(H.ram_used||0)+' / '+fmtMB(H.ram_total||0)},
-      {v:(H.load1||0).toFixed(2),l:'Load (1m)',s:'of '+(H.cores||'?')+' cores'},
-      {v:fmtUp(H.uptime||0),l:'Uptime'},
-      {v:(H.ctemp||0)+' °C',l:'CPU/system temp'},
+      {v:Math.round(H.cpu||0)+'%',l:I18N.t('kpi.cpu','CPU utilization'),s:I18N.tf('kpi.cores','{n} cores',{n:(H.cores||'?')})},
+      {v:ramPct+'%',l:I18N.t('kpi.ram','RAM used'),s:fmtMB(H.ram_used||0)+' / '+fmtMB(H.ram_total||0)},
+      {v:(H.load1||0).toFixed(2),l:I18N.t('kpi.load1','Load (1m)'),s:I18N.tf('kpi.of_cores','of {n} cores',{n:(H.cores||'?')})},
+      {v:fmtUp(H.uptime||0),l:I18N.t('kpi.uptime','Uptime')},
+      {v:(H.ctemp||0)+' °C',l:I18N.t('kpi.temp','CPU/system temp')},
     ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
     document.getElementById('disks').innerHTML=(H.disks||[]).map(dk=>
       `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:13px">
@@ -1923,11 +1923,11 @@ function renderTopProcs(){
   };
   const col = (title, arr, isCpu) =>
     `<div class="topproc-col"><h3>${title}</h3>`
-    + (arr.length ? arr.map(r=>row(r,isCpu)).join('') : '<div class="topproc-empty">No data yet.</div>')
+    + (arr.length ? arr.map(r=>row(r,isCpu)).join('') : '<div class="topproc-empty">'+I18N.t('common.no_data','No data yet.')+'</div>')
     + '</div>';
-  box.innerHTML = col('By CPU', cpu, true) + col('By RAM', mem, false);
+  box.innerHTML = col(I18N.t('tp.by_cpu','By CPU'), cpu, true) + col(I18N.t('tp.by_ram','By RAM'), mem, false);
   const cap = document.getElementById('topproc_cap');
-  if(cap) cap.textContent = `Grouped by command across ${ncpu} cores · CPU% is per-core · refreshes every 15s`;
+  if(cap) cap.textContent = I18N.tf('tp.cap','Grouped by command across {n} cores · CPU% is per-core · refreshes every 15s',{n:ncpu});
 }
 
 // Power & cost card (issue #25): turns the GPU power history into kWh -> money.
@@ -3729,11 +3729,11 @@ async function renderHostTab(){
   }
   const ramPct = h.ram_total ? Math.round((h.ram_used||0)*100/h.ram_total) : 0;
   hk.innerHTML=[
-    {v:Math.round(h.cpu||0)+'%',         l:'CPU utilization', s:(h.cores||'?')+' cores'},
-    {v:ramPct+'%',                       l:'RAM used',        s:fmtMBshort(h.ram_used)+' / '+fmtMBshort(h.ram_total)},
-    {v:(h.load1!=null?h.load1.toFixed(2):'—'), l:'Load (1m)',  s:'of '+(h.cores||'?')+' cores'},
-    {v:fmtUpShort(h.uptime),             l:'Uptime'},
-    {v:(h.ctemp!=null?h.ctemp+' °C':'—'),l:'CPU/system temp'},
+    {v:Math.round(h.cpu||0)+'%',         l:I18N.t('kpi.cpu','CPU utilization'), s:I18N.tf('kpi.cores','{n} cores',{n:(h.cores||'?')})},
+    {v:ramPct+'%',                       l:I18N.t('kpi.ram','RAM used'),        s:fmtMBshort(h.ram_used)+' / '+fmtMBshort(h.ram_total)},
+    {v:(h.load1!=null?h.load1.toFixed(2):'—'), l:I18N.t('kpi.load1','Load (1m)'),  s:I18N.tf('kpi.of_cores','of {n} cores',{n:(h.cores||'?')})},
+    {v:fmtUpShort(h.uptime),             l:I18N.t('kpi.uptime','Uptime')},
+    {v:(h.ctemp!=null?h.ctemp+' °C':'—'),l:I18N.t('kpi.temp','CPU/system temp')},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
   dk.innerHTML = (h.disks||[]).map(dkk =>
     `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:13px">
@@ -3777,11 +3777,11 @@ function renderSysInfo(){
   if(!h.os && !h.hw){ el.innerHTML = ''; return; }
   const booted = os.boot_time ? new Date(os.boot_time*1000).toLocaleString() : null;
   const sys = [
-    infoRow('OS',          os.pretty ? `${esc(os.pretty)}${os.arch?'  ('+esc(os.arch)+')':''}` : (os.arch?esc(os.arch):null)),
-    infoRow('Kernel',      os.kernel ? esc(os.kernel) : null),
-    infoRow('Init / virt', [os.init, os.virt].filter(Boolean).map(esc).join(' · ') || null),
-    infoRow('Hostname',    os.hostname ? esc(os.hostname)+((os.fqdn&&os.fqdn!==os.hostname)?'  ('+esc(os.fqdn)+')':'') : null),
-    infoRow('Booted',      booted ? esc(booted) : null),
+    infoRow(I18N.t('sys.os','OS'),          os.pretty ? `${esc(os.pretty)}${os.arch?'  ('+esc(os.arch)+')':''}` : (os.arch?esc(os.arch):null)),
+    infoRow(I18N.t('sys.kernel','Kernel'),      os.kernel ? esc(os.kernel) : null),
+    infoRow(I18N.t('sys.init_virt','Init / virt'), [os.init, os.virt].filter(Boolean).map(esc).join(' · ') || null),
+    infoRow(I18N.t('sys.hostname','Hostname'),    os.hostname ? esc(os.hostname)+((os.fqdn&&os.fqdn!==os.hostname)?'  ('+esc(os.fqdn)+')':'') : null),
+    infoRow(I18N.t('sys.booted','Booted'),      booted ? esc(booted) : null),
   ].join('');
   const topo = [hw.sockets&&hw.sockets+' socket'+(hw.sockets>1?'s':''), hw.cores&&hw.cores+' cores',
                 hw.threads&&hw.threads+' threads', hw.cpu_mhz_max&&'max '+(hw.cpu_mhz_max/1000).toFixed(2)+' GHz']
@@ -3789,15 +3789,15 @@ function renderSysInfo(){
   const mem = hw.ram_total ? fmtMB(hw.ram_total)+(hw.swap_total?'  (swap '+fmtMB(hw.swap_total)+')':'') : null;
   const gpu = hw.gpu_name ? esc(hw.gpu_name)+(hw.gpu_mem_total?'  ('+fmtMB(hw.gpu_mem_total)+')':'') : null;
   const hwh = [
-    infoRow('CPU',      hw.cpu_model ? esc(hw.cpu_model)+(hw.cpu_vendor?'  ('+esc(hw.cpu_vendor)+')':'') : null),
-    infoRow('Topology', topo || null),
-    infoRow('Memory',   mem),
-    infoRow('Machine',  hw.machine ? esc(hw.machine) : null),
-    infoRow('GPU',      gpu),
+    infoRow(I18N.t('sys.cpu','CPU'),      hw.cpu_model ? esc(hw.cpu_model)+(hw.cpu_vendor?'  ('+esc(hw.cpu_vendor)+')':'') : null),
+    infoRow(I18N.t('sys.topology','Topology'), topo || null),
+    infoRow(I18N.t('sys.memory','Memory'),   mem),
+    infoRow(I18N.t('sys.machine','Machine'),  hw.machine ? esc(hw.machine) : null),
+    infoRow(I18N.t('sys.gpu','GPU'),      gpu),
   ].join('');
   el.innerHTML = `<div class="infogrid">
-    <div class="infocard"><h3>System</h3>${sys||'<div class="muted">No system info reported.</div>'}</div>
-    <div class="infocard"><h3>Hardware</h3>${hwh||'<div class="muted">No hardware info reported.</div>'}</div></div>`;
+    <div class="infocard"><h3>${I18N.t('sys.card_system','System')}</h3>${sys||'<div class="muted">'+I18N.t('sys.no_system','No system info reported.')+'</div>'}</div>
+    <div class="infocard"><h3>${I18N.t('sys.card_hardware','Hardware')}</h3>${hwh||'<div class="muted">'+I18N.t('sys.no_hardware','No hardware info reported.')+'</div>'}</div></div>`;
 }
 
 // Compact byte formatter for interface RX/TX counters (distinct from fmtBytes,
