@@ -717,20 +717,20 @@ h2 .hic{ opacity:.9 }
   </div>
   <div class="card" id="diagcard" hidden>
     <h2 data-i18n="diag.title">🩺 Setup &amp; requirements</h2>
-    <div class="fleet-meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
+    <div class="fleet-meta" data-i18n="diag.fleet_meta">What the monitor can see on this hub, and how to enable anything that's missing. The dashboard keeps running even when optional pieces aren't mounted — no GPU required.</div>
     <div style="overflow-x:auto">
       <table class="sectbl" style="margin-top:10px"><thead><tr><th data-i18n="col.requirement">Requirement</th><th data-i18n="col.status">Status</th><th data-i18n="col.detail">Detail</th></tr></thead><tbody id="diagbody"></tbody></table>
     </div>
   </div>
   <div class="card" id="mcpcard">
     <h2 data-i18n="mcp.title">AI agent (MCP)</h2>
-    <div class="fleet-meta">A read-only <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP</a> server is built in, so Claude — or any MCP client — can connect and explore this homelab with full dashboard parity. <span id="mcpstatus"></span></div>
+    <div class="fleet-meta" data-i18n-html="mcp.card_desc">A read-only <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP</a> server is built in, so Claude — or any MCP client — can connect and explore this homelab with full dashboard parity. <span id="mcpstatus"></span></div>
     <div id="mcpconn" style="margin-top:10px" hidden>
-      <div class="muted">Connect with the Claude CLI (then ask it about your fleet):</div>
+      <div class="muted" data-i18n="mcp.connect_hint">Connect with the Claude CLI (then ask it about your fleet):</div>
       <pre class="cmd" id="mcpcmd">claude mcp add --transport http homelab …</pre>
       <div class="row">
-        <button class="btn" type="button" id="mcpcopy">📋 Copy command</button>
-        <a class="btn" id="mcpdocs" href="https://sikamikanikobg.github.io/homelab-monitor/mcp/" target="_blank" rel="noopener">MCP docs →</a>
+        <button class="btn" type="button" id="mcpcopy" data-i18n="btn.copy_command">📋 Copy command</button>
+        <a class="btn" id="mcpdocs" href="https://sikamikanikobg.github.io/homelab-monitor/mcp/" target="_blank" rel="noopener" data-i18n="mcp.docs">MCP docs →</a>
       </div>
     </div>
   </div>
@@ -758,7 +758,7 @@ h2 .hic{ opacity:.9 }
     <div class="card"><h2 data-i18n="gpu.now_title">🎮 GPU right now</h2>
       <div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
       <div id="gpu-detail" class="gpu-detail"></div>
-      <div style="margin:14px 0 6px" class="muted" >VRAM allocation</div>
+      <div style="margin:14px 0 6px" class="muted"  data-i18n="gpu.vram_alloc">VRAM allocation</div>
       <div class="bar" id="vrambar"></div>
       <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
     </div>
@@ -768,25 +768,25 @@ h2 .hic{ opacity:.9 }
   </div>
   <div class="card" id="pergpu-card" hidden><h2 data-i18n="gpu.pergpu_title">🎮 Per-GPU</h2>
     <div id="pergpu"></div>
-    <p class="cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
+    <p class="cap" data-i18n="gpu.pergpu_cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
   </div>
   <div class="card"><h2 data-i18n="gpu.vram_title">📊 VRAM by service over time</h2>
     <div class="chartbox"><canvas id="vram"></canvas></div>
-    <p class="cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
+    <p class="cap" data-i18n-html="gpu.vram_cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
   <div class="card"><h2 data-i18n="gpu.util_title">⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
 </section>
 
 <!-- ───────── Costs ───────── -->
 <section data-tab="costs" hidden>
   <div class="card" id="costs-card">
-    <div id="costs-disabled" class="topproc-empty" hidden>
+    <div id="costs-disabled" class="topproc-empty" hidden data-i18n-html="costs.disabled">
       Set an electricity price in <a href="#" id="costs-settings-link">Settings → Costs</a> to turn power into money.
     </div>
     <div id="costs-body" hidden>
       <h2>💰 Power &amp; cost <span class="muted" style="font-size:12px;font-weight:400;text-transform:none" id="costs-sub"></span></h2>
       <div class="grid" id="costs-kpis"></div>
       <div class="chartbox short" style="margin-top:12px"><canvas id="costscomp"></canvas></div>
-      <p class="cap" id="costs-comp-cap">GPU power is measured (nvidia-smi); CPU/DRAM are measured via RAPL when readable. "Other" appears only if you set a baseline in Settings — wall power is never guessed.</p>
+      <p class="cap" id="costs-comp-cap" data-i18n="costs.comp_cap">GPU power is measured (nvidia-smi); CPU/DRAM are measured via RAPL when readable. "Other" appears only if you set a baseline in Settings — wall power is never guessed.</p>
     </div>
   </div>
   <div class="card" id="costs-breakdown-card" hidden>
@@ -795,7 +795,7 @@ h2 .hic{ opacity:.9 }
       <th data-sort="name" data-i18n="col.name">Name</th><th data-sort="kind" data-i18n="col.kind">Kind</th>
       <th data-sort="avg_w" data-i18n="col.avg_w">Avg W</th><th data-sort="energy_kwh" data-i18n="col.energy">Energy</th><th data-sort="cost" data-i18n="col.cost">Cost</th>
     </tr></thead><tbody id="costs-tbl"></tbody></table>
-    <p class="cap">Click a row to drill into its power &amp; cost over time. GPU split by VRAM share; CPU split by CPU-time share of the measured package power.</p>
+    <p class="cap" data-i18n="costs.breakdown_cap">Click a row to drill into its power &amp; cost over time. GPU split by VRAM share; CPU split by CPU-time share of the measured package power.</p>
   </div>
   <div class="card" id="costs-drill" hidden>
     <h2 id="costs-drill-title">Drilldown</h2>
@@ -807,19 +807,19 @@ h2 .hic{ opacity:.9 }
 <!-- ───────── AI Models ───────── -->
 <section data-tab="models" hidden>
   <div id="modelsbody"></div>
-  <p class="cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
+  <p class="cap" data-i18n-html="models.section_cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
 </section>
 
 <!-- ───────── Experiments / Runs ───────── -->
 <section data-tab="experiments" hidden>
   <div class="card" id="runs-card">
     <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">🧪 Runs
-      <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— pushed from your notebooks &amp; MLflow, priced with real GPU energy</span>
+      <span class="muted" style="font-size:12px;font-weight:400;text-transform:none" data-i18n="exp.runs_sub">— pushed from your notebooks &amp; MLflow, priced with real GPU energy</span>
       <select id="runs-status" style="margin-left:auto;padding:4px 8px;font-size:12px">
         <option value="" data-i18n="opt.runs_all">all status</option><option value="running">running</option>
         <option value="finished">finished</option><option value="failed">failed</option><option value="killed">killed</option>
       </select></h2>
-    <div id="runs-empty" class="topproc-empty" hidden>
+    <div id="runs-empty" class="topproc-empty" hidden data-i18n-html="exp.runs_empty">
       No runs yet. Push one from Jupyter/Colab/Kaggle with the tiny client, or wire up MLflow — set it up in
       <a href="#" id="runs-settings-link">Settings → Integrations</a>.
     </div>
@@ -836,13 +836,13 @@ h2 .hic{ opacity:.9 }
     <p class="cap" id="run-cost-cap"></p>
   </div>
   <div class="card" id="train-card">
-    <h2>🔬 Auto-detected on the hub <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— training processes running now (no push needed)</span></h2>
+    <h2>🔬 Auto-detected on the hub <span class="muted" style="font-size:12px;font-weight:400;text-transform:none" data-i18n="exp.train_sub">— training processes running now (no push needed)</span></h2>
     <div id="train-body"></div>
   </div>
   <div class="card" id="devtools-card" hidden>
     <h2 data-i18n="exp.devtools_title">🧰 Notebooks &amp; tools</h2>
     <div id="devtools-body"></div>
-    <p class="cap">Auto-discovered DS/AI web tools running on the hub. A 🟡 VRAM tag means a kernel/process is holding GPU memory — often a forgotten notebook squatting on VRAM.</p>
+    <p class="cap" data-i18n="exp.devtools_cap">Auto-discovered DS/AI web tools running on the hub. A 🟡 VRAM tag means a kernel/process is holding GPU memory — often a forgotten notebook squatting on VRAM.</p>
   </div>
   <div class="card">
     <h2 data-i18n="exp.sessions_title">📈 GPU activity sessions</h2>
@@ -850,7 +850,7 @@ h2 .hic{ opacity:.9 }
     <table style="margin-top:12px"><thead><tr>
       <th data-i18n="col.started">Started</th><th data-i18n="col.duration">Duration</th><th data-i18n="col.peak_util">Peak util</th><th data-i18n="col.peak_vram">Peak VRAM</th><th data-i18n="col.avg_power">Avg power</th><th data-i18n="col.energy">Energy</th><th data-i18n="col.cost">Cost</th>
     </tr></thead><tbody id="sess-tbl"></tbody></table>
-    <p class="cap" id="sess-cap">Contiguous GPU-busy periods reconstructed from power &amp; utilisation history — each is a training run, batch job or inference burst. Energy is integrated from GPU power; cost uses your kWh price.</p>
+    <p class="cap" id="sess-cap" data-i18n="exp.sess_cap">Contiguous GPU-busy periods reconstructed from power &amp; utilisation history — each is a training run, batch job or inference burst. Energy is integrated from GPU power; cost uses your kWh price.</p>
   </div>
 </section>
 
@@ -888,7 +888,7 @@ h2 .hic{ opacity:.9 }
 
     <!-- ── Alerts sub-page ── -->
     <div id="set-pane-alerts">
-    <p class="cap" style="margin:2px 0 12px">
+    <p class="cap" style="margin:2px 0 12px" data-i18n-html="alerts.intro">
       Push notifications when something noteworthy happens. Configured here — no env vars, no config files.
       Any channel (Discord, ntfy, or Telegram) can be used; all are optional. Alerts are
       edge-triggered (one ping per state change) so they don't spam.</p>
@@ -898,7 +898,7 @@ h2 .hic{ opacity:.9 }
     <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
       <label style="display:flex;align-items:center;gap:9px">
         <input type="checkbox" id="al_enabled">
-        <span><b>Alerts enabled</b> — turn the notifier on once a channel below is filled in.</span>
+        <span data-i18n-html="alerts.enabled_label"><b>Alerts enabled</b> — turn the notifier on once a channel below is filled in.</span>
       </label>
 
       <div>
@@ -918,7 +918,7 @@ h2 .hic{ opacity:.9 }
           <input type="text" id="al_ntfy_server" placeholder="https://ntfy.sh" autocomplete="off" spellcheck="false"
                  style="flex:1;min-width:160px">
         </div>
-        <div class="cap">Topic is required; server defaults to <code>https://ntfy.sh</code>. Self-hosted ntfy works too.</div>
+        <div class="cap" data-i18n-html="alerts.ntfy_cap">Topic is required; server defaults to <code>https://ntfy.sh</code>. Self-hosted ntfy works too.</div>
       </div>
 
       <div>
@@ -936,7 +936,7 @@ h2 .hic{ opacity:.9 }
           <input type="text" id="al_telegram_chat_id" placeholder="-1001234567890" autocomplete="off" spellcheck="false"
                  style="flex:1">
         </div>
-        <div class="cap">Required with a bot token. Message your bot once, then read <code>chat.id</code> from <code>getUpdates</code>.</div>
+        <div class="cap" data-i18n-html="alerts.telegram_cap">Required with a bot token. Message your bot once, then read <code>chat.id</code> from <code>getUpdates</code>.</div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
@@ -958,16 +958,16 @@ h2 .hic{ opacity:.9 }
         <button class="rb on" id="al_save" data-i18n="btn.save">Save</button>
         <button class="rb"    id="al_test" data-i18n="btn.test_alert">Send test alert</button>
       </div>
-      <p class="cap" style="margin-top:6px">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
+      <p class="cap" style="margin-top:6px" data-i18n-html="alerts.triggers">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
         GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
     </div>
     </div><!-- /set-pane-alerts -->
 
     <!-- ── Costs sub-page ── -->
     <div id="set-pane-costs" hidden>
-      <p class="cap" style="margin:2px 0 12px">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
+      <p class="cap" style="margin:2px 0 12px" data-i18n-html="costset.intro">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
-      <div class="card-sub" style="font-weight:600">💰 Electricity cost</div>
+      <div class="card-sub" style="font-weight:600" data-i18n="costset.elec_cost">💰 Electricity cost</div>
 
       <!-- Country prefill — don't know your rates? pick a country for a typical estimate -->
       <div>
@@ -1018,13 +1018,13 @@ h2 .hic{ opacity:.9 }
                  class="field">
         </div>
       </div>
-      <p class="cap" style="margin-top:-4px">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
+      <p class="cap" style="margin-top:-4px" data-i18n-html="costset.tariff_cap">Powers the <b>💰 Costs</b> page and the Power &amp; cost cards from power history. <b>Day &amp; Night</b> bills each sample at the night rate inside the window (it may cross midnight) and the day rate otherwise — leave the night price blank to use the single average. Leave the price blank to hide the cost cards.</p>
 
       <div style="max-width:340px">
         <div class="flabel" data-i18n="set.baseline">Rest-of-system baseline (W) — optional</div>
         <input type="number" id="al_idle_w" min="0" step="1" placeholder="e.g. 60 (mainboard, fans, disks)"
                class="field">
-        <div class="cap" style="margin-top:4px">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
+        <div class="cap" style="margin-top:4px" data-i18n-html="costset.baseline_cap">GPU and CPU-package power are <b>measured</b>. Wall power is never guessed. Set a flat baseline here only if you want an "Other" band on the Costs chart for the rest of the box.</div>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
@@ -1035,10 +1035,10 @@ h2 .hic{ opacity:.9 }
 
     <!-- ── Integrations sub-page ── -->
     <div id="set-pane-integrations" hidden>
-      <p class="cap" style="margin:2px 0 12px">Push run/session data from Jupyter, Colab or Kaggle (or mirror MLflow) — each run comes back priced with the real GPU energy it used. Writes need the API key; the dashboard reads are open on your LAN.</p>
+      <p class="cap" style="margin:2px 0 12px" data-i18n="intg.intro">Push run/session data from Jupyter, Colab or Kaggle (or mirror MLflow) — each run comes back priced with the real GPU energy it used. Writes need the API key; the dashboard reads are open on your LAN.</p>
 
-      <div class="card-sub" style="font-weight:600">🔑 API keys</div>
-      <div class="cap" style="margin:4px 0">Create one key per machine/notebook so you can track and revoke each independently. Keys are stored hashed — the secret is shown once, at creation.</div>
+      <div class="card-sub" style="font-weight:600" data-i18n="intg.api_keys">🔑 API keys</div>
+      <div class="cap" style="margin:4px 0" data-i18n="intg.keys_cap">Create one key per machine/notebook so you can track and revoke each independently. Keys are stored hashed — the secret is shown once, at creation.</div>
 
       <!-- Create a key -->
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:8px 0">
@@ -1072,16 +1072,16 @@ h2 .hic{ opacity:.9 }
       <div style="margin-top:8px">
         <a class="rb" id="intg_client_dl" href="/static/homelab_run.py" download>Download client (homelab_run.py)</a>
       </div>
-      <div class="cap" style="margin-top:8px">Quickstart in a notebook:</div>
+      <div class="cap" style="margin-top:8px" data-i18n="intg.quickstart">Quickstart in a notebook:</div>
       <pre class="cmd" id="intg_snippet" style="white-space:pre-wrap">import homelab_run as homelab
 homelab.configure(url="http://THIS-HOST:9800", key="hlm_…")
 with homelab.run("my-finetune", params={"lr":2e-4}) as r:
     for step, loss in enumerate(train()):
         r.log_metric("loss", loss, step=step)</pre>
-      <div class="cap">Colab/Kaggle run in the cloud — point <code>url</code> at a Tailscale/ngrok address that reaches this hub.</div>
+      <div class="cap" data-i18n-html="intg.colab_cap">Colab/Kaggle run in the cloud — point <code>url</code> at a Tailscale/ngrok address that reaches this hub.</div>
 
-      <div class="card-sub" style="font-weight:600;margin-top:16px">🟢 MLflow (pull)</div>
-      <div class="cap" style="margin:4px 0">Mirror runs from an MLflow tracking server — they appear under Runs with GPU cost attached. Synced every ~5 min.</div>
+      <div class="card-sub" style="font-weight:600;margin-top:16px" data-i18n="intg.mlflow">🟢 MLflow (pull)</div>
+      <div class="cap" style="margin:4px 0" data-i18n="intg.mlflow_cap">Mirror runs from an MLflow tracking server — they appear under Runs with GPU cost attached. Synced every ~5 min.</div>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
         <div>
           <div class="flabel" data-i18n="set.mlflow_uri">MLflow tracking URI</div>
@@ -1109,7 +1109,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <section data-tab="backup" hidden>
   <div class="card">
     <h2 data-i18n="backup.title">💾 Backup &amp; Restore</h2>
-    <p class="cap" style="margin:-4px 0 12px">
+    <p class="cap" style="margin:-4px 0 12px" data-i18n-html="backup.intro">
       Export your SQLite history, events, alert settings, and host registry — or restore a snapshot after a container recreate or disk move.
       SSH keys under <code>/data/.ssh</code> are <b>not</b> included; back those up separately if needed.</p>
 
@@ -1121,7 +1121,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <input type="file" id="bk_file" accept=".db,application/x-sqlite3" hidden>
     </div>
 
-    <p class="cap" style="margin-top:10px">Restore <b>replaces all current database contents</b> with the uploaded file.
+    <p class="cap" style="margin-top:10px" data-i18n-html="backup.note">Restore <b>replaces all current database contents</b> with the uploaded file.
       A safety copy of the previous database is kept alongside it as <code>*.pre-restore-*.bak</code>.</p>
   </div>
 </section>
@@ -1130,7 +1130,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <section data-tab="hosts" hidden>
   <div class="card">
     <h2 data-i18n="hosts.title">🌐 Hosts</h2>
-    <p class="cap" style="margin:-4px 0 14px">
+    <p class="cap" style="margin:-4px 0 14px" data-i18n="hosts.intro">
       Monitor your other machines from this hub — agentless, read-only, over SSH.
       Three quick steps: authorize the hub's key on a machine, add it here, then Test.
     </p>
@@ -1142,15 +1142,15 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="hstep-hd">
         <span class="hstep-no">1</span>
         <div>
-          <div class="hstep-t">Authorize this hub on the machine</div>
-          <div class="hstep-d">Run this on the machine you want to monitor so the hub can log in (read-only). Pick its operating system:</div>
+          <div class="hstep-t" data-i18n="hosts.step1_t">Authorize this hub on the machine</div>
+          <div class="hstep-d" data-i18n="hosts.step1_d">Run this on the machine you want to monitor so the hub can log in (read-only). Pick its operating system:</div>
         </div>
       </div>
       <div class="osvars" id="key_os"></div>
       <pre class="codebox" id="key_cmd">loading…</pre>
       <div class="hstep-actions">
-        <button class="btn-mini" id="key_copy">📋 Copy command</button>
-        <button class="btn-mini" id="key_showraw">Show raw public key</button>
+        <button class="btn-mini" id="key_copy" data-i18n="btn.copy_command">📋 Copy command</button>
+        <button class="btn-mini" id="key_showraw" data-i18n="hosts.show_raw">Show raw public key</button>
       </div>
       <pre class="codebox" id="pubkey" style="display:none;margin-top:8px">loading…</pre>
     </div>
@@ -1160,10 +1160,10 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="hstep-hd">
         <span class="hstep-no">2</span>
         <div>
-          <div class="hstep-t">Add the host</div>
-          <div class="hstep-d">A short name and its SSH target. Don't know the address? Scan your LAN for candidates.</div>
+          <div class="hstep-t" data-i18n="hosts.step2_t">Add the host</div>
+          <div class="hstep-d" data-i18n="hosts.step2_d">A short name and its SSH target. Don't know the address? Scan your LAN for candidates.</div>
         </div>
-        <button class="btn-mini" id="h_scan" style="margin-left:auto;align-self:center">🔍 Scan LAN</button>
+        <button class="btn-mini" id="h_scan" style="margin-left:auto;align-self:center" data-i18n="hosts.scan_lan">🔍 Scan LAN</button>
       </div>
       <div class="hosts-form">
         <input type="text" class="hosts-input" id="h_name"   placeholder="name (e.g. ardi)"             autocomplete="off" spellcheck="false">
@@ -1178,8 +1178,8 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       <div class="hstep-hd">
         <span class="hstep-no">3</span>
         <div>
-          <div class="hstep-t">Test &amp; monitor</div>
-          <div class="hstep-d">Hit <b>Test</b> on a host below — the checklist shows exactly what to fix for anything not yet
+          <div class="hstep-t" data-i18n="hosts.step3_t">Test &amp; monitor</div>
+          <div class="hstep-d" data-i18n-html="hosts.step3_d">Hit <b>Test</b> on a host below — the checklist shows exactly what to fix for anything not yet
             working, with copy-paste commands for that machine's OS. Typo in a target? Click <b>✎</b> to edit it inline.</div>
         </div>
       </div>
@@ -1230,7 +1230,7 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
   </div>
   <div class="card" id="nettalkers-card" hidden><h2 data-i18n="net.talkers_title">📊 Top talkers — containers</h2>
     <table><thead><tr><th data-i18n="col.container">Container</th><th data-i18n="col.in">In</th><th data-i18n="col.out">Out</th><th data-i18n="col.total">Total</th></tr></thead><tbody id="nettalkers"></tbody></table>
-    <p class="cap">Total bytes each container moved over the selected range (its own network namespace).</p>
+    <p class="cap" data-i18n="net.talkers_cap">Total bytes each container moved over the selected range (its own network namespace).</p>
   </div>
   <div class="card"><h2 data-i18n="net.title">🌐 Network</h2>
     <div id="netbody"></div>
@@ -1241,12 +1241,12 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <section data-tab="security" hidden>
   <div class="card"><h2 data-i18n="security.title">🛡️ Security</h2>
     <div id="secbody"></div>
-    <p class="cap" style="margin-top:12px">Read-only, agentless — no changes are made to any host. Items shown in grey
+    <p class="cap" style="margin-top:12px" data-i18n="security.cap">Read-only, agentless — no changes are made to any host. Items shown in grey
        (⚪) couldn't be read without elevated privileges on that machine.</p>
   </div>
 </section>
 
-<p class="cap">Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.
+<p class="cap" data-i18n-html="footer.about">Self-hosted &amp; open source • single container • no Prometheus/Grafana required • history downsampled on read.
 GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker API.
 <br>Ideas welcome — see <a href="https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">CONTRIBUTING.md</a> · issues &amp; PRs always open.</p>
 </div></main></div>
@@ -1255,7 +1255,7 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 <div class="umodal" id="updmodal" role="dialog" aria-modal="true" aria-labelledby="updtitle">
   <div class="box">
     <div class="hd">
-      <strong id="updtitle">Update available</strong>
+      <strong id="updtitle" data-i18n="modal.update_title">Update available</strong>
       <button class="x" type="button" id="updclose" aria-label="Close">×</button>
     </div>
     <div class="bd">
@@ -1263,9 +1263,9 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 
       <!-- One-click self-update (only shown when ALLOW_SELF_UPDATE is on) -->
       <div id="updselfbox" hidden>
-        <div style="margin-top:12px">Update this container in place. It pulls the new image, recreates itself, and verifies it came back healthy — rolling back automatically if it doesn't.</div>
+        <div style="margin-top:12px" data-i18n="modal.update_self_desc">Update this container in place. It pulls the new image, recreates itself, and verifies it came back healthy — rolling back automatically if it doesn't.</div>
         <div class="row" style="margin-top:10px">
-          <button class="btn" type="button" id="updnowbtn">⬆ Update now</button>
+          <button class="btn" type="button" id="updnowbtn" data-i18n="btn.update_now">⬆ Update now</button>
         </div>
         <div class="ins" id="updselfstatus" style="display:none"></div>
         <pre class="cmd" id="updselflog" hidden style="max-height:220px;overflow:auto"></pre>
@@ -1273,11 +1273,11 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 
       <!-- Manual fallback (always available) -->
       <div id="updmanualbox">
-        <div style="margin-top:12px">To update, run this on the host that's running the container:</div>
+        <div style="margin-top:12px" data-i18n="modal.update_manual_desc">To update, run this on the host that's running the container:</div>
         <pre class="cmd" id="updcmd">cd &lt;your-clone-dir&gt; &amp;&amp; git pull &amp;&amp; docker compose up -d --build</pre>
         <div class="row">
-          <button class="btn" type="button" id="updcopy">📋 Copy command</button>
-          <a class="btn" id="updlink" href="#" target="_blank" rel="noopener">View on GitHub →</a>
+          <button class="btn" type="button" id="updcopy" data-i18n="btn.copy_command">📋 Copy command</button>
+          <a class="btn" id="updlink" href="#" target="_blank" rel="noopener" data-i18n="modal.view_github">View on GitHub →</a>
         </div>
       </div>
       <div class="notes" id="updnotes" hidden></div>
@@ -1289,13 +1289,13 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
 <div class="umodal" id="osupdmodal" role="dialog" aria-modal="true" aria-labelledby="osupdtitle">
   <div class="box">
     <div class="hd">
-      <strong id="osupdtitle">OS updates available</strong>
+      <strong id="osupdtitle" data-i18n="modal.osupd_title">OS updates available</strong>
       <button class="x" type="button" id="osupdclose" aria-label="Close">×</button>
     </div>
     <div class="bd">
       <div class="osu-sum" id="osupdsummary"></div>
       <ul class="oslist" id="osupdlist"></ul>
-      <div class="muted" style="margin-top:14px;font-size:12px">Counts come from each host's own package manager (cached — no refresh is triggered). Click a host's row in the All-hosts table for its full Security tab.</div>
+      <div class="muted" style="margin-top:14px;font-size:12px" data-i18n="modal.osupd_note">Counts come from each host's own package manager (cached — no refresh is triggered). Click a host's row in the All-hosts table for its full Security tab.</div>
     </div>
   </div>
 </div>
@@ -1306,8 +1306,8 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
     <div class="hd wn-hd">
       <span class="wn-spark">🎉</span>
       <div class="wn-ttl">
-        <strong id="wntitle">You're now on <span id="wnver">v…</span></strong>
-        <div class="wn-sub" id="wnsub">What's new</div>
+        <strong id="wntitle" data-i18n-html="modal.wn_title_html">You're now on <span id="wnver">v…</span></strong>
+        <div class="wn-sub" id="wnsub" data-i18n="modal.wn_sub">What's new</div>
       </div>
       <button class="x" type="button" id="wnclose" aria-label="Close">×</button>
     </div>
@@ -1315,9 +1315,9 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
       <div class="notes" id="wnnotes"><!-- changelog rendered here --></div>
     </div>
     <div class="wn-ft">
-      <a class="wn-link" id="wnfull" href="https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Full changelog ↗</a>
-      <a class="wn-link" id="wnstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener">⭐ Star on GitHub</a>
-      <button class="btn wn-go" type="button" id="wngo">Got it</button>
+      <a class="wn-link" id="wnfull" href="https://github.com/SikamikanikoBG/homelab-monitor/blob/main/CHANGELOG.md" target="_blank" rel="noopener" data-i18n="modal.wn_full">Full changelog ↗</a>
+      <a class="wn-link" id="wnstar" href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener" data-i18n="modal.wn_star">⭐ Star on GitHub</a>
+      <button class="btn wn-go" type="button" id="wngo" data-i18n="modal.wn_got_it">Got it</button>
     </div>
   </div>
 </div>
@@ -1328,9 +1328,9 @@ GPU services attributed via <code>/proc/&lt;pid&gt;/cgroup</code> + the Docker A
     <header class="logdrawer-head">
       <span class="logdrawer-title">📜&nbsp;<b id="logdrawer-name"></b></span>
       <span class="logdrawer-spacer"></span>
-      <label class="logdrawer-follow"><input type="checkbox" id="logdrawer-follow" checked> Follow</label>
-      <button class="logdrawer-btn" id="logdrawer-copy" title="Copy all logs">Copy all</button>
-      <button class="logdrawer-btn" id="logdrawer-close" title="Close (Esc)" aria-label="Close">✕</button>
+      <label class="logdrawer-follow"><input type="checkbox" id="logdrawer-follow" checked> <span data-i18n="logdrawer.follow">Follow</span></label>
+      <button class="logdrawer-btn" id="logdrawer-copy" data-i18n-attr="title:logdrawer.copy_all_t" title="Copy all logs" data-i18n="logdrawer.copy_all">Copy all</button>
+      <button class="logdrawer-btn" id="logdrawer-close" data-i18n-attr="title:logdrawer.close_t;aria-label:share.close" title="Close (Esc)" aria-label="Close">✕</button>
     </header>
     <div class="logdrawer-status" id="logdrawer-status"></div>
     <pre class="logdrawer-body" id="logdrawer-body"></pre>
@@ -2413,7 +2413,7 @@ function selfUpdateStatus(level, text){   // reuses the .ins status pattern
 function resetSelfUpdateUI(latest){
   if(SELF_UPDATE_POLL){ clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null; }
   const btn = document.getElementById('updnowbtn');
-  btn.disabled = false; btn.textContent = '⬆ Update now';
+  btn.disabled = false; btn.textContent = I18N.t('btn.update_now','⬆ Update now');
   btn.dataset.latest = latest || '';
   document.getElementById('updselfstatus').style.display = 'none';
   const log = document.getElementById('updselflog'); log.hidden = true; log.textContent = '';
@@ -2421,21 +2421,21 @@ function resetSelfUpdateUI(latest){
 async function startSelfUpdate(){
   const btn = document.getElementById('updnowbtn');
   const latest = btn.dataset.latest || '';
-  if(!confirm('Update to v'+latest+' now?\n\nThe monitor will pull the new image and restart itself. The dashboard will be briefly unavailable, then reload automatically. If the new version fails its health-check it rolls back to the current one.')) return;
-  btn.disabled = true; btn.textContent = 'Updating…';
+  if(!confirm(I18N.tf('confirm.self_update','Update to v{v} now?\n\nThe monitor will pull the new image and restart itself. The dashboard will be briefly unavailable, then reload automatically. If the new version fails its health-check it rolls back to the current one.',{v:latest}))) return;
+  btn.disabled = true; btn.textContent = I18N.t('toast.updating','Updating…');
   document.getElementById('updselflog').hidden = false;
   selfUpdateStatus('info', I18N.t('toast.update_starting','Starting the update…'));
   try{
     const r = await fetch('/api/update/app', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
     const j = await r.json().catch(()=>({}));
     if(!r.ok){
-      selfUpdateStatus('critical', (j && j.error) || ('Could not start the update (HTTP '+r.status+').'));
-      btn.disabled = false; btn.textContent = '⬆ Update now';
+      selfUpdateStatus('critical', (j && j.error) || I18N.tf('toast.update_http','Could not start the update (HTTP {code}).',{code:r.status}));
+      btn.disabled = false; btn.textContent = I18N.t('btn.update_now','⬆ Update now');
       return;
     }
   }catch(e){
-    selfUpdateStatus('critical', 'Could not start the update: '+e);
-    btn.disabled = false; btn.textContent = '⬆ Update now';
+    selfUpdateStatus('critical', I18N.t('toast.update_start_fail','Could not start the update: ')+e);
+    btn.disabled = false; btn.textContent = I18N.t('btn.update_now','⬆ Update now');
     return;
   }
   pollSelfUpdate();
@@ -2461,18 +2461,18 @@ function pollSelfUpdate(){
     const state = st && st.state;
     if(state === 'done'){
       clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-      selfUpdateStatus('ok', 'Updated to v'+((st.target)||'')+'. Reloading…');
+      selfUpdateStatus('ok', I18N.tf('toast.update_done','Updated to v{v}. Reloading…',{v:((st.target)||'')}));
       setTimeout(()=>location.reload(), 2500);
     } else if(state === 'failed'){
       clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-      selfUpdateStatus('critical', (st.error||I18N.t('toast.update_failed','Update failed.'))+' The current version is still running.');
+      selfUpdateStatus('critical', (st.error||I18N.t('toast.update_failed','Update failed.'))+I18N.t('toast.update_still_running',' The current version is still running.'));
       document.getElementById('updnowbtn').disabled = false;
-      document.getElementById('updnowbtn').textContent = '⬆ Update now';
+      document.getElementById('updnowbtn').textContent = I18N.t('btn.update_now','⬆ Update now');
     } else if(state === 'rolled_back'){
       clearInterval(SELF_UPDATE_POLL); SELF_UPDATE_POLL=null;
-      selfUpdateStatus('warning', 'The new version failed its health-check, so the previous version was restored. '+(st.error||''));
+      selfUpdateStatus('warning', I18N.t('toast.update_rolled_back','The new version failed its health-check, so the previous version was restored. ')+(st.error||''));
       document.getElementById('updnowbtn').disabled = false;
-      document.getElementById('updnowbtn').textContent = '⬆ Update now';
+      document.getElementById('updnowbtn').textContent = I18N.t('btn.update_now','⬆ Update now');
     } else {
       selfUpdateStatus('info', state==='restarting' ? I18N.t('toast.update_restarting','Restarting on the new version…') : I18N.t('toast.update_working','Working…'));
     }
@@ -2600,14 +2600,14 @@ function applyCountryPrefill(){
   const sel=document.getElementById('al_country'), cap=document.getElementById('al_tariff_src');
   if(!sel||!TARIFFS) return;
   const r=(TARIFFS.tariffs||[]).find(x=>x.country_code===sel.value);
-  if(!r){ if(cap) cap.textContent='Indicative estimate — always edit to match your own bill.'; return; }
+  if(!r){ if(cap) cap.textContent=I18N.t('country.indicative','Indicative estimate — always edit to match your own bill.'); return; }
   document.getElementById('al_currency').value  = r.currency||'$';
   document.getElementById('al_kwh').value       = r.price_day;
   document.getElementById('al_kwh_night').value = r.price_night;
   document.getElementById('al_night_start').value = r.night_start||'22:00';
   document.getElementById('al_night_end').value   = r.night_end||'06:00';
   setTariffMode(!!r.dual_common);
-  if(cap) cap.textContent = `Indicative — ${r.country_name}, ${r.source} (${r.year}). Edit to match your own bill.`;
+  if(cap) cap.textContent = I18N.tf('country.indicative_src','Indicative — {country}, {source} ({year}). Edit to match your own bill.',{country:r.country_name,source:r.source,year:r.year});
 }
 
 // ── Alerts (settings) tab ─────────────────────────────────────────────────────
