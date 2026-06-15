@@ -100,10 +100,10 @@ def cmd_sync(check=False):
         done = len(keys) - len(todo)
         bar = "#" * int(cov * 20)
         print(f"  {code:<8} {done:>3}/{len(keys)} translated  [{bar:<20}] {cov*100:5.1f}%"
-              + ("   ✓ in switcher" if cov >= 0.9 else "   · hidden (<90%)"))
+              + ("   [shown in switcher]" if cov >= 0.9 else "   [hidden (<90%)]"))
         if check and json.dumps(before, ensure_ascii=False) != json.dumps(new, ensure_ascii=False):
             drift = True
-            print(f"           ↳ OUT OF SYNC — run `python scripts/i18n-sync.py` and commit")
+            print(f"           -> OUT OF SYNC — run `python scripts/i18n-sync.py` and commit")
 
     if check and drift:
         return 1
