@@ -335,6 +335,104 @@ def get_history(range="6h"):
     }
 
 
+# ── costs & experiments (the AI Lab Cockpit, over MCP) ───────────────────────
+
+def get_costs(range="7d"):
+    """Power-cost summary for the hub (the Costs tab): what the machine drew and
+    what it cost over `range`, plus the ranked list of which processes, containers,
+    services and models cost the most.
+
+    Returns `currency` and `tariff` (flat, or a day/night split), the `machine`
+    totals (`now_w` live draw, `energy_kwh`, and `cost` windows for today/7d/30d
+    plus `cost_range` for the selected window), and `breakdown` — the top energy
+    consumers, each with `kind`, `name`, `energy_kwh`, `cost` and `avg_w`.
+    `enabled` is False when no tariff is configured (energy is still reported,
+    cost reads 0). Answers "what did my homelab cost, and what's the biggest line
+    item?". The per-bucket stacked-area chart is omitted to keep this compact.
+    """
+    d = _get("/api/costs?range=" + urllib.parse.quote(str(range)))
+    machines = d.get("machines") or []
+    m = machines[0] if machines else {}
+    return {
+        "range": d.get("range", range),
+        "enabled": d.get("enabled"),
+        "currency": d.get("currency"),
+        "rapl_available": d.get("rapl_available"),
+        "tariff": d.get("tariff"),
+        "machine": {
+            "now_w": m.get("now_w"),
+            "energy_kwh": m.get("energy_kwh"),
+            "cost": m.get("cost"),
+            "cost_range": m.get("cost_range"),
+            "measured": m.get("measured"),
+            "estimated": m.get("estimated"),
+        },
+        "breakdown": d.get("breakdown") or [],
+    }
+
+
+def get_entity_cost(name, kind="", range="7d"):
+    """Cost drill-down for one process / container / service / model by `name`
+    (the Costs tab's click-through). Pass the `kind`/`name` pair from
+    `get_costs`' breakdown; `kind` is optional but disambiguates same-named rows.
+
+    Returns `energy_kwh` and `cost` over `range`, the `avg_w`/`peak_w` it drew,
+    and `resources` (e.g. peak GPU VRAM). Answers "what did *this* model/container
+    cost me?". The per-bucket cost-curve series is omitted to keep this compact.
+    """
+    q = "?name=" + urllib.parse.quote(str(name)) + "&range=" + urllib.parse.quote(str(range))
+    if kind:
+        q += "&kind=" + urllib.parse.quote(str(kind))
+    d = _get("/api/costs/entity" + q)
+    return {
+        "name": d.get("name", name),
+        "kind": d.get("kind", kind),
+        "range": d.get("range", range),
+        "currency": d.get("currency"),
+        "energy_kwh": d.get("energy_kwh"),
+        "cost": d.get("cost"),
+        "avg_w": d.get("avg_w"),
+        "peak_w": d.get("peak_w"),
+        "resources": d.get("resources"),
+    }
+
+
+def get_experiments(range="7d", status=""):
+    """Tracked training/eval runs (the Experiments tab), each priced with the real
+    GPU energy it burned. Optionally filter by `status` (running / finished /
+    failed / killed).
+
+    Returns one row per run: `id`, `name`, `source` (sdk/mlflow/…), `status`,
+    `started_at`/`ended_at`/`duration`, `host`, `params`, `tags`,
+    `metrics_latest` (the last value logged per metric — e.g. loss/accuracy), and
+    the energy it cost: `energy_kwh`, `cost`, `avg_w`, `peak_util`. Answers "which
+    runs ran, how did they do, and what did each one cost?".
+    """
+    q = "?range=" + urllib.parse.quote(str(range))
+    if status:
+        q += "&status=" + urllib.parse.quote(str(status))
+    d = _get("/api/runs" + q)
+    runs = d.get("runs") or []
+    return {
+        "range": d.get("range", range),
+        "currency": d.get("currency"),
+        "tariff_mode": d.get("tariff_mode"),
+        "count": len(runs),
+        "runs": runs,
+    }
+
+
+def get_experiment(run_id):
+    """Full detail for one tracked run by `run_id` (from `get_experiments`).
+
+    Returns its logged-metric series (`metrics`: per-key steps/ts/values — the
+    loss curve), the GPU `resource` time-series (`power_w`/`util_pct` over the
+    run), and the priced energy it burned (`energy_kwh`, `cost`, `avg_w`,
+    `peak_util`). An unknown id surfaces as an HTTP 404 error.
+    """
+    return _get("/api/runs/" + urllib.parse.quote(str(run_id)))
+
+
 def scan_disk(path="/", rescan=False, max_wait=60):
     """WizTree-style nested folder-size treemap for a host path (the Disks tab).
 

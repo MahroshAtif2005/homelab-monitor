@@ -531,7 +531,7 @@
   "logdrawer.copy_all_t": "复制所有日志",
   "logdrawer.close_t": "关闭 (Esc)",
   "diag.fleet_meta": "监控在此 hub 上能看到什么，以及如何启用缺失的部分。即使可选组件未挂载，仪表盘仍可运行 — 无需 GPU。",
-  "mcp.card_desc": "内置了一个只读的 <a href=\"https://modelcontextprotocol.io\" target=\"_blank\" rel=\"noopener\">MCP</a> 服务，因此 Claude — 或任何 MCP 客户端 — 都能连接并以完整的仪表盘视图探索这个家庭实验室。<span id=\"mcpstatus\"></span>",
+  "mcp.card_desc": "内置了一个只读的 <a href=\"https://modelcontextprotocol.io\" target=\"_blank\" rel=\"noopener\">MCP</a> 服务，因此 Claude — 或任何 MCP 客户端 — 都能连接并以完整的仪表盘视图探索这个家庭实验室，乃至每个模型和容器的运行成本。<span id=\"mcpstatus\"></span>",
   "mcp.connect_hint": "使用 Claude CLI 连接（然后向它询问你的主机群）：",
   "mcp.docs": "MCP 文档 →",
   "gpu.vram_alloc": "VRAM 分配",

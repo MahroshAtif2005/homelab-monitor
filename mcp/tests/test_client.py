@@ -98,6 +98,62 @@ DATA = {
     "insights": ["GPU VRAM peaked at 8.2 GB driven by open-webui"],
 }
 
+COSTS = {
+    "enabled": True, "range": "7d", "bucket_sec": 600, "currency": "BGN",
+    "rapl_available": True,
+    "tariff": {"mode": "dual", "price_day": 0.28, "price_night": 0.14,
+               "night_start": "23:00", "night_end": "06:00"},
+    "machines": [{
+        "name": "local",
+        "now_w": {"gpu": 210, "cpu": 45, "dram": 8, "total": 263},
+        "energy_kwh": {"gpu": 12.4, "cpu": 3.1, "dram": 0.6, "total": 16.1},
+        "cost": {"today": 0.92, "d7": 4.21, "d30": 18.7},
+        "cost_range": 4.21,
+        "measured": ["gpu", "cpu", "dram"], "estimated": [],
+    }],
+    # the stacked-area chart the client deliberately drops
+    "components": {"labels": [1000, 1600], "gpu": [200, 210], "cpu": [40, 45], "dram": [7, 8]},
+    "breakdown": [
+        {"kind": "model", "name": "llama3:70b", "energy_kwh": 8.2, "cost": 2.1, "avg_w": 180},
+        {"kind": "container", "name": "immich_ml", "energy_kwh": 1.4, "cost": 0.35, "avg_w": 30},
+    ],
+}
+
+COSTS_ENTITY = {
+    "name": "llama3:70b", "kind": "model", "range": "7d", "bucket_sec": 600,
+    "currency": "BGN", "energy_kwh": 8.2, "cost": 2.1, "avg_w": 180, "peak_w": 320,
+    # the per-bucket cost curve the client deliberately drops
+    "series": {"labels": [1000, 1600], "watts": [170, 190], "cost_cum": [0.4, 0.9]},
+    "resources": {"gpu_vram_peak_mb": 8200},
+}
+
+RUNS = {
+    "range": "7d", "currency": "BGN", "tariff_mode": "dual",
+    "runs": [
+        {"id": "r1", "name": "qwen-sft", "source": "sdk", "status": "finished",
+         "started_at": 1000, "ended_at": 4600, "duration": 3600, "host": "ardi",
+         "params": {"lr": 0.0002, "epochs": 3}, "tags": ["sft"], "notes": "",
+         "key_id": 1, "key_name": "laptop",
+         "metrics_latest": {"loss": 0.42, "accuracy": 0.91},
+         "energy_kwh": 1.8, "cost": 0.46, "avg_w": 180, "peak_util": 99},
+        {"id": "r2", "name": "eval-sweep", "source": "mlflow", "status": "running",
+         "started_at": 4000, "ended_at": None, "duration": 600, "host": "ardi",
+         "params": {}, "tags": [], "notes": "", "key_id": 1, "key_name": "laptop",
+         "metrics_latest": {"loss": 0.55}, "energy_kwh": 0.3, "cost": 0.08,
+         "avg_w": 160, "peak_util": 95},
+    ],
+}
+
+RUN_ONE = {
+    "id": "r1", "name": "qwen-sft", "source": "sdk", "status": "finished",
+    "started_at": 1000, "ended_at": 4600, "duration": 3600, "host": "ardi",
+    "params": {"lr": 0.0002, "epochs": 3}, "tags": ["sft"], "notes": "",
+    "metrics": {"loss": {"steps": [0, 1, 2], "ts": [1000, 2800, 4600], "values": [1.2, 0.7, 0.42]}},
+    "resource": {"labels": [1000, 4600], "power_w": [170, 190], "util_pct": [98, 99], "bucket_sec": 600},
+    "energy_kwh": 1.8, "cost": 0.46, "avg_w": 180, "peak_util": 99,
+    "currency": "BGN", "tariff_mode": "dual",
+}
+
 DISK_DONE = {
     "path": "/", "state": "done", "total": 355218889101, "free": 82583969792,
     "entries": [{"name": "var", "path": "/var", "bytes": 172911017873,
@@ -115,6 +171,9 @@ ROUTES = {
     "/api/host_data/ghost": HOST_GHOST,
     "/api/health": HEALTH,
     "/api/data": DATA,
+    "/api/costs": COSTS,
+    "/api/costs/entity": COSTS_ENTITY,
+    "/api/runs": RUNS,
     "/healthz": HEALTHZ,
 }
 
@@ -143,6 +202,15 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(body)
+            return
+        if path.startswith("/api/runs/"):
+            rid = path.rsplit("/", 1)[-1]
+            if rid == "r1":
+                self._json(RUN_ONE)
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'{"error":"unknown run"}')
             return
         if path in ROUTES:
             body = json.dumps(ROUTES[path]).encode()
@@ -260,6 +328,40 @@ def run():
         check("blame" in r["events"][0], "blame preserved")
         check(len(r["insights"]) == 1, "insights surfaced")
         check(hc.get_alerts()["events"] == r["events"], "get_alerts aliases get_events")
+
+        print("get_costs")
+        r = hc.get_costs("7d")
+        check(r["enabled"] is True and r["currency"] == "BGN", "cost summary basics")
+        check(r["machine"]["cost"]["today"] == 0.92, "machine cost windows (today/7d/30d)")
+        check(r["machine"]["energy_kwh"]["total"] == 16.1, "machine energy total")
+        check(r["machine"]["cost_range"] == 4.21, "cost over the selected range")
+        check(r["tariff"]["mode"] == "dual", "tariff passed through")
+        check(r["breakdown"][0]["name"] == "llama3:70b", "ranked breakdown, biggest first")
+        check("components" not in r, "per-bucket stacked chart trimmed out")
+
+        print("get_entity_cost")
+        r = hc.get_entity_cost("llama3:70b", "model", "7d")
+        check(r["cost"] == 2.1 and r["energy_kwh"] == 8.2, "entity cost + energy")
+        check(r["peak_w"] == 320, "entity peak watts")
+        check(r["resources"]["gpu_vram_peak_mb"] == 8200, "entity resource use")
+        check("series" not in r, "entity cost curve trimmed out")
+
+        print("get_experiments")
+        r = hc.get_experiments("7d")
+        check(r["count"] == 2, "counts runs")
+        check(r["runs"][0]["metrics_latest"]["loss"] == 0.42, "latest metrics surfaced")
+        check(r["runs"][0]["cost"] == 0.46, "run priced by GPU energy")
+
+        print("get_experiment")
+        r = hc.get_experiment("r1")
+        check(r["id"] == "r1" and r["status"] == "finished", "single run detail")
+        check(r["metrics"]["loss"]["values"][-1] == 0.42, "loss-curve series")
+        check(r["resource"]["util_pct"] == [98, 99], "gpu series over the run")
+        try:
+            hc.get_experiment("nope")
+            check(False, "unknown run id raises MonitorError")
+        except hc.MonitorError as e:
+            check("404" in str(e), "unknown run id raises MonitorError (404)")
 
         print("resources")
         check("gpu_util" in hc.get_metrics(), "metrics text")

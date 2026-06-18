@@ -38,12 +38,13 @@
   ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
-      "summary": "HomeLab Monitor is a self-hosted dashboard for AI/homelab rigs. It ships a read-only MCP server (v0.14.0+) inside the same Docker image, serving 12 tools over streamable-HTTP — explore your fleet's hosts, containers, GPU usage, services, and alerts without touching the OS. MIT, no cloud dependency.",
+      "summary": "HomeLab Monitor is a self-hosted dashboard for AI/homelab rigs. It ships a read-only MCP server (v0.14.0+) inside the same Docker image, serving 16 tools over streamable-HTTP — explore your fleet's hosts, containers, GPU usage, services, power costs, tracked experiments and alerts without touching the OS. MIT, no cloud dependency.",
       "connect_http": "claude mcp add --transport http homelab http://YOUR-HUB:9810/mcp",
       "connect_stdio": "docker run -i --rm -e HOMELAB_MONITOR_URL=http://YOUR-HUB:9800 -e MCP_TRANSPORT=stdio sikamikaniko123/homelab-monitor python /app/mcp_server.py",
       "tools": [
         "list_hosts", "get_host", "get_snapshot", "get_containers", "get_services",
-        "get_memory", "get_gpu", "get_ai_models", "get_history", "get_events",
+        "get_memory", "get_gpu", "get_ai_models", "get_history", "get_costs",
+        "get_entity_cost", "get_experiments", "get_experiment", "get_events",
         "get_alerts", "scan_disk"
       ],
       "categories": ["monitoring", "homelab", "self-hosted", "gpu", "observability"],

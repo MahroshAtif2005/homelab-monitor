@@ -1,6 +1,6 @@
 ---
 title: MCP server — connect Claude, ChatGPT & any AI agent to your homelab
-description: Connect Claude, ChatGPT or any MCP client to your homelab. HomeLab Monitor ships a read-only Model Context Protocol server with 12 tools — one line to connect.
+description: Connect Claude, ChatGPT or any MCP client to your homelab. HomeLab Monitor ships a read-only Model Context Protocol server with 16 tools — one line to connect.
 ---
 
 # MCP server — connect Claude, ChatGPT & any AI agent
@@ -38,6 +38,10 @@ Everything the dashboard shows is reachable through these tools. The usual path 
 | `get_gpu(range)` | GPU util / VRAM / power / temp, per-model VRAM, caller attribution | `/api/data` |
 | `get_ai_models(range)` | Which models are loaded, their VRAM, and *who is driving them* | `/api/data` |
 | `get_history(range)` | Charted time-series (GPU + host) for trends | `/api/data` |
+| `get_costs(range)` | What the machine drew and cost, + a ranked per-process/container/service/model breakdown | `/api/costs` |
+| `get_entity_cost(name, kind, range)` | Cost drill-down for one process/container/service/model | `/api/costs/entity` |
+| `get_experiments(range, status)` | Tracked runs, each priced by the real GPU energy it burned | `/api/runs` |
+| `get_experiment(run_id)` | One run's loss-curve metrics, GPU power/util series and priced energy | `/api/runs/<id>` |
 | `get_events(range)` / `get_alerts(range)` | Recent OOM kills / threshold crossings + insights | `/api/data` |
 | `scan_disk(path, rescan)` | WizTree-style nested folder-size treemap | `/api/disk_scan` |
 
@@ -101,6 +105,8 @@ Once connected, ask your agent natural questions and let it pick the tools:
 - *"Which host has a reboot pending **and** an OS upgrade available — what's the safe order to apply it?"*
 - *"Why is the GPU pinned right now, and which service is calling the model server?"*
 - *"Any OOM kills in the last 24h? What got blamed?"*
+- *"What did my homelab cost last night, and which model is the most expensive thing on the GPU?"*
+- *"How much energy did my last training run burn, and what did it cost?"*
 
 !!! warning "Keep it on your LAN/VPN"
     Like the dashboard, the MCP server gives broad visibility into your hosts.
