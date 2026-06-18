@@ -5,8 +5,8 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
-## [0.17.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.17.0) — 2026-06-18 · **Ask Your Homelab**
-*Costs and experiments are now MCP tools — so Claude (or any AI) can tell you what last night cost. Plus: the dashboard speaks your language, and can update itself.*
+## [0.17.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.17.0) — 2026-06-18 · **Ask Your Homelab — over MCP**
+*Costs and experiments are now MCP tools, so Claude (or any AI) can tell you what last night cost. Bonus: it speaks Chinese now, and updates itself.*
 
 > 0.16 turned HomeLab Monitor into the **AI Lab Cockpit** — GPU, models and the power bill on one page. 0.17 makes that cockpit **conversational and personal**: your AI can now read the costs and the experiment runs straight over MCP, the whole UI can speak another language, and the dashboard can upgrade itself in one click. Still pure Python + Flask, no new dependencies.
 
