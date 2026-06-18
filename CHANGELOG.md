@@ -33,6 +33,16 @@ release notes.
 
 The unfinished personalisation items from the "Make it yours" epic (#147) — reorderable tabs (#33), the AI Models Hall of Fame (#23) and per-service notification rules (#24) — carry forward to the next cycle.
 
+**Thanks to**
+This release leaned hard on the community — it wouldn't be what it is without them.
+- **@pehota** — one-click self-update (off by default), a socket-safety fix, and migrated Bulgaria's tariffs to EUR
+- **@krishnapandey1504** — built the unified toast notification system
+- **@DevCrox** — wired the dashboard's status messages onto the new toast system
+- **@laishettikarthik-tech** — fixed the network throughput legend filter resetting on refresh
+- **@koteshyelamati** — clearer Topology / Machine card labels
+
+Five external contributors on one release. 🙏
+
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
 
