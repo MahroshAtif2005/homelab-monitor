@@ -55,8 +55,11 @@ INSTRUCTIONS = (
     "tools: `get_containers` and `get_services` (full Docker/systemd lists), "
     "`get_memory` (per-service/per-process RAM breakdown), `get_gpu` (utilisation, "
     "per-model VRAM, and who's driving it), `get_ai_models` (loaded models), "
-    "`get_history` (charted time-series), `get_events`/`get_alerts` (OOM kills / "
-    "threshold crossings), and `scan_disk(path)` (WizTree-style folder treemap). "
+    "`get_history` (charted time-series), `get_costs`/`get_entity_cost` (power "
+    "turned into money, per machine and per process/container/service/model), "
+    "`get_experiments`/`get_experiment` (tracked runs priced by the GPU energy they "
+    "burned), `get_events`/`get_alerts` (OOM kills / threshold crossings), and "
+    "`scan_disk(path)` (WizTree-style folder treemap). "
     "Resources expose Prometheus `/metrics`, `/healthz` and the CHANGELOG. This "
     "server never mutates the fleet."
 )
@@ -177,6 +180,50 @@ def get_ai_models(range: str = "6h") -> dict:
     "24h", "7d"). Answers "why is the GPU pinned, and which service is calling it?".
     """
     return hc.get_ai_models(range)
+
+
+@mcp.tool()
+@_track
+def get_costs(range: str = "7d") -> dict:
+    """Power-cost summary for the hub (Costs tab): what the machine drew and what it
+    cost over `range`, with the live `tariff`, the `machine` totals (now/energy/cost
+    for today, 7d, 30d and the range) and a ranked `breakdown` of which processes,
+    containers, services and models cost the most. Answers "what did my homelab cost,
+    and what's the biggest line item?".
+    """
+    return hc.get_costs(range)
+
+
+@mcp.tool()
+@_track
+def get_entity_cost(name: str, kind: str = "", range: str = "7d") -> dict:
+    """Cost drill-down for one process/container/service/model by `name` (use a
+    `kind`/`name` pair from `get_costs`' breakdown; `kind` is optional). Returns its
+    `energy_kwh`, `cost`, `avg_w`/`peak_w` and resource use over `range`. Answers
+    "what did *this* model or container cost me?".
+    """
+    return hc.get_entity_cost(name, kind, range)
+
+
+@mcp.tool()
+@_track
+def get_experiments(range: str = "7d", status: str = "") -> dict:
+    """Tracked training/eval runs (Experiments tab), each priced with the real GPU
+    energy it burned. Optionally filter by `status` (running/finished/failed/killed).
+    Each row carries its params, latest metrics (loss/accuracy…), duration and cost.
+    Answers "which runs ran, how did they do, and what did each one cost?".
+    """
+    return hc.get_experiments(range, status)
+
+
+@mcp.tool()
+@_track
+def get_experiment(run_id: str) -> dict:
+    """Full detail for one tracked run by `run_id` (from `get_experiments`): its
+    logged-metric series (the loss curve), the GPU power/util time-series over the
+    run, and the priced energy it burned. An unknown id returns an HTTP 404 error.
+    """
+    return hc.get_experiment(run_id)
 
 
 @mcp.tool()

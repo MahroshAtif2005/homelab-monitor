@@ -6,6 +6,9 @@ static/chart.min.js
 __pycache__/
 *.pyc
 
+# Local dev journals (documentation mode) — never checked in
+.i18n-journal.md
+
 # MkDocs build output + locally-mirrored screenshots (the docs workflow does
 # this copy fresh on each build; not checked in).
 site/

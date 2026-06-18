@@ -5,6 +5,44 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [0.17.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.17.0) — 2026-06-18 · **Ask Your Homelab — over MCP**
+*Costs and experiments are now MCP tools, so Claude (or any AI) can tell you what last night cost. Bonus: it speaks Chinese now, and updates itself.*
+
+> 0.16 turned HomeLab Monitor into the **AI Lab Cockpit** — GPU, models and the power bill on one page. 0.17 makes that cockpit **conversational and personal**: your AI can now read the costs and the experiment runs straight over MCP, the whole UI can speak another language, and the dashboard can upgrade itself in one click. Still pure Python + Flask, no new dependencies.
+
+**Ask your AI what it costs (MCP)**
+- The built-in **read-only MCP server** gains four tools so an agent can finally see the money side of the lab: `get_costs` (machine draw + cost, with a ranked per-process / container / service / model breakdown), `get_entity_cost` (drill into one line item), and `get_experiments` / `get_experiment` (tracked runs priced by the **real GPU energy they burned** — loss curve and watts on the same timeline). **16 tools total**, still **nothing mutated**. Ask *"what did my homelab cost last night, and which model is the most expensive thing on the GPU?"* and let it pick the tools.
+
+**Make it yours — in your language**
+- A full **internationalisation framework**: every tab, modal, toast and helper string is translatable, served from `/locales` and shipped in the image. **Simplified Chinese (zh-CN)** is the first complete translation (96% coverage). Closes #148.
+
+**A dashboard that maintains itself**
+- **One-click self-update** from the dashboard — opt-in, **off by default** (`ALLOW_SELF_UPDATE`), confirmation-gated, and the monitor's *first and only* write action. It is **not** exposed over MCP. Closes #142.
+- **Toast notifications** — every action confirms itself with a quick, dismissible toast instead of a silent state change. Closes #139.
+
+**Brand & community**
+- **New logo — radar, not satellite.** A designed radar mark is now *the* brand everywhere — sidebar, header, favicon, README and the docs site — in a transparent variant for the dark UI and a tiled app-icon for the favicon. Radar fits what the tool does: sweep the fleet, surface the blips.
+- **Community** — a "Join the Discord" button and a permanent invite in the sidebar, a "Buy me a coffee" support button, and a live Docker-pulls badge in the README. Come help shape the roadmap: <https://discord.gg/tpKWKEdSQN>
+
+**Fixed**
+- Network › Throughput legend filter no longer resets on every auto-refresh (#155).
+- Clearer **Topology / Machine** card labels on System › Hardware (#154).
+- The offline "What's new" changelog now renders italics, blockquotes and the bold subtitle (#173).
+- Bulgaria (BG) tariffs switched from BGN to EUR (#145).
+- The brand logo no longer 404s in the container — the Dockerfile copies the whole `static/` dir instead of listing files one by one.
+
+The unfinished personalisation items from the "Make it yours" epic (#147) — reorderable tabs (#33), the AI Models Hall of Fame (#23) and per-service notification rules (#24) — carry forward to the next cycle.
+
+**Thanks to**
+This release leaned hard on the community — it wouldn't be what it is without them.
+- **@pehota** — one-click self-update (off by default), a socket-safety fix, and migrated Bulgaria's tariffs to EUR
+- **@krishnapandey1504** — built the unified toast notification system
+- **@DevCrox** — wired the dashboard's status messages onto the new toast system
+- **@laishettikarthik-tech** — fixed the network throughput legend filter resetting on refresh
+- **@koteshyelamati** — clearer Topology / Machine card labels
+
+Five external contributors on one release. 🙏
+
 ## [0.16.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.16.0) — 2026-06-14 · **The AI Lab Cockpit**
 *Your GPU, your models, and your power bill — finally on the same page.*
 

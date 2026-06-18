@@ -1,4 +1,4 @@
-# 🛰️ HomeLab Monitor
+# <img src="docs/logo.svg" width="30" align="top" alt=""> HomeLab Monitor
 
 [![GitHub stars](https://img.shields.io/github/stars/SikamikanikoBG/homelab-monitor?style=social)](https://github.com/SikamikanikoBG/homelab-monitor/stargazers)
 [![Docker pulls](https://img.shields.io/docker/pulls/sikamikaniko123/homelab-monitor?logo=docker&logoColor=white&label=docker%20pulls&color=2496ED)](https://hub.docker.com/r/sikamikaniko123/homelab-monitor)

@@ -77,4 +77,4 @@ so external deps would defeat the "agentless" promise.
 - Leave the **version bump** to the maintainer; it happens on release, not
   per-PR.
 
-Thanks. Every issue, suggestion and PR makes it better. 🛰️
+Thanks. Every issue, suggestion and PR makes it better. 📡
