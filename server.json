@@ -3,7 +3,7 @@
   "name": "io.github.SikamikanikoBG/homelab-monitor",
   "title": "HomeLab Monitor",
   "description": "Self-hosted homelab dashboard with a built-in read-only MCP server (hosts, Docker, GPU, services).",
-  "version": "0.14.3",
+  "version": "0.17.0",
   "websiteUrl": "https://sikamikanikobg.github.io/homelab-monitor/mcp/",
   "repository": {
     "url": "https://github.com/SikamikanikoBG/homelab-monitor",
@@ -12,7 +12,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "docker.io/sikamikaniko123/homelab-monitor:0.14.3",
+      "identifier": "docker.io/sikamikaniko123/homelab-monitor:0.17.0",
       "transport": {
         "type": "stdio"
       },
