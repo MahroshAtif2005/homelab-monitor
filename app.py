@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.17.0"
+VERSION      = "0.17.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -3170,35 +3170,74 @@ def _poll_and_adapt(name, u, host, port, fam):
         return cdata, None
     return None, cerr or err                  # too slow even at the ceiling / down
 
+def _host_online_window(name):
+    """How stale a host's last good sample may be before the UI calls it offline.
+    Generous and timeout-aware: a host that legitimately needs a long probe budget
+    (or that misses one slow cycle) must not flap to 'offline' between refreshes.
+    The flip only happens after a *sustained* gap — at least a few missed samples,
+    or twice the host's own learned probe budget, whichever is larger."""
+    timeout, _ = _host_poll_state(name)
+    return max(INTERVAL * 6, (timeout + INTERVAL) * 2)
+
+def _host_is_online(entry):
+    """Single source of truth for the fleet 'online' flag (used by both /api/fleet
+    and /api/host_data). True while we hold data whose last *successful* poll is
+    inside the host's staleness window. Hysteresis lives here, not in the caller,
+    so the table and the per-host view never disagree."""
+    if not entry or "data" not in entry or not entry.get("at"):
+        return False
+    window = entry.get("window") or (INTERVAL * 6)
+    return (int(time.time()) - int(entry["at"])) < window
+
+def _poll_one_host(h):
+    """Probe one eligible host and fold the result into HOST_DATA. Contains its own
+    exceptions so a single bad host can never sink the whole cycle. A *failed* poll
+    keeps the last good data and timestamp untouched — only the error is recorded —
+    so the online flag rides on last-success, not last-attempt."""
+    try:
+        check = h.get("last_check") or {}
+        if (check.get("summary") or {}).get("overall") not in ("ok", "warn"):
+            return
+        parsed = _parse_ssh_target(h["ssh_target"])
+        if not parsed:
+            return
+        u, host, port = parsed
+        fam = ((check.get("os") or {}).get("family")) or "linux"
+        data, err = _poll_and_adapt(h["name"], u, host, port, fam)
+        window = _host_online_window(h["name"])
+        with HOST_DATA_LOCK:
+            entry = HOST_DATA.get(h["name"], {})
+            entry["window"] = window
+            if data:
+                entry["data"]   = data
+                entry["at"]     = int(time.time())
+                entry["error"]  = None
+                entry["fails"]  = 0
+            else:
+                entry["error"]    = err or "unknown error"
+                entry["error_at"] = int(time.time())
+                entry["fails"]    = int(entry.get("fails", 0)) + 1
+            HOST_DATA[h["name"]] = entry
+    except Exception as e:
+        print(f"host poll error ({h.get('name')}):", e, flush=True)
+
 def host_poller():
-    """Loop: probe every registered host whose last Test was healthy. A per-host
-    adaptive timeout (issue #99) isolates slow remotes — they self-calibrate to a
+    """Loop: probe every registered host whose last Test was healthy. Hosts are
+    polled *concurrently* so one slow/timing-out remote can't delay the others and
+    age their rows out to a false 'offline' (the flapping bug). A per-host adaptive
+    timeout (issue #99) still isolates slow remotes — they self-calibrate to a
     working budget instead of going permanently dark, while fast hosts stay at the
     15s default. Errors are kept on the cache row so the UI can show a last error."""
     # Stagger the first run a touch so we don't fire before the app is fully up.
     time.sleep(2)
     while True:
         try:
-            for h in list_hosts():
-                check = h.get("last_check") or {}
-                if (check.get("summary") or {}).get("overall") not in ("ok", "warn"):
-                    continue
-                parsed = _parse_ssh_target(h["ssh_target"])
-                if not parsed:
-                    continue
-                u, host, port = parsed
-                fam = ((check.get("os") or {}).get("family")) or "linux"
-                data, err = _poll_and_adapt(h["name"], u, host, port, fam)
-                with HOST_DATA_LOCK:
-                    entry = HOST_DATA.get(h["name"], {})
-                    if data:
-                        entry["data"]  = data
-                        entry["at"]    = int(time.time())
-                        entry["error"] = None
-                    else:
-                        entry["error"]      = err or "unknown error"
-                        entry["error_at"]   = int(time.time())
-                    HOST_DATA[h["name"]] = entry
+            hosts = list_hosts()
+            if hosts:
+                # Each host gets its own thread for the cycle, so the wall-clock
+                # period is the slowest single probe, not the sum of all of them.
+                with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as ex:
+                    list(ex.map(_poll_one_host, hosts))
         except Exception as e:
             print("host_poller error:", e, flush=True)
         time.sleep(INTERVAL)
@@ -3743,15 +3782,22 @@ _COLORS = {"info": 0x58A6FF, "warning": 0xD29922, "critical": 0xF85149}
 _NTFY_P = {"info": 3, "warning": 4, "critical": 5}
 _NTFY_T = {"info": "information_source", "warning": "warning", "critical": "rotating_light"}
 
+# Discord's API sits behind Cloudflare, which rejects the default
+# "Python-urllib/x.y" agent with 403 (error code 1010). A real User-Agent is
+# also mandated by Discord's API rules, so every outbound POST carries one.
+NOTIFY_USER_AGENT = f"homelab-monitor/{VERSION} (+https://github.com/SikamikanikoBG/homelab-monitor)"
+
 def _post_json(url, payload, timeout=5):
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": NOTIFY_USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
 
 def _post_text(url, text, headers=None, timeout=5):
-    req = urllib.request.Request(url, data=text.encode("utf-8"),
-                                 headers=headers or {"Content-Type": "text/plain"})
+    hdr = dict(headers or {"Content-Type": "text/plain"})
+    hdr.setdefault("User-Agent", NOTIFY_USER_AGENT)
+    req = urllib.request.Request(url, data=text.encode("utf-8"), headers=hdr)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
 
@@ -5517,10 +5563,11 @@ def api_host_data(name):
                         "error": (entry or {}).get("error") or "no data yet",
                         "at": (entry or {}).get("at"),
                         "host": None})
-    age = int(time.time()) - int(entry["at"])
+    age     = int(time.time()) - int(entry["at"])
+    online  = _host_is_online(entry)
     return jsonify({"name": name, "host": enrich_os_upgrade(entry["data"].get("host", {})),
-                    "at": entry["at"], "online": age < INTERVAL * 3,
-                    "stale_for": age if age >= INTERVAL * 3 else 0,
+                    "at": entry["at"], "online": online,
+                    "stale_for": 0 if online else age,
                     "error": entry.get("error")})
 
 # ── On-demand disk-usage scan (WizTree-style folder treemap) ──────────────────
@@ -5640,7 +5687,7 @@ def api_fleet():
             entry = HOST_DATA.get(h["name"]) or {}
             data  = entry.get("data") or {}
             at    = entry.get("at")
-            online = bool(data) and at and (int(time.time()) - at) < INTERVAL * 3
+            online = _host_is_online(entry)
             rows.append({
                 "name": h["name"],
                 "label": h["name"],
