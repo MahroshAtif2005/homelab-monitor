@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
@@ -3705,6 +3705,15 @@ SETTING_DEFAULTS = {
     "ntfy_server":         "https://ntfy.sh",
     "telegram_token":      "",
     "telegram_chat_id":    "",
+    "email_host":          "",
+    "email_port":          "587",
+    "email_use_tls":       "1",
+    "email_username":      "",
+    "email_password":      "",
+    "email_from":          "",
+    "email_to":            "",
+    "slack_webhook_url":   "",
+    "webhook_url":         "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
     "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
@@ -3721,7 +3730,7 @@ SETTING_DEFAULTS = {
     "mlflow_uri":          "",         # MLflow tracking server base (blank = off)
     "mlflow_token":        "",         # optional bearer for a secured MLflow
 }
-SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
+SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "slack_webhook_url", "webhook_url", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
@@ -3741,7 +3750,7 @@ def get_settings():
 # LAN, so validating the scheme/host on save keeps someone who can reach the
 # dashboard from pointing these at a non-HTTP scheme or an empty host — a small
 # SSRF-surface tightening, not a change to the trusted-LAN model.
-_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server"}
+_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server", "slack_webhook_url", "webhook_url"}
 
 def _validate_url_settings(updates):
     """Return an error string if any URL-valued setting is malformed, else None.
@@ -3758,6 +3767,31 @@ def _validate_url_settings(updates):
             return f"{key} is not a valid URL."
         if u.scheme not in ("http", "https") or not u.netloc:
             return f"{key} must be an http(s) URL with a host."
+    return None
+
+def _validate_email_settings(updates):
+    """Return an error string for malformed email alert fields, else None."""
+    effective = {**get_settings(), **updates}
+    host = (effective.get("email_host") or "").strip()
+    from_addr = (effective.get("email_from") or "").strip()
+    to_addr = (effective.get("email_to") or "").strip()
+    port = (effective.get("email_port") or "587").strip()
+    user = (effective.get("email_username") or "").strip()
+    pwd  = (effective.get("email_password") or "").strip()
+    # If nothing is provided, allow it (email alerts stay off).
+    if not any((host, from_addr, to_addr, user, pwd)):
+        return None
+    if not (host and from_addr and to_addr):
+        return "Email alerts require host, from, and to addresses."
+    try:
+        port_num = int(port)
+        if port_num <= 0:
+            return "Email port must be a positive integer."
+    except ValueError:
+        return "Email port must be a number."
+    for label, addr in (("From address", from_addr), ("To address", to_addr)):
+        if "@" not in addr or addr.startswith("@") or addr.endswith("@"):
+            return f"{label} must include '@'."
     return None
 
 def save_settings(updates):
@@ -3828,6 +3862,36 @@ def _post_to_telegram(token, chat_id, level, title, body):
             f"_HomeLab Monitor · {level}_")
     return _post_json(url, {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+def _send_email(host, port, use_tls, username, password, from_addr, to_addr, level, title, detail):
+    """Send alert via SMTP. Raises on error."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = title
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
+
+    port_num = int(port)
+    if use_tls and port_num == 465:
+        ctx = smtplib.SMTP_SSL(host, port_num, timeout=10)
+    else:
+        ctx = smtplib.SMTP(host, port_num, timeout=10)
+        if use_tls:
+            ctx.starttls()
+    if username and password:
+        ctx.login(username, password)
+    try:
+        ctx.send_message(msg)
+    finally:
+        ctx.quit()
+
+def send_slack(webhook, level, title, detail):
+    payload = {"text": f"[{level}] {title}\n\n{detail}"}
+    return _post_json(webhook, payload)
+
+def send_webhook(url, level, title, detail, host):
+    payload = {"level": level, "title": title, "detail": detail, "host": host}
+    return _post_json(url, payload)
+
 def _alert_host_label():
     """Machine name to stamp on every alert so a notification says *where* the
     problem is. Alerts are raised from the hub's own docker/systemd/disk/GPU
@@ -3849,7 +3913,8 @@ def dispatch_alert(s, level, title, detail, host=None):
     """Send to whichever channels are configured. Returns list of (channel, ok, err).
 
     `title` is prefixed with the machine name (`[host] …`) so every channel —
-    Discord, ntfy and Telegram alike — names which machine the alert is about.
+    Discord, ntfy, Telegram, email, Slack and generic webhook alike — names
+    which machine the alert is about.
     Pass host="" to opt out (e.g. a generic message that isn't host-specific)."""
     if host is None:
         host = _alert_host_label()
@@ -3867,6 +3932,25 @@ def dispatch_alert(s, level, title, detail, host=None):
         try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
                                level, title, detail); out.append(("telegram", True, None))
         except Exception as e: out.append(("telegram", False, str(e)))
+    # Email via SMTP
+    if s.get("email_host") and s.get("email_from") and s.get("email_to"):
+        try:
+            _send_email(s["email_host"], s.get("email_port", "587"),
+                        s.get("email_use_tls", "1") == "1",
+                        s.get("email_username", ""), s.get("email_password", ""),
+                        s["email_from"], s["email_to"],
+                        level, title, detail)
+            out.append(("email", True, None))
+        except Exception as e:
+            out.append(("email", False, str(e)))
+    # Slack incoming webhook
+    if s.get("slack_webhook_url"):
+        try: send_slack(s["slack_webhook_url"], level, title, detail); out.append(("slack", True, None))
+        except Exception as e: out.append(("slack", False, str(e)))
+    # Generic webhook
+    if s.get("webhook_url"):
+        try: send_webhook(s["webhook_url"], level, title, detail, host or ""); out.append(("webhook", True, None))
+        except Exception as e: out.append(("webhook", False, str(e)))
     return out
 
 def _emit(s, key, level, title, detail):
@@ -3890,10 +3974,11 @@ def notify_scan():
     if s.get("alerts_enabled") != "1":
         return
     if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))
+            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
+            or s.get("slack_webhook_url")
+            or s.get("webhook_url")):
         return
-
-    # ── Docker containers: edge-trigger on crit/warn, clear on ok ─────────────
     docker = HEALTH.get("docker") or {}
     if docker.get("available"):
         for ct in docker.get("containers", []):
@@ -5841,7 +5926,7 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
-        err = _validate_url_settings(updates)
+        err = _validate_url_settings(updates) or _validate_email_settings(updates)
         if err:
             return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
@@ -5852,9 +5937,12 @@ def api_notify_test():
     """Send a one-shot test alert using the currently saved settings."""
     s = get_settings()
     if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))
+            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
+            or s.get("slack_webhook_url")
+            or s.get("webhook_url")):
         return jsonify({"ok": False, "results": [],
-                        "reason": "No Discord webhook, ntfy topic, or Telegram bot configured."}), 400
+                        "reason": "No Discord webhook, ntfy topic, Telegram bot, email, Slack webhook, or generic webhook configured."}), 400
     results = dispatch_alert(s, "info",
                              "✅ HomeLab Monitor — test alert",
                              "If you see this, alerts are wired up correctly.")

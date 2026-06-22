@@ -68,10 +68,14 @@ Requirements / caveats:
 
 ## Alerts (configured in the UI)
 
-Open the **Alerts** tab and fill in either or both:
+Open the **Alerts** tab and fill in any channel:
 
 - **Discord webhook URL** (works with any Discord channel webhook)
 - **ntfy.sh topic** (use the public server or self-hosted)
+- **Telegram bot** — bot token + chat ID (legacy Markdown)
+- **Email (SMTP)** — host, port (default 587), TLS toggle, from/to address, optional username/password. TLS on port 587 uses STARTTLS; port 465 uses implicit TLS.
+- **Slack webhook URL** — incoming webhook from any Slack workspace
+- **Generic webhook URL** — POSTs JSON `{level, title, detail, host}` to any endpoint (Teams, Gotify, n8n, …)
 
 Then set:
 
