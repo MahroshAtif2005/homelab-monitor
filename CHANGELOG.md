@@ -13,6 +13,54 @@ release notes.
 **Changed**
 - Wired the new Alerts form labels to the locale files so translated dashboards automatically pick up the email/Slack/webhook copy.
 
+## [0.21.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.21.0) — 2026-06-23 · **See your power bill by the hour — and which GPU is burning it**
+*Three new questions answered at a glance: when is your lab most expensive, which GPU is doing the work (whoever made it), and is anything down?*
+
+**Added**
+- **Busy-hours cost heatmap on the Costs tab.** A 7×24 grid — local day-of-week × hour — of your lab's typical total draw, **shaded by cost per hour** once a tariff is set (by power otherwise). It turns months of history into one picture of *when* your rig actually costs you money, with the busiest and quietest slots called out and a busy-vs-quiet spread. No setup; it fills in after about a day of samples.
+- **Any-vendor GPU support — the panel is no longer NVIDIA-only.** **AMD** GPUs are read on Linux straight from the kernel's `amdgpu` interface — **no ROCm, no vendor tools** — and **AMD and Intel** GPUs (including integrated) are read on Windows hosts, so the card finally shows up with its name, utilisation and VRAM. Strictly additive: NVIDIA and GPU-less hosts behave exactly as before.
+- **Built-in uptime monitoring.** Watch any **HTTP endpoint or TCP port** from the same container — know the moment anything stops responding, with a heartbeat strip, **24h/7d uptime %**, latency, and **smart per-check alerts** (anti-flap confirm, recovery quoting the downtime, optional slow-response warning). Nothing else to self-host.
+
+**Polish**
+- The busy-hours heatmap uses the dashboard's SVG icon family and a fixed-width day column; accessibility and layout passes throughout.
+
+_Rolls up the work shipped through `next` since 0.17.3 into one release. Still pure Python + Flask — no new runtime dependencies._
+
+## [0.20.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.20.1) — 2026-06-23 · _patch_
+_Silent patch — polish on the new busy-hours heatmap._
+
+**Fixed**
+- **Heatmap icons** now use the dashboard's SVG icon family — a calendar glyph in the heading and trending-up / trending-down / balance icons on the callouts — instead of raw emoji, so the card matches every other panel.
+- **Heatmap layout** — the day-of-week label column is pinned to a fixed width (`table-layout:fixed`); on wide screens it could previously stretch to roughly half the card and squash the 24 hour cells.
+
+## [0.20.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.20.0) — 2026-06-23 · **Busy hours — see when your lab burns power**
+*A 7×24 day-of-week × hour heatmap on the Costs tab shows the rhythm of your lab at a glance — when it's busy, when it's idle, and (with a tariff set) when it's expensive.*
+
+**Added**
+- **Busy-hours heatmap on the Costs tab.** Every history sample is bucketed by its **local weekday and hour** and averaged, giving a 7×24 grid of typical total draw (GPU + CPU + DRAM). Colour scales by **cost-per-hour** once you've set a tariff, or by **power** otherwise — so it's useful even before you add a price. Callouts surface the **busiest** and **quietest** slots and, when priced, the spread between your busiest and quietest quarter of hours. Served from a new pure-Python `/api/cost/heatmap` endpoint (own 30-day window, aggregated outside the DB lock), reusing the same tariff machinery as the rest of the Costs page so the €/kWh maths never diverges. The grid is a real `<table>` with per-cell `aria-label`s, sparse cells are dimmed by sample count (honest about coverage), and it fills in after about a day of history.
+
+## [0.19.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.19.0) — 2026-06-23 · **AMD & Intel GPUs join the party**
+*The GPU panel is no longer NVIDIA-only — AMD and Intel cards now show up too, with no vendor tools to install.*
+
+**Added**
+- **AMD GPU support on Linux — no ROCm required.** Both the hub's own collector and every monitored Linux host now read AMD cards through the in-kernel `amdgpu` sysfs interface (`gpu_busy_percent`, `mem_info_vram_total`/`used`, and hwmon temperature/power) — so an AMD box shows the GPU panel (name, utilisation, VRAM, temp, power) with zero configuration. (#1)
+- **AMD & Intel GPU support on Windows hosts.** The Windows probe now falls back to Windows' built-in GPU performance counters + WMI when `nvidia-smi` is absent, surfacing AMD and Intel GPUs — including **integrated** graphics — with name, utilisation and VRAM.
+
+**Changed**
+- The GPU back-end is now vendor-aware: NVIDIA continues through `nvidia-smi`, and the AMD/Intel paths are consulted **only** when `nvidia-smi` reports nothing — so NVIDIA and GPU-less hosts behave exactly as before. Per-card clock/throttle enrichment and per-process VRAM attribution remain NVIDIA-only for now (AMD per-process attribution is tracked as a follow-up).
+
+## [0.18.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.18.0) — 2026-06-22 · **Is my lab up? — Uptime monitoring built in**
+*Point it at any URL or port and it watches them for you — heartbeat, uptime %, and alerts that page once (not on every dropped packet) and tell you when it's back.*
+
+**Added**
+- **Uptime checks — built right in.** A new **Uptime** tab monitors any **HTTP endpoint or TCP port** (your own services, a NAS, a remote site) from inside the container — a heartbeat strip, **24h + 7d uptime %**, latency and last error per check. Probes run on a dedicated worker (never the metrics sampler), each bounded by its own timeout, so a hanging endpoint can't stall the rest; nothing is probed until you add a check.
+- **Smart per-check alerting**, reusing your existing channels (Discord / ntfy / Telegram): a check is only called **DOWN after N consecutive failures** (anti-flap — a single dropped packet won't page you), a **recovery alert quotes the downtime**, and an optional **latency warning** fires when an endpoint is up but slow. On by default per check; honours the global minimum severity.
+- **Overview at a glance** — a 🛰 uptime chip on the cockpit's fleet rollup (red the moment a check is down), and down/slow endpoints surface in the Insight Feed.
+
+**Privacy:** check targets/labels/errors stay on the private dashboard + authed API — they never reach the public status payload.
+
+_Rolls up the silent 0.17.1–0.17.3 patches below._
+
 ## [0.17.3](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.17.3) — 2026-06-21 · _patch_
 _Silent patch — Docker image rebuilt, no release announcement (patches roll up into the next minor)._
 

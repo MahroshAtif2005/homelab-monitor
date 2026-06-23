@@ -1831,7 +1831,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 
       <!-- ── Email (SMTP) ── -->
       <div>
-        <div class="flabel">Email (SMTP)</div>
+        <div class="flabel" data-i18n="set.email_group">Email (SMTP)</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <div style="flex:2;min-width:180px;display:flex;flex-direction:column;gap:4px">
             <div class="flabel" data-i18n="set.email_host">SMTP host</div>
@@ -1843,7 +1843,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
           </div>
           <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;align-self:flex-end">
             <input type="checkbox" id="al_email_tls" checked>
-            TLS
+            <span data-i18n="set.email_tls">TLS</span>
           </label>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
@@ -1882,7 +1882,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <!-- ── Generic webhook ── -->
       <div>
         <div class="flabel" data-i18n="set.webhook_url">Generic webhook URL</div>
-        <div class="cap" style="margin-bottom:4px">POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…</div>
+        <div class="cap" style="margin-bottom:4px" data-i18n-html="set.webhook_cap" data-i18n-def="POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…">POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_webhook" placeholder="https://hooks.example.com/alerts" autocomplete="off" spellcheck="false"
                  style="flex:1">
