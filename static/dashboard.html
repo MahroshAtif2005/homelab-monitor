@@ -2111,6 +2111,16 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
   <div id="disksbody"></div>
 </section>
 
+<!--  Disk I/O Throughput  -->
+<section data-tab="diskio" hidden>
+  <div class="card" style="max-width:800px; margin:0 auto">
+    <div class="card-head">Disk I/O Throughput</div>
+    <div class="card-body" id="diskio-body">
+      <div class="empty">No Disk I/O activity detected.</div>
+    </div>
+  </div>
+</section>
+
 <!-- ───────── Network ───────── -->
 <section data-tab="network" hidden>
   <div class="card" id="netio-card" hidden><h2 data-i18n="net.throughput_title">📶 Throughput</h2>
@@ -2460,6 +2470,7 @@ const TABS = [
   {id:'services',   label:'Services',   charts:false, zone:'monitoring'},
   {id:'host',       label:'System',     charts:true,  zone:'monitoring'},
   {id:'disks',      label:'Disks',      charts:false, zone:'monitoring'},
+  {id:'diskio',     label:'Disk I/O',   charts:false, zone:'monitoring', icon:'server'},
   {id:'network',    label:'Network',    charts:false, zone:'monitoring'},
   {id:'security',   label:'Security',   charts:false, zone:'monitoring'},
   {id:'uptime',     label:'Uptime',     charts:false, zone:'monitoring'},
@@ -3211,6 +3222,22 @@ function modelSpark(service,tot){
 }
 
 // ── Renderers (status tabs: Overview cards, Containers, Services) ──────────────
+function renderDiskIo() {
+  if(!HH || !HH.disk_io) return;
+  const d = HH.disk_io;
+  const el = document.getElementById('diskio-body');
+  if(!d.available || !d.items || d.items.length === 0) {
+    el.innerHTML = '<div class="empty">No Disk I/O activity detected.</div>';
+    return;
+  }
+  let html = `<table class="tbl"><thead><tr><th>Device</th><th class="ar">Read (MB/s)</th><th class="ar">Write (MB/s)</th></tr></thead><tbody>`;
+  d.items.forEach(i => {
+    html += `<tr><td><span class="mono">${esc(i.device)}</span></td><td class="ar">${i.read_mb_s}</td><td class="ar">${i.write_mb_s}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  el.innerHTML = html;
+}
+
 function renderHealth(){
   if(!HH) return;
   setVer(HH.version);
@@ -3219,6 +3246,7 @@ function renderHealth(){
   if(TAB==='overview') renderMissionControl();   // cockpit binds HH (gpu, docker, systemd, diagnostics)
   if(TAB==='experiments') renderExperiments(false);   // throttled live refresh of training cards
   if(TAB==='costs') renderCosts(false);               // throttled live refresh of the costs page
+  if(TAB==='diskio') renderDiskIo();
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};
