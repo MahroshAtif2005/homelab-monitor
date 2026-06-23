@@ -441,5 +441,43 @@ class TestURLValidation(unittest.TestCase):
         self.assertIsNone(err)
 
 
+# ── Per-service rules × email/Slack/webhook channels (PR #151 × #191 merge) ─────
+class TestRulesRouteNewChannels(unittest.TestCase):
+    """A routing rule must be able to target email/Slack/webhook, and 'all'
+    must include them — otherwise combining per-service rules (#24) with the
+    new alert channels (#27/#191) silently drops those channels under any rule."""
+
+    def _settings(self):
+        return {**app.SETTING_DEFAULTS,
+                "email_host": "smtp.example.com", "email_from": "a@b.c", "email_to": "d@e.f",
+                "slack_webhook_url": "https://hooks.slack.com/services/x",
+                "webhook_url": "https://hooks.example.com/alerts"}
+
+    def test_apply_rules_all_includes_new_channels(self):
+        rule = {"match_kind": "container", "match_pattern": "*", "channel": "all",
+                "min_level": "warning", "enabled": True}
+        chans = app._apply_rules("container:immich", "critical", [rule])
+        for ch in ("discord", "ntfy", "telegram", "email", "slack", "webhook"):
+            self.assertIn(ch, chans)
+
+    def test_dispatch_to_channels_reaches_new_channels(self):
+        s = self._settings()
+        with patch("app._send_email") as me, \
+             patch("app.send_slack") as ms, \
+             patch("app.send_webhook") as mw, \
+             patch("app.send_discord") as md:
+            app._dispatch_to_channels(s, "critical", "T", "B", {"email", "slack", "webhook"})
+        me.assert_called_once()
+        ms.assert_called_once()
+        mw.assert_called_once()
+        md.assert_not_called()   # not in the channel set → must stay silent
+
+    def test_rule_targeting_email_only_routes_to_email(self):
+        rule = {"match_kind": "container", "match_pattern": "immich", "channel": "email",
+                "min_level": "warning", "enabled": True}
+        chans = app._apply_rules("container:immich", "critical", [rule])
+        self.assertEqual(chans, {"email"})
+
+
 if __name__ == "__main__":
     unittest.main()
