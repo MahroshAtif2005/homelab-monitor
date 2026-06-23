@@ -1829,6 +1829,67 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
         <div class="cap" data-i18n-html="alerts.telegram_cap">Required with a bot token. Message your bot once, then read <code>chat.id</code> from <code>getUpdates</code>.</div>
       </div>
 
+      <!-- ── Email (SMTP) ── -->
+      <div>
+        <div class="flabel" data-i18n="set.email_group">Email (SMTP)</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <div style="flex:2;min-width:180px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_host">SMTP host</div>
+            <input type="text" id="al_email_host" class="field" placeholder="smtp.example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:0 0 80px;min-width:80px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_port">Port</div>
+            <input type="text" id="al_email_port" class="field" placeholder="587" autocomplete="off" spellcheck="false">
+          </div>
+          <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;align-self:flex-end">
+            <input type="checkbox" id="al_email_tls" checked>
+            <span data-i18n="set.email_tls">TLS</span>
+          </label>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_from">From address</div>
+            <input type="text" id="al_email_from" class="field" placeholder="from@example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_to">To address</div>
+            <input type="text" id="al_email_to" class="field" placeholder="to@example.com" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_user">SMTP user (optional)</div>
+            <input type="text" id="al_email_user" class="field" placeholder="SMTP user (optional)" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_pass">SMTP password (optional)</div>
+            <input type="password" id="al_email_pass" class="field" placeholder="SMTP password (optional)" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="cap" id="al_email_state" style="margin-top:4px"></div>
+      </div>
+
+      <!-- ── Slack incoming webhook ── -->
+      <div>
+        <div class="flabel" data-i18n="set.slack_url">Slack webhook URL</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="al_slack" placeholder="https://hooks.slack.com/services/…" autocomplete="off" spellcheck="false"
+                 style="flex:1">
+        </div>
+        <div class="cap" id="al_slack_state" style="margin-top:4px"></div>
+      </div>
+
+      <!-- ── Generic webhook ── -->
+      <div>
+        <div class="flabel" data-i18n="set.webhook_url">Generic webhook URL</div>
+        <div class="cap" style="margin-bottom:4px" data-i18n-html="set.webhook_cap" data-i18n-def="POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…">POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="al_webhook" placeholder="https://hooks.example.com/alerts" autocomplete="off" spellcheck="false"
+                 style="flex:1">
+        </div>
+        <div class="cap" id="al_webhook_state" style="margin-top:4px"></div>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
           <div class="flabel" data-i18n="set.min_severity">Minimum severity</div>
@@ -3871,6 +3932,12 @@ async function loadAlerts(){
   document.getElementById('al_ntfy_topic').value  = s.ntfy_topic||'';
   document.getElementById('al_ntfy_server').value = s.ntfy_server||'';
   document.getElementById('al_telegram_chat_id').value = s.telegram_chat_id||'';
+  document.getElementById('al_email_host').value  = s.email_host||'';
+  document.getElementById('al_email_port').value  = s.email_port||'587';
+  document.getElementById('al_email_tls').checked = s.email_use_tls==='1';
+  document.getElementById('al_email_from').value  = s.email_from||'';
+  document.getElementById('al_email_to').value    = s.email_to||'';
+  document.getElementById('al_email_user').value  = s.email_username||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
@@ -3898,6 +3965,27 @@ async function loadAlerts(){
   document.getElementById('al_telegram_state').textContent = s.telegram_token_set
     ? 'A bot token is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
     : 'No bot token saved yet.';
+  // Email password is a secret — same mask pattern.
+  const epinp=document.getElementById('al_email_pass');
+  if(!ALERTS_LOADED){ epinp.value=''; epinp.placeholder = s.email_password_set
+    ? '•••••• password saved — type to replace, clear to remove' : 'SMTP password (optional)'; }
+  document.getElementById('al_email_state').textContent = s.email_password_set
+    ? 'A password is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No password saved.';
+  // Slack webhook is a secret — same mask.
+  const slinp=document.getElementById('al_slack');
+  if(!ALERTS_LOADED){ slinp.value=''; slinp.placeholder = s.slack_webhook_url_set
+    ? '•••••• webhook saved — type to replace, clear to remove' : 'https://hooks.slack.com/services/…'; }
+  document.getElementById('al_slack_state').textContent = s.slack_webhook_url_set
+    ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No webhook saved yet.';
+  // Generic webhook is a secret — same mask.
+  const whinp=document.getElementById('al_webhook');
+  if(!ALERTS_LOADED){ whinp.value=''; whinp.placeholder = s.webhook_url_set
+    ? '•••••• webhook saved — type to replace, clear to remove' : 'https://hooks.example.com/alerts'; }
+  document.getElementById('al_webhook_state').textContent = s.webhook_url_set
+    ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No webhook saved yet.';
   ALERTS_LOADED=true;
 }
 
@@ -3937,6 +4025,12 @@ async function saveAlerts(){
     ntfy_topic:       document.getElementById('al_ntfy_topic').value.trim(),
     ntfy_server:      document.getElementById('al_ntfy_server').value.trim(),
     telegram_chat_id: document.getElementById('al_telegram_chat_id').value.trim(),
+    email_host:       document.getElementById('al_email_host').value.trim(),
+    email_port:       document.getElementById('al_email_port').value.trim()||'587',
+    email_use_tls:    document.getElementById('al_email_tls').checked ? '1' : '0',
+    email_from:       document.getElementById('al_email_from').value.trim(),
+    email_to:         document.getElementById('al_email_to').value.trim(),
+    email_username:   document.getElementById('al_email_user').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
     disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
@@ -3961,10 +4055,25 @@ async function saveAlerts(){
   const mtv = (document.getElementById('al_mlflow_token')||{}).value;
   if(mtv === 'CLEAR'){ body.mlflow_token=''; }
   else if(mtv && mtv.trim()){ body.mlflow_token = mtv.trim(); }
+  // Email password — secret, same CLEAR pattern.
+  const epv = document.getElementById('al_email_pass').value;
+  if(epv === 'CLEAR'){ body.email_password=''; }
+  else if(epv && epv.trim()){ body.email_password = epv.trim(); }
+  // Slack webhook — secret.
+  const sv = document.getElementById('al_slack').value;
+  if(sv === 'CLEAR'){ body.slack_webhook_url=''; }
+  else if(sv && sv.trim()){ body.slack_webhook_url = sv.trim(); }
+  // Generic webhook — secret.
+  const wv = document.getElementById('al_webhook').value;
+  if(wv === 'CLEAR'){ body.webhook_url=''; }
+  else if(wv && wv.trim()){ body.webhook_url = wv.trim(); }
   let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)})).json(); }catch(e){ showAlertStatus('critical','Could not save settings: '+e); return; }
   document.getElementById('al_discord').value='';
   document.getElementById('al_telegram_token').value='';
+  document.getElementById('al_email_pass').value='';
+  document.getElementById('al_slack').value='';
+  document.getElementById('al_webhook').value='';
   const mtok=document.getElementById('al_mlflow_token'); if(mtok) mtok.value='';
   await loadAlerts();
   showAlertStatus('ok',I18N.t('toast.settings_saved','Settings saved.'));
@@ -3977,14 +4086,14 @@ async function testAlerts(){
     showAlertStatus('ok','Test alert sent: '+(j.results||[]).map(r=>r.channel).join(', ')+'.');
   }else{
     const fails=(j.results||[]).filter(r=>!r.ok).map(r=>r.channel+': '+r.error).join(' · ');
-    showAlertStatus('critical', fails || j.reason || 'Test failed — check Discord webhook / ntfy topic / Telegram bot.');
+    showAlertStatus('critical', fails || j.reason || 'Test failed — check your alert channel settings.');
   }
 }
 
 // ── Routing rules ─────────────────────────────────────────────────────────────
 let RULES = [];
 const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
-const RULE_CHANNELS = ['all','discord','ntfy','telegram'];
+const RULE_CHANNELS = ['all','discord','ntfy','telegram','email','slack','webhook'];
 const RULE_LEVELS = ['info','warning','critical'];
 function showRulesStatus(level, text){
   const el=document.getElementById('rules-status');
