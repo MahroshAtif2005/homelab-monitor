@@ -5,6 +5,14 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [Unreleased]
+
+**Added**
+- Alerts now support **email (SMTP)**, **Slack incoming webhooks**, and a **generic webhook** target alongside Discord, ntfy and Telegram. All three channels configure from the Alerts settings panel and honour the existing minimum severity + disk threshold rules.
+
+**Changed**
+- Wired the new Alerts form labels to the locale files so translated dashboards automatically pick up the email/Slack/webhook copy.
+
 ## [0.17.3](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.17.3) — 2026-06-21 · _patch_
 _Silent patch — Docker image rebuilt, no release announcement (patches roll up into the next minor)._
 

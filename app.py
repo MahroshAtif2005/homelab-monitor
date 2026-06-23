@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)

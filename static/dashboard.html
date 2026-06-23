@@ -1767,33 +1767,45 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <div>
         <div class="flabel">Email (SMTP)</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <input type="text" id="al_email_host" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"
-                 style="flex:2;min-width:180px">
-          <input type="text" id="al_email_port" placeholder="587" autocomplete="off" spellcheck="false"
-                 style="flex:0 0 60px">
-          <label style="display:flex;align-items:center;gap:4px;white-space:nowrap">
+          <div style="flex:2;min-width:180px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_host">SMTP host</div>
+            <input type="text" id="al_email_host" class="field" placeholder="smtp.example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:0 0 80px;min-width:80px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_port">Port</div>
+            <input type="text" id="al_email_port" class="field" placeholder="587" autocomplete="off" spellcheck="false">
+          </div>
+          <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;align-self:flex-end">
             <input type="checkbox" id="al_email_tls" checked>
             TLS
           </label>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-          <input type="text" id="al_email_from" placeholder="from@example.com" autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:160px">
-          <input type="text" id="al_email_to" placeholder="to@example.com" autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:160px">
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_from">From address</div>
+            <input type="text" id="al_email_from" class="field" placeholder="from@example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_to">To address</div>
+            <input type="text" id="al_email_to" class="field" placeholder="to@example.com" autocomplete="off" spellcheck="false">
+          </div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-          <input type="text" id="al_email_user" placeholder="SMTP user (optional)" autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:140px">
-          <input type="password" id="al_email_pass" placeholder="SMTP password (optional)" autocomplete="off" spellcheck="false"
-                 style="flex:1;min-width:140px">
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_user">SMTP user (optional)</div>
+            <input type="text" id="al_email_user" class="field" placeholder="SMTP user (optional)" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_pass">SMTP password (optional)</div>
+            <input type="password" id="al_email_pass" class="field" placeholder="SMTP password (optional)" autocomplete="off" spellcheck="false">
+          </div>
         </div>
         <div class="cap" id="al_email_state" style="margin-top:4px"></div>
       </div>
 
       <!-- ── Slack incoming webhook ── -->
       <div>
-        <div class="flabel">Slack webhook URL</div>
+        <div class="flabel" data-i18n="set.slack_url">Slack webhook URL</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_slack" placeholder="https://hooks.slack.com/services/…" autocomplete="off" spellcheck="false"
                  style="flex:1">
@@ -1803,7 +1815,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 
       <!-- ── Generic webhook ── -->
       <div>
-        <div class="flabel">Generic webhook URL</div>
+        <div class="flabel" data-i18n="set.webhook_url">Generic webhook URL</div>
         <div class="cap" style="margin-bottom:4px">POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…</div>
         <div style="display:flex;gap:6px">
           <input type="text" id="al_webhook" placeholder="https://hooks.example.com/alerts" autocomplete="off" spellcheck="false"
