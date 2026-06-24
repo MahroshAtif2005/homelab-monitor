@@ -1,29 +1,21 @@
 import os, pytest
 os.environ.setdefault("DATABASE_URL", ":memory:")
 
+import app as _app
+
 @pytest.fixture
 def client():
-    import importlib, sys
-    for mod in list(sys.modules):
-        if "app" in mod:
-            del sys.modules[mod]
     os.environ["PUBLIC_STATUS"] = "1"
-    from app import app
-    app.config["TESTING"] = True
-    with app.test_client() as c:
+    _app.app.config["TESTING"] = True
+    with _app.app.test_client() as c:
         yield c
-    del os.environ["PUBLIC_STATUS"]
+    os.environ.pop("PUBLIC_STATUS", None)
 
 @pytest.fixture
 def client_off():
-    import importlib, sys
-    for mod in list(sys.modules):
-        if "app" in mod:
-            del sys.modules[mod]
     os.environ.pop("PUBLIC_STATUS", None)
-    from app import app
-    app.config["TESTING"] = True
-    with app.test_client() as c:
+    _app.app.config["TESTING"] = True
+    with _app.app.test_client() as c:
         yield c
 
 def test_off_by_default_api(client_off):

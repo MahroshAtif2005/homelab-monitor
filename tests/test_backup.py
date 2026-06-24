@@ -83,10 +83,20 @@ class TestVacuumInto(unittest.TestCase):
 
 class TestReopenDb(unittest.TestCase):
     def test_reopen_db_reconnects(self):
-        app.DB.execute("SELECT 1").fetchone()
-        app.reopen_db()
-        row = app.DB.execute("SELECT 1").fetchone()
-        self.assertEqual(row[0], 1)
+        old_ephemeral = app.DB_EPHEMERAL
+        with patch.object(app, "DB_PATH", ":memory:"):
+            app.DB.execute("SELECT 1").fetchone()
+            app.reopen_db()
+            row = app.DB.execute("SELECT 1").fetchone()
+            self.assertEqual(row[0], 1)
+        # reopen_db() closed the old connection; open a fresh in-memory DB to restore
+        try:
+            app.DB.close()
+        except Exception:
+            pass
+        app.DB = app._open_db_connection(":memory:")
+        app._apply_schema_migrations(app.DB)
+        app.DB_EPHEMERAL = old_ephemeral
 
 
 class TestBackupApi(unittest.TestCase):
@@ -109,3 +119,5 @@ class TestBackupApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+# NOTE: patch applied to fix test isolation — reopen_db() replaces app.DB with a
+# production path connection that breaks subsequent tests.
