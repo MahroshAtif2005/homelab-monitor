@@ -1,486 +1,72 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HomeLab Status</title>
-  <style>
-    /* ── Reset & tokens ─────────────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --bg:        #0d1117;
-      --surface:   #161b22;
-      --border:    #30363d;
-      --text:      #e6edf3;
-      --muted:     #8b949e;
-      --green:     #3fb950;
-      --yellow:    #d29922;
-      --red:       #f85149;
-      --accent:    #58a6ff;
-      --radius:    10px;
-      --font:      'Segoe UI', system-ui, -apple-system, sans-serif;
-    }
-
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--font);
-      min-height: 100vh;
-      padding: 0 0 3rem;
-    }
-
-    /* ── Header ─────────────────────────────────────────────────────────── */
-    header {
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      padding: 1.1rem 1.5rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-    }
-
-    .header-brand {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      font-size: 1.15rem;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
-
-    .header-meta {
-      font-size: 0.78rem;
-      color: var(--muted);
-    }
-
-    /* ── Banner ─────────────────────────────────────────────────────────── */
-    #banner {
-      margin: 1.5rem auto 0;
-      max-width: 860px;
-      padding: 0 1rem;
-    }
-
-    .banner-card {
-      border-radius: var(--radius);
-      padding: 1rem 1.4rem;
-      display: flex;
-      align-items: center;
-      gap: 0.8rem;
-      font-size: 1rem;
-      font-weight: 600;
-      border: 1px solid transparent;
-    }
-
-    .banner-card.ok {
-      background: rgba(63,185,80,.10);
-      border-color: rgba(63,185,80,.30);
-      color: var(--green);
-    }
-
-    .banner-card.warn {
-      background: rgba(210,153,34,.10);
-      border-color: rgba(210,153,34,.30);
-      color: var(--yellow);
-    }
-
-    .banner-card.crit {
-      background: rgba(248,81,73,.10);
-      border-color: rgba(248,81,73,.30);
-      color: var(--red);
-    }
-
-    .banner-icon { font-size: 1.4rem; flex-shrink: 0; }
-
-    /* ── Grid of status cards ────────────────────────────────────────────── */
-    #cards {
-      max-width: 860px;
-      margin: 1.25rem auto 0;
-      padding: 0 1rem;
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-      gap: 0.85rem;
-    }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.1rem 1.2rem 1rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.35rem;
-    }
-
-    .card-label {
-      font-size: 0.72rem;
-      font-weight: 600;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-
-    .card-value {
-      font-size: 1.65rem;
-      font-weight: 700;
-      line-height: 1;
-      color: var(--text);
-    }
-
-    .card-sub {
-      font-size: 0.78rem;
-      color: var(--muted);
-      margin-top: 0.1rem;
-    }
-
-    .dot {
-      display: inline-block;
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      margin-right: 4px;
-      vertical-align: middle;
-    }
-
-    .dot-ok   { background: var(--green); }
-    .dot-warn { background: var(--yellow); }
-    .dot-crit { background: var(--red); }
-    .dot-off  { background: var(--muted); }
-
-    /* ── Host rows ──────────────────────────────────────────────────────── */
-    #hosts-section {
-      max-width: 860px;
-      margin: 1.5rem auto 0;
-      padding: 0 1rem;
-    }
-
-    .section-title {
-      font-size: 0.78rem;
-      font-weight: 600;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 0.6rem;
-    }
-
-    .host-row {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 0.85rem 1.1rem;
-      margin-bottom: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .host-name {
-      font-weight: 600;
-      font-size: 0.92rem;
-      min-width: 120px;
-    }
-
-    .host-chips {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-
-    .chip {
-      background: rgba(255,255,255,.06);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 0.2rem 0.65rem;
-      font-size: 0.74rem;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-
-    .chip.ok   { color: var(--green); border-color: rgba(63,185,80,.3); background: rgba(63,185,80,.08); }
-    .chip.warn { color: var(--yellow); border-color: rgba(210,153,34,.3); background: rgba(210,153,34,.08); }
-    .chip.crit { color: var(--red); border-color: rgba(248,81,73,.3); background: rgba(248,81,73,.08); }
-
-    /* ── Footer ─────────────────────────────────────────────────────────── */
-    footer {
-      max-width: 860px;
-      margin: 2rem auto 0;
-      padding: 0 1rem;
-      font-size: 0.74rem;
-      color: var(--muted);
-      display: flex;
-      gap: 1rem;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    footer a { color: var(--accent); text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
-
-    /* ── Loading / error states ─────────────────────────────────────────── */
-    .placeholder {
-      color: var(--muted);
-      font-size: 0.9rem;
-      padding: 2rem 0;
-      text-align: center;
-    }
-
-    /* ── Pulse animation for live dot ──────────────────────────────────── */
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: .35; }
-    }
-
-    .live-dot {
-      display: inline-block;
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      background: var(--green);
-      animation: pulse 2s ease-in-out infinite;
-      vertical-align: middle;
-      margin-right: 4px;
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Status</title>
+<style>
+  :root{--bg:#0f1117;--card:#1a1d27;--bd:#2a2d3a;--tx:#e2e8f0;--tx2:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--ok-bg:#052e16;--warn-bg:#451a03;--crit-bg:#450a0a;--r:12px}
+  @media(prefers-color-scheme:light){:root{--bg:#f1f5f9;--card:#fff;--bd:#e2e8f0;--tx:#0f172a;--tx2:#64748b;--ok-bg:#f0fdf4;--warn-bg:#fffbeb;--crit-bg:#fef2f2}}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;padding:1.5rem}
+  header{display:flex;align-items:center;gap:.75rem;margin-bottom:2rem;flex-wrap:wrap}
+  header h1{font-size:1.4rem;font-weight:700}
+  .banner{flex:1 1 100%;display:flex;align-items:center;gap:.6rem;padding:.75rem 1rem;border-radius:var(--r);border:1px solid var(--bd);font-weight:600;font-size:.95rem}
+  .banner.ok{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
+  .banner.warn{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
+  .banner.crit{background:var(--crit-bg);border-color:var(--crit);color:var(--crit)}
+  .dot{width:10px;height:10px;border-radius:50%;background:currentColor;flex-shrink:0}
+  .dot.pulse{animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
+  .ov-card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);padding:1.25rem 1rem;display:flex;flex-direction:column;gap:.35rem}
+  .ov-card .ov-top{display:flex;align-items:center;gap:.5rem;font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--tx2)}
+  .ov-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .ov-dot.ok{background:var(--ok)} .ov-dot.warn{background:var(--warn)} .ov-dot.crit{background:var(--crit)}
+  .ov-metric{font-size:1.6rem;font-weight:700;line-height:1.1}
+  .ov-detail{font-size:.8rem;color:var(--tx2)}
+  .skel{background:var(--bd);border-radius:4px;animation:skel 1.5s infinite}
+  @keyframes skel{0%,100%{opacity:.5}50%{opacity:1}}
+  footer{margin-top:2.5rem;text-align:center;font-size:.75rem;color:var(--tx2)}
+</style>
 </head>
 <body>
-
-<!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header>
-  <div class="header-brand">
-    <span id="lab-emoji">🛰️</span>
-    <span id="lab-name">HomeLab</span>
-    <span style="color:var(--muted);font-weight:400">· Status</span>
-  </div>
-  <div class="header-meta">
-    <span class="live-dot"></span>
-    Live · updates every 15 s
-  </div>
+  <h1 id="lab-title">…</h1>
+  <div class="banner" id="banner"><span class="dot pulse" id="banner-dot"></span><span id="banner-text">Loading…</span></div>
 </header>
-
-<!-- ── System banner ────────────────────────────────────────────────────── -->
-<div id="banner">
-  <div class="banner-card ok banner-loading">
-    <span class="banner-icon">⏳</span>
-    <span>Loading status…</span>
-  </div>
+<div class="grid" id="grid">
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
 </div>
-
-<!-- ── KPI cards ────────────────────────────────────────────────────────── -->
-<div id="cards">
-  <!-- populated by JS -->
-</div>
-
-<!-- ── Host rows ────────────────────────────────────────────────────────── -->
-<div id="hosts-section" style="display:none">
-  <div class="section-title">Registered Hosts</div>
-  <div id="hosts-list"></div>
-</div>
-
-<!-- ── Footer ───────────────────────────────────────────────────────────── -->
-<footer>
-  <span>Powered by <a href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener">HomeLab Monitor</a></span>
-  <span id="last-updated" style="margin-left:auto"></span>
-</footer>
-
+<footer id="footer"></footer>
 <script>
-  // ── Helpers ──────────────────────────────────────────────────────────────
-  const $ = id => document.getElementById(id);
-
-  function pct(v) {
-    const n = parseFloat(v);
-    return isNaN(n) ? null : Math.round(n);
-  }
-
-  function fmt(n, unit = '%') {
-    return n == null ? '—' : `${n}${unit}`;
-  }
-
-  function statusClass(pctVal) {
-    if (pctVal == null) return 'off';
-    if (pctVal >= 90)  return 'crit';
-    if (pctVal >= 75)  return 'warn';
-    return 'ok';
-  }
-
-  function dotHtml(cls) {
-    return `<span class="dot dot-${cls}"></span>`;
-  }
-
-  // ── Card builder ─────────────────────────────────────────────────────────
-  function makeCard(label, value, sub = '') {
-    return `
-      <div class="card">
-        <div class="card-label">${label}</div>
-        <div class="card-value">${value}</div>
-        ${sub ? `<div class="card-sub">${sub}</div>` : ''}
-      </div>`;
-  }
-
-  // ── Banner ───────────────────────────────────────────────────────────────
-  function setBanner(issues) {
-    const el = $('banner');
-    if (issues === 0) {
-      el.innerHTML = `
-        <div class="banner-card ok">
-          <span class="banner-icon">✅</span>
-          <span>All systems normal</span>
-        </div>`;
-    } else {
-      const cls  = issues >= 3 ? 'crit' : 'warn';
-      const icon = issues >= 3 ? '🔴' : '🟡';
-      el.innerHTML = `
-        <div class="banner-card ${cls}">
-          <span class="banner-icon">${icon}</span>
-          <span>${issues} service${issues !== 1 ? 's' : ''} need${issues === 1 ? 's' : ''} attention</span>
-        </div>`;
+async function load(){
+  try{
+    const r=await fetch('/api/public-status');
+    if(!r.ok){document.body.innerHTML='<p style="padding:2rem;color:var(--crit)">Status page not enabled.</p>';return;}
+    const d=await r.json();
+    document.title=(d.lab_emoji||'')+" "+(d.lab_name||'Status');
+    document.getElementById('lab-title').textContent=(d.lab_emoji||'')+" "+(d.lab_name||'HomeLab Status');
+    const b=document.getElementById('banner');
+    const ok=d.status==='ok';
+    b.className='banner '+(ok?'ok':'warn');
+    document.getElementById('banner-dot').className='dot'+(ok?' pulse':'');
+    document.getElementById('banner-text').textContent=ok?'All systems normal':'Some systems need attention';
+    const grid=document.getElementById('grid');
+    grid.innerHTML='';
+    for(const c of (d.overview||[])){
+      const el=document.createElement('div');
+      el.className='ov-card';
+      el.innerHTML=`<div class="ov-top"><div class="ov-dot ${c.status||'ok'}"></div>${c.label||c.key}</div><div class="ov-metric">${c.metric||'—'}</div><div class="ov-detail">${c.detail||''}</div>`;
+      grid.appendChild(el);
     }
-  }
-
-  // ── Main render ──────────────────────────────────────────────────────────
-  function render(health) {
-    const ov   = health.overview   || {};
-    const gpu  = health.gpu        || {};
-    const cont = health.containers || {};
-    const svc  = health.services   || {};
-    const meta = health.meta       || {};
-
-    // Lab branding (optional — falls back to defaults in HTML)
-    if (meta.lab_name)  $('lab-name').textContent  = meta.lab_name;
-    if (meta.lab_emoji) $('lab-emoji').textContent = meta.lab_emoji;
-
-    // ── KPI cards ──
-    const cpuPct  = pct(ov.cpu_pct);
-    const ramPct  = pct(ov.mem_pct);
-    const gpuPct  = pct(gpu.available ? gpu.util_pct : null);
-    const vramPct = gpu.available && gpu.vram_total_mb > 0
-      ? Math.round(gpu.vram_used_mb / gpu.vram_total_mb * 100)
-      : null;
-
-    // Containers summary
-    const totalC   = (cont.items || []).length;
-    const healthyC = (cont.items || []).filter(c => c.state === 'running').length;
-    const contPct  = totalC > 0 ? Math.round(healthyC / totalC * 100) : null;
-
-    // Services summary
-    const totalS  = (svc.items || []).length;
-    const activeS = (svc.items || []).filter(s => s.state === 'active').length;
-    const failedS = totalS - activeS;
-
-    // Issue tally (drives banner)
-    let issues = 0;
-    if (cpuPct  >= 90) issues++;
-    if (ramPct  >= 90) issues++;
-    if (gpuPct  >= 95) issues++;
-    if (vramPct >= 95) issues++;
-    issues += failedS;
-    if (contPct != null && contPct < 100) issues += (totalC - healthyC);
-
-    setBanner(issues);
-
-    // Build cards
-    let html = '';
-
-    html += makeCard(
-      'CPU',
-      `${dotHtml(statusClass(cpuPct))}${fmt(cpuPct)}`,
-      ov.cpu_cores ? `${ov.cpu_cores} cores` : ''
-    );
-
-    html += makeCard(
-      'RAM',
-      `${dotHtml(statusClass(ramPct))}${fmt(ramPct)}`,
-      ov.mem_used_gb != null ? `${ov.mem_used_gb} / ${ov.mem_total_gb} GB` : ''
-    );
-
-    if (gpu.available) {
-      html += makeCard(
-        'GPU',
-        `${dotHtml(statusClass(gpuPct))}${fmt(gpuPct)}`,
-        gpu.name || 'GPU'
-      );
-      html += makeCard(
-        'VRAM',
-        `${dotHtml(statusClass(vramPct))}${fmt(vramPct)}`,
-        gpu.vram_used_mb != null
-          ? `${Math.round(gpu.vram_used_mb)} / ${Math.round(gpu.vram_total_mb)} MB`
-          : ''
-      );
-    }
-
-    if (totalC > 0) {
-      const cCls = contPct === 100 ? 'ok' : contPct >= 80 ? 'warn' : 'crit';
-      html += makeCard(
-        'Containers',
-        `${dotHtml(cCls)}${healthyC}/${totalC}`,
-        contPct === 100 ? 'all running' : `${totalC - healthyC} not running`
-      );
-    }
-
-    if (totalS > 0) {
-      const sCls = failedS === 0 ? 'ok' : failedS <= 2 ? 'warn' : 'crit';
-      html += makeCard(
-        'Services',
-        `${dotHtml(sCls)}${activeS}/${totalS}`,
-        failedS === 0 ? 'all active' : `${failedS} failed`
-      );
-    }
-
-    if (ov.uptime) {
-      html += makeCard('Uptime', ov.uptime, ov.hostname || '');
-    }
-
-    if (ov.load_1) {
-      html += makeCard('Load', ov.load_1, '1-min avg');
-    }
-
-    $('cards').innerHTML = html || '<div class="placeholder">No data available.</div>';
-
-    // ── Multi-host rows ──
-    const hosts = health.hosts || [];
-    if (hosts.length > 1) {
-      $('hosts-section').style.display = '';
-      $('hosts-list').innerHTML = hosts.map(h => {
-        const hCpu  = pct(h.cpu_pct);
-        const hRam  = pct(h.mem_pct);
-        const cpuCls = statusClass(hCpu);
-        const ramCls = statusClass(hRam);
-        return `
-          <div class="host-row">
-            <div class="host-name">${h.hostname || h.host}</div>
-            <div class="host-chips">
-              <span class="chip ${cpuCls}">CPU ${fmt(hCpu)}</span>
-              <span class="chip ${ramCls}">RAM ${fmt(hRam)}</span>
-              ${h.uptime ? `<span class="chip">↑ ${h.uptime}</span>` : ''}
-              ${h.os ? `<span class="chip">${h.os}</span>` : ''}
-            </div>
-          </div>`;
-      }).join('');
-    }
-
-    // Last-updated timestamp
-    $('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  }
-
-  // ── Fetch loop ───────────────────────────────────────────────────────────
-  async function fetchHealth() {
-    try {
-      const res = await fetch('/api/public-status');
-      
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      render(data);
-    } catch (err) {
-      $('banner').innerHTML = `
-        <div class="banner-card crit">
-          <span class="banner-icon">⚠️</span>
-          <span>Could not reach monitor API — ${err.message}</span>
-        </div>`;
-    }
-  }
-
-  fetchHealth();
-  setInterval(fetchHealth, 15_000);
+    document.getElementById('footer').textContent='Last updated '+new Date().toLocaleTimeString();
+  }catch(e){console.error(e);}
+}
+load();
+setInterval(load,30000);
 </script>
 </body>
 </html>

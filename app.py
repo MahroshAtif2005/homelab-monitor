@@ -25,7 +25,7 @@ try:
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, abort , jsonify, Response, send_file, send_from_directory, after_this_request, g
+from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -6363,108 +6363,35 @@ def build_mcp_status():
 def api_mcp_status():
     return jsonify(build_mcp_status())
 
-LAB_NAME = os.environ.get("LAB_NAME", "My HomeLab")
-LAB_EMOJI = os.environ.get("LAB_EMOJI", "🛰️")
-PUBLIC_STATUS = os.getenv("PUBLIC_STATUS", "0") == "1"
-
-
 @app.route("/api/health")
 def api_health():
     """Current state of the status monitors (Docker + systemd) plus a light GPU/host
     snapshot. Cheap and DB-free, so the dashboard can poll it often."""
-
     gpu_avail = LATEST.get("gpu_avail")
-
-    now = {
-        "gpu": {
-            "util": LATEST["util"],
-            "mem_used": LATEST["mem_used"],
-            "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
-            "power": LATEST["power"],
-            "temp": LATEST["temp"],
-            "available": bool(gpu_avail),
-            "gpus": LATEST.get("gpus") or [],
-            "extra": LATEST.get("gpu_extra") or {},
-        },
-        "host": enrich_os_upgrade(LATEST["host"]),
-    }
-
-    docker = HEALTH["docker"] or {
-        "available": False,
-        "reason": "warming up…",
-        "containers": [],
-        "summary": {
-            "total": 0,
-            "running": 0,
-            "problems": 0,
-        },
-    }
-
-    systemd = HEALTH["systemd"] or {
-        "available": False,
-        "reason": "warming up…",
-        "services": [],
-        "summary": {},
-    }
-
-    update = dict(
-        HEALTH["update"] or {
-            "available": False,
-            "current": VERSION,
-        }
-    )
-
+    now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
+                   "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
+                   "power": LATEST["power"], "temp": LATEST["temp"],
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or [],    # per-card detail (issue #95)
+                   "extra": LATEST.get("gpu_extra") or {}},  # mem-bw/clocks/throttle (telemetry)
+           "host": enrich_os_upgrade(LATEST["host"])}
+    docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
+                                    "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
+                                    "services": [], "summary": {}}
+    update  = dict(HEALTH["update"] or {"available": False, "current": VERSION})
+    # Let the frontend decide whether to show the one-click "Update now" button.
+    # Set here (not baked into the cached collect_update payload) so toggling the
+    # env flag takes effect on restart without waiting for the update cache.
     update["self_update_enabled"] = ALLOW_SELF_UPDATE
+    return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
+                    "docker": docker, "systemd": systemd, "update": update,
+                    "processes": HEALTH["processes"],
+                    "os_updates": os_updates_summary(),
+                    "diagnostics": local_diagnostics(),
+                    "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
+                    "overview": build_overview(now, docker, systemd)})
 
-    return jsonify({
-        "version": VERSION,
-        "updated": HEALTH["at"],
-        "meta": {
-            "lab_name": LAB_NAME,
-            "lab_emoji": LAB_EMOJI
-        },
-        "now": now,
-        "docker": docker,
-        "systemd": systemd,
-        "update": update,
-        "processes": HEALTH["processes"],
-        "os_updates": os_updates_summary(),
-        "diagnostics": local_diagnostics(),
-        "mcp": {
-            "enabled": _mcp_enabled(),
-            "port": _mcp_port(),
-        },
-        "overview": build_overview(now, docker, systemd),
-    })
-@app.route("/api/public-status")
-def api_public_status():
-    if not PUBLIC_STATUS:
-        abort(404)
-
-    health = HEALTH or {}
-    gpu = LATEST or {}
-
-    return jsonify({
-        "overview": health.get("overview", {}),
-        "gpu": {
-            "available": bool(gpu.get("gpu_avail")),
-            "util_pct": gpu.get("util"),
-            "vram_used_mb": gpu.get("mem_used"),
-            "vram_total_mb": gpu.get("mem_total"),
-            "name": gpu.get("gpu_name"),
-        },
-        "containers": {
-            "items": (health.get("docker") or {}).get("containers", [])
-        },
-        "services": {
-            "items": (health.get("systemd") or {}).get("services", [])
-        },
-        "meta": {
-            "lab_name": LAB_NAME,
-            "lab_emoji": LAB_EMOJI
-        },
-        "hosts": health.get("hosts", [])
-    })
 @app.route("/metrics")
 def metrics():
     """Prometheus text-format scrape endpoint.
@@ -6965,17 +6892,72 @@ def api_notify_rules_test():
                           channels)
     return jsonify({"ok": True, "channels": list(channels)})
 
+
+import os as _os
+
+@app.route("/api/public-status")
+def api_public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    gpu_avail = LATEST.get("gpu_avail")
+    now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
+                   "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
+                   "power": LATEST["power"], "temp": LATEST["temp"],
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or [],
+                   "extra": LATEST.get("gpu_extra") or {}},
+           "host": LATEST["host"]}
+    docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up", "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up", "services": [], "summary": {}}
+    cards = build_overview(now, docker, systemd)
+    cfg = get_settings()
+    # Strip per-item details — only aggregate counts reach the public endpoint
+    safe_cards = []
+    for c in cards:
+        safe_cards.append({k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")})
+    return jsonify({
+        "lab_name": cfg.get("lab_name", "My HomeLab"),
+        "lab_emoji": cfg.get("lab_emoji", "🏠"),
+        "overview": safe_cards,
+        "status": "ok" if all(c.get("status") == "ok" for c in safe_cards) else "warn"
+    })
+
+@app.route("/public")
+def public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    return app.send_static_file("public.html")
+
 @app.route("/")
 def index():
     return app.send_static_file("dashboard.html")
 
-@app.route("/status")
-def public_status_page():
-    return app.send_static_file("status.html")
-
 threading.Thread(target=collector, daemon=True).start()
 threading.Thread(target=host_poller, daemon=True).start()
 threading.Thread(target=uptime_worker, daemon=True).start()
+
+
+import os as _os
+
+@app.route("/api/public-status")
+def api_public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    h = dict(HEALTH)
+    cfg = load_settings()
+    cards = build_overview(h)
+    return jsonify({
+        "lab_name": cfg.get("lab_name", "My HomeLab"),
+        "lab_emoji": cfg.get("lab_emoji", "🏠"),
+        "overview": cards,
+        "status": "ok" if all(c.get("status") == "ok" for c in cards) else "warn"
+    })
+
+@app.route("/public")
+def public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    return send_from_directory("static", "public.html")
 
 if __name__ == "__main__":
     print(
