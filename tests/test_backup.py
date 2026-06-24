@@ -1,10 +1,15 @@
 """Unit tests for database backup and restore (issue #86)."""
+from http import client
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from flask.testing import FlaskClient
+
+from tests.test_public_status import client
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
@@ -98,26 +103,35 @@ class TestReopenDb(unittest.TestCase):
         app._apply_schema_migrations(app.DB)
         app.DB_EPHEMERAL = old_ephemeral
 
-
 class TestBackupApi(unittest.TestCase):
     def test_backup_download_returns_sqlite(self):
         client = app.app.test_client()
-        rv = client.get("/api/backup")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(app, "_data_dir_writable", return_value=True):
+                with patch.object(app, "_data_dir", return_value=tmpdir):
+                    rv = client.get("/api/backup")
+
         self.assertEqual(rv.status_code, 200)
         self.assertIn("attachment", rv.headers.get("Content-Disposition", ""))
+
         payload = rv.get_data()
         self.assertTrue(payload.startswith(db_backup.SQLITE_MAGIC))
 
     def test_restore_rejects_garbage(self):
         client = app.app.test_client()
         from io import BytesIO
+
         data = {"backup": (BytesIO(b"not sqlite"), "bad.db")}
-        rv = client.post("/api/backup/restore", data=data, content_type="multipart/form-data")
+        rv = client.post(
+            "/api/backup/restore",
+            data=data,
+            content_type="multipart/form-data",
+        )
+
         self.assertEqual(rv.status_code, 400)
         self.assertFalse(rv.get_json()["ok"])
 
 
 if __name__ == "__main__":
     unittest.main()
-# NOTE: patch applied to fix test isolation — reopen_db() replaces app.DB with a
-# production path connection that breaks subsequent tests.
