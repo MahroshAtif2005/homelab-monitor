@@ -1829,6 +1829,67 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
         <div class="cap" data-i18n-html="alerts.telegram_cap">Required with a bot token. Message your bot once, then read <code>chat.id</code> from <code>getUpdates</code>.</div>
       </div>
 
+      <!-- ── Email (SMTP) ── -->
+      <div>
+        <div class="flabel" data-i18n="set.email_group">Email (SMTP)</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <div style="flex:2;min-width:180px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_host">SMTP host</div>
+            <input type="text" id="al_email_host" class="field" placeholder="smtp.example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:0 0 80px;min-width:80px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_port">Port</div>
+            <input type="text" id="al_email_port" class="field" placeholder="587" autocomplete="off" spellcheck="false">
+          </div>
+          <label style="display:flex;align-items:center;gap:4px;white-space:nowrap;align-self:flex-end">
+            <input type="checkbox" id="al_email_tls" checked>
+            <span data-i18n="set.email_tls">TLS</span>
+          </label>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_from">From address</div>
+            <input type="text" id="al_email_from" class="field" placeholder="from@example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:160px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_to">To address</div>
+            <input type="text" id="al_email_to" class="field" placeholder="to@example.com" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_user">SMTP user (optional)</div>
+            <input type="text" id="al_email_user" class="field" placeholder="SMTP user (optional)" autocomplete="off" spellcheck="false">
+          </div>
+          <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:4px">
+            <div class="flabel" data-i18n="set.email_pass">SMTP password (optional)</div>
+            <input type="password" id="al_email_pass" class="field" placeholder="SMTP password (optional)" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="cap" id="al_email_state" style="margin-top:4px"></div>
+      </div>
+
+      <!-- ── Slack incoming webhook ── -->
+      <div>
+        <div class="flabel" data-i18n="set.slack_url">Slack webhook URL</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="al_slack" placeholder="https://hooks.slack.com/services/…" autocomplete="off" spellcheck="false"
+                 style="flex:1">
+        </div>
+        <div class="cap" id="al_slack_state" style="margin-top:4px"></div>
+      </div>
+
+      <!-- ── Generic webhook ── -->
+      <div>
+        <div class="flabel" data-i18n="set.webhook_url">Generic webhook URL</div>
+        <div class="cap" style="margin-bottom:4px" data-i18n-html="set.webhook_cap" data-i18n-def="POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…">POSTs JSON with <code>{level, title, detail, host}</code> — works with Teams, Gotify, n8n…</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="al_webhook" placeholder="https://hooks.example.com/alerts" autocomplete="off" spellcheck="false"
+                 style="flex:1">
+        </div>
+        <div class="cap" id="al_webhook_state" style="margin-top:4px"></div>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div>
           <div class="flabel" data-i18n="set.min_severity">Minimum severity</div>
@@ -1850,10 +1911,35 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       </div>
       <p class="cap" style="margin-top:6px" data-i18n-html="alerts.triggers">Triggers: container unhealthy/exited non-zero/dead, systemd unit failed,
         GPU VRAM pressure (free &lt; <code>PRESSURE_FREE_MB</code>), GPU OOM events, and disks crossing the threshold above.</p>
+
+      <!-- ── Routing rules ── -->
+      <div style="margin-top:24px;border-top:1px solid var(--bd);padding-top:16px;max-width:800px">
+        <h2 class="card-sub" data-i18n="rules.title" data-i18n-def="📋 Routing rules">📋 Routing rules</h2>
+        <p class="cap" data-i18n-html="rules.intro" data-i18n-def="Per-service rules control which channels receive which alerts. If no rule matches, the default (all configured channels) applies. Wildcards (<code>*</code>, <code>?</code>) work in the pattern column.">Per-service rules control which channels receive which alerts.
+          If no rule matches, the default (all configured channels) applies.
+          Wildcards (<code>*</code>, <code>?</code>) work in the pattern column.</p>
+
+        <div id="rules-status" class="ins info" style="display:none;margin:8px 0"></div>
+
+        <table id="rules-table" style="width:100%;border-collapse:collapse;margin-top:8px;font-size:13px">
+          <thead>
+            <tr style="border-bottom:1px solid var(--bd)">
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.kind" data-i18n-def="Kind">Kind</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.pattern" data-i18n-def="Pattern">Pattern</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.channel" data-i18n-def="Channel">Channel</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.min_level" data-i18n-def="Min level">Min level</th>
+              <th style="text-align:left;padding:4px 6px" data-i18n="rules.enabled" data-i18n-def="On">On</th>
+              <th style="text-align:left;padding:4px 6px"></th>
+            </tr>
+          </thead>
+          <tbody id="rules-body"></tbody>
+        </table>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="rb" id="rules-add-btn" data-i18n="rules.add" data-i18n-def="+ Add rule">+ Add rule</button>
+        </div>
+      </div>
     </div>
     </div><!-- /set-pane-alerts -->
-
-    <!-- ── Costs sub-page ── -->
     <div id="set-pane-costs" hidden>
       <p class="cap" style="margin:2px 0 12px" data-i18n-html="costset.intro">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
       <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
@@ -2694,7 +2780,7 @@ function showTab(id){
   // snapshot tabs it simply has no effect.
   document.getElementById('controls').hidden = false;
   buildCharts();   // charts can only size on a visible canvas, so build on show
-  if(id==='alerts') loadAlerts();
+  if(id==='alerts'){ loadAlerts(); loadRules(); }
   if(id==='uptime') loadUptime();
   if(id==='hosts')  loadHosts();
   // Multi-host: scope notice on tabs that are still local-only, plus
@@ -3846,6 +3932,12 @@ async function loadAlerts(){
   document.getElementById('al_ntfy_topic').value  = s.ntfy_topic||'';
   document.getElementById('al_ntfy_server').value = s.ntfy_server||'';
   document.getElementById('al_telegram_chat_id').value = s.telegram_chat_id||'';
+  document.getElementById('al_email_host').value  = s.email_host||'';
+  document.getElementById('al_email_port').value  = s.email_port||'587';
+  document.getElementById('al_email_tls').checked = s.email_use_tls==='1';
+  document.getElementById('al_email_from').value  = s.email_from||'';
+  document.getElementById('al_email_to').value    = s.email_to||'';
+  document.getElementById('al_email_user').value  = s.email_username||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
@@ -3873,6 +3965,27 @@ async function loadAlerts(){
   document.getElementById('al_telegram_state').textContent = s.telegram_token_set
     ? 'A bot token is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
     : 'No bot token saved yet.';
+  // Email password is a secret — same mask pattern.
+  const epinp=document.getElementById('al_email_pass');
+  if(!ALERTS_LOADED){ epinp.value=''; epinp.placeholder = s.email_password_set
+    ? '•••••• password saved — type to replace, clear to remove' : 'SMTP password (optional)'; }
+  document.getElementById('al_email_state').textContent = s.email_password_set
+    ? 'A password is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No password saved.';
+  // Slack webhook is a secret — same mask.
+  const slinp=document.getElementById('al_slack');
+  if(!ALERTS_LOADED){ slinp.value=''; slinp.placeholder = s.slack_webhook_url_set
+    ? '•••••• webhook saved — type to replace, clear to remove' : 'https://hooks.slack.com/services/…'; }
+  document.getElementById('al_slack_state').textContent = s.slack_webhook_url_set
+    ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No webhook saved yet.';
+  // Generic webhook is a secret — same mask.
+  const whinp=document.getElementById('al_webhook');
+  if(!ALERTS_LOADED){ whinp.value=''; whinp.placeholder = s.webhook_url_set
+    ? '•••••• webhook saved — type to replace, clear to remove' : 'https://hooks.example.com/alerts'; }
+  document.getElementById('al_webhook_state').textContent = s.webhook_url_set
+    ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
+    : 'No webhook saved yet.';
   ALERTS_LOADED=true;
 }
 
@@ -3912,6 +4025,12 @@ async function saveAlerts(){
     ntfy_topic:       document.getElementById('al_ntfy_topic').value.trim(),
     ntfy_server:      document.getElementById('al_ntfy_server').value.trim(),
     telegram_chat_id: document.getElementById('al_telegram_chat_id').value.trim(),
+    email_host:       document.getElementById('al_email_host').value.trim(),
+    email_port:       document.getElementById('al_email_port').value.trim()||'587',
+    email_use_tls:    document.getElementById('al_email_tls').checked ? '1' : '0',
+    email_from:       document.getElementById('al_email_from').value.trim(),
+    email_to:         document.getElementById('al_email_to').value.trim(),
+    email_username:   document.getElementById('al_email_user').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
     disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
@@ -3936,10 +4055,25 @@ async function saveAlerts(){
   const mtv = (document.getElementById('al_mlflow_token')||{}).value;
   if(mtv === 'CLEAR'){ body.mlflow_token=''; }
   else if(mtv && mtv.trim()){ body.mlflow_token = mtv.trim(); }
+  // Email password — secret, same CLEAR pattern.
+  const epv = document.getElementById('al_email_pass').value;
+  if(epv === 'CLEAR'){ body.email_password=''; }
+  else if(epv && epv.trim()){ body.email_password = epv.trim(); }
+  // Slack webhook — secret.
+  const sv = document.getElementById('al_slack').value;
+  if(sv === 'CLEAR'){ body.slack_webhook_url=''; }
+  else if(sv && sv.trim()){ body.slack_webhook_url = sv.trim(); }
+  // Generic webhook — secret.
+  const wv = document.getElementById('al_webhook').value;
+  if(wv === 'CLEAR'){ body.webhook_url=''; }
+  else if(wv && wv.trim()){ body.webhook_url = wv.trim(); }
   let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)})).json(); }catch(e){ showAlertStatus('critical','Could not save settings: '+e); return; }
   document.getElementById('al_discord').value='';
   document.getElementById('al_telegram_token').value='';
+  document.getElementById('al_email_pass').value='';
+  document.getElementById('al_slack').value='';
+  document.getElementById('al_webhook').value='';
   const mtok=document.getElementById('al_mlflow_token'); if(mtok) mtok.value='';
   await loadAlerts();
   showAlertStatus('ok',I18N.t('toast.settings_saved','Settings saved.'));
@@ -3952,8 +4086,130 @@ async function testAlerts(){
     showAlertStatus('ok','Test alert sent: '+(j.results||[]).map(r=>r.channel).join(', ')+'.');
   }else{
     const fails=(j.results||[]).filter(r=>!r.ok).map(r=>r.channel+': '+r.error).join(' · ');
-    showAlertStatus('critical', fails || j.reason || 'Test failed — check Discord webhook / ntfy topic / Telegram bot.');
+    showAlertStatus('critical', fails || j.reason || 'Test failed — check your alert channel settings.');
   }
+}
+
+// ── Routing rules ─────────────────────────────────────────────────────────────
+let RULES = [];
+const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
+const RULE_CHANNELS = ['all','discord','ntfy','telegram','email','slack','webhook'];
+const RULE_LEVELS = ['info','warning','critical'];
+function showRulesStatus(level, text){
+  const el=document.getElementById('rules-status');
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+async function loadRules(){
+  let j; try{ j=await(await fetch('/api/notify/rules')).json(); }catch(e){ return; }
+  RULES = j.rules || [];
+  renderRules();
+}
+function ruleOptions(values, selected){
+  return values.map(v=>`<option value="${v}"${selected===v?' selected':''}>${v}</option>`).join('');
+}
+function renderRules(){
+  const tbody=document.getElementById('rules-body');
+  tbody.innerHTML='';
+  for(const r of RULES){
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid var(--bd)';
+    tr.dataset.id=r.id;
+    tr.innerHTML=`
+      <td style="padding:4px 6px"><select class="field" data-field="match_kind" aria-label="${I18N.t('rules.kind_label','Match kind')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_KINDS,r.match_kind)}</select></td>
+      <td style="padding:4px 6px"><input class="field" data-field="match_pattern" value="${esc(r.match_pattern)}" aria-label="${I18N.t('rules.pattern_label','Match pattern')}" style="width:100px;font-size:12px;padding:2px 4px"></td>
+      <td style="padding:4px 6px"><select class="field" data-field="channel" aria-label="${I18N.t('rules.channel_label','Channel')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_CHANNELS,r.channel)}</select></td>
+      <td style="padding:4px 6px"><select class="field" data-field="min_level" aria-label="${I18N.t('rules.min_level_label','Minimum level')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_LEVELS,r.min_level)}</select></td>
+      <td style="padding:4px 6px"><input type="checkbox" data-field="enabled" aria-label="${I18N.t('rules.enabled_label','Enabled')}" ${r.enabled?'checked':''}></td>
+      <td style="padding:4px 6px;white-space:nowrap">
+        <button class="rb" data-action="save" aria-label="${I18N.t('rules.save_label','Save rule')}" style="font-size:11px;padding:2px 6px">💾</button>
+        <button class="rb" data-action="test" aria-label="${I18N.t('rules.test_label','Test rule')}" style="font-size:11px;padding:2px 6px">🧪</button>
+        <button class="rb" data-action="delete" aria-label="${I18N.t('rules.delete_label','Delete rule')}" style="font-size:11px;padding:2px 6px">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  // Wire row actions
+  tbody.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.onclick = async (e) => {
+      const tr=btn.closest('tr');
+      const id=tr ? tr.dataset.id : null;
+      const action=btn.dataset.action;
+      if(action==='delete'){
+        if(!confirm(I18N.t('rules.confirm_delete','Delete this rule?'))) return;
+        let j; try{ j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({action:'delete',id:parseInt(id)})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok){ await loadRules(); showRulesStatus('ok',I18N.t('rules.status_deleted','Rule deleted.')); }
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_delete_failed','Delete failed'));
+      }else if(action==='save'){
+        const fields={};
+        tr.querySelectorAll('[data-field]').forEach(el=>{
+          const key=el.dataset.field;
+          if(el.type==='checkbox') fields[key]=el.checked;
+          else fields[key]=el.value;
+        });
+        let j;
+        try{
+          if(id){
+            j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({action:'update',id:parseInt(id),...fields})})).json();
+          }else{
+            j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({action:'add',...fields})})).json();
+          }
+        }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok){ await loadRules(); showRulesStatus('ok',id?I18N.t('rules.status_saved','Rule saved.'):I18N.t('rules.status_added','Rule added.')); }
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_save_failed','Save failed'));
+      }else if(action==='test'){
+        const fields={};
+        tr.querySelectorAll('[data-field]').forEach(el=>{
+          const key=el.dataset.field;
+          if(el.type==='checkbox') fields[key]=el.checked;
+          else fields[key]=el.value;
+        });
+        showRulesStatus('info',I18N.t('rules.status_sending_test','Sending test…'));
+        let j; try{ j=await(await fetch('/api/notify/rules/test',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({...fields,level:'warning'})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+        if(j.ok) showRulesStatus('ok',I18N.t('rules.status_test_sent','Test sent to: {channels}.',{channels:(j.channels||[]).join(', ')}));
+        else showRulesStatus('critical',j.error||I18N.t('rules.status_test_failed','Test failed'));
+      }
+    };
+  });
+  // Add-rule button
+  document.getElementById('rules-add-btn').onclick = () => {
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid var(--bd)';
+    tr.innerHTML=`
+      <td style="padding:4px 6px"><select class="field" data-field="match_kind" aria-label="${I18N.t('rules.kind_label','Match kind')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_KINDS,'container')}</select></td>
+      <td style="padding:4px 6px"><input class="field" data-field="match_pattern" value="*" aria-label="${I18N.t('rules.pattern_label','Match pattern')}" style="width:100px;font-size:12px;padding:2px 4px"></td>
+      <td style="padding:4px 6px"><select class="field" data-field="channel" aria-label="${I18N.t('rules.channel_label','Channel')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_CHANNELS,'all')}</select></td>
+      <td style="padding:4px 6px"><select class="field" data-field="min_level" aria-label="${I18N.t('rules.min_level_label','Minimum level')}" style="width:auto;font-size:12px;padding:2px 4px">
+        ${ruleOptions(RULE_LEVELS,'warning')}</select></td>
+      <td style="padding:4px 6px"><input type="checkbox" data-field="enabled" aria-label="${I18N.t('rules.enabled_label','Enabled')}" checked></td>
+      <td style="padding:4px 6px;white-space:nowrap">
+        <button class="rb" data-action="save" aria-label="${I18N.t('rules.save_label','Save rule')}" style="font-size:11px;padding:2px 6px">💾</button>
+        <button class="rb" data-action="discard" aria-label="${I18N.t('rules.discard_label','Discard rule')}" style="font-size:11px;padding:2px 6px">✕</button>
+      </td>`;
+    tr.querySelector('[data-action="discard"]').onclick = () => { tr.remove(); };
+    tr.querySelector('[data-action="save"]').onclick = async () => {
+      const fields={};
+      tr.querySelectorAll('[data-field]').forEach(el=>{
+        const key=el.dataset.field;
+        if(el.type==='checkbox') fields[key]=el.checked;
+        else fields[key]=el.value;
+      });
+      let j; try{ j=await(await fetch('/api/notify/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'add',...fields})})).json(); }catch(e){ showRulesStatus('critical',I18N.t('rules.status_error','Error: {msg}',{msg:String(e)})); return; }
+      if(j.ok){ await loadRules(); showRulesStatus('ok',I18N.t('rules.status_added','Rule added.')); }
+      else showRulesStatus('critical',j.error||I18N.t('rules.status_save_failed','Save failed'));
+    };
+    document.getElementById('rules-body').appendChild(tr);
+  };
 }
 
 // ── Backup (settings) tab ─────────────────────────────────────────────────────
@@ -3983,7 +4239,7 @@ async function restoreBackup(file){
   document.getElementById('bk_file').value='';
   if(j.ok){
     showBackupStatus('ok', j.message || 'Backup restored.');
-    loadData(); loadHealth(); loadFleet(); loadHosts(); loadAlerts();
+    loadData(); loadHealth(); loadFleet(); loadHosts(); loadAlerts(); loadRules();
   }else{
     showBackupStatus('critical', j.error || 'Restore failed.');
   }

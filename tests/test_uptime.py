@@ -20,6 +20,7 @@ def _clean_db():
     with app.LOCK:
         app.DB.execute("DELETE FROM uptime_checks")
         app.DB.execute("DELETE FROM uptime_results")
+        app.DB.execute("DELETE FROM notification_rules")
         app.DB.commit()
     app._uptime_due.clear()
     app._uptime_down_since.clear()
@@ -407,6 +408,31 @@ class TestSmartAlerting(unittest.TestCase):
         with self._capture():
             app.notify_uptime(self.s)
         self.assertEqual(self.sent, [])
+
+    def test_down_routed_by_uptime_rules(self):
+        """Uptime DOWN alerts honour notification_rules with match_kind='uptime'."""
+        with app.LOCK:
+            app.DB.execute("DELETE FROM notification_rules")
+            app.DB.execute(
+                "INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) "
+                "VALUES (?, ?, ?, ?, ?)", ("uptime", "*", "ntfy", "warning", 1))
+            app.DB.commit()
+        cid, _ = app.create_uptime_check(
+            {"label": "x", "type": "tcp", "target": "h:1", "fail_threshold": 1})
+        now = int(time.time())
+        _insert_results(cid, [(now - 1, 0)])
+        s = {"alerts_enabled": "1", "discord_webhook_url": "https://hook",
+             "ntfy_topic": "mytopic", "alert_min_level": "warning"}
+        ntfy_calls, discord_calls = [], []
+        with patch("app.send_ntfy", side_effect=lambda server, topic, level, title, detail:
+                   ntfy_calls.append((level, title))) as mock_ntfy, \
+             patch("app.send_discord", side_effect=lambda webhook, level, title, detail:
+                   discord_calls.append(title)) as mock_discord:
+            app.notify_uptime(s)
+        self.assertEqual(len(ntfy_calls), 1, "rule should route uptime to ntfy")
+        self.assertEqual(ntfy_calls[0][0], "critical")
+        self.assertIn("DOWN", ntfy_calls[0][1])
+        self.assertEqual(discord_calls, [], "rule should suppress default discord channel")
 
     def test_insights_surface_down_and_redact(self):
         app.create_uptime_check(

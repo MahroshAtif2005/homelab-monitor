@@ -2,7 +2,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
@@ -163,6 +163,320 @@ class TestOutboundUserAgent(unittest.TestCase):
     def test_user_agent_is_non_default(self):
         self.assertIn("homelab-monitor", app.NOTIFY_USER_AGENT)
         self.assertNotIn("Python-urllib", app.NOTIFY_USER_AGENT)
+
+
+# ── Email ──────────────────────────────────────────────────────────────────────
+
+class TestEmailSettings(unittest.TestCase):
+    def test_email_defaults_present(self):
+        for k in ("email_host", "email_port", "email_use_tls", "email_username",
+                  "email_password", "email_from", "email_to"):
+            self.assertIn(k, app.SETTING_DEFAULTS)
+        self.assertIn("email_password", app.SETTING_SECRETS)
+
+    def test_public_settings_masks_email_password(self):
+        with patch.object(app, "get_settings", return_value={
+            **app.SETTING_DEFAULTS,
+            "email_password": "s3cret",
+            "email_host": "smtp.example.com",
+        }):
+            pub = app._public_settings()
+        self.assertNotIn("email_password", pub)
+        self.assertTrue(pub["email_password_set"])
+
+
+class TestEmailNotifier(unittest.TestCase):
+    @patch("app.smtplib.SMTP")
+    def test_send_email_basic(self, mock_smtp):
+        mock_ctx = MagicMock()
+        mock_smtp.return_value = mock_ctx
+        app._send_email("mail.example.com", "587", True, "", "",
+                        "alerts@lab", "me@example.com",
+                        "warning", "Disk full", "95% used")
+        mock_smtp.assert_called_once_with("mail.example.com", 587, timeout=10)
+        mock_ctx.starttls.assert_called_once()
+        mock_ctx.login.assert_not_called()
+        mock_ctx.send_message.assert_called_once()
+        msg = mock_ctx.send_message.call_args[0][0]
+        self.assertEqual(msg["From"], "alerts@lab")
+        self.assertEqual(msg["To"], "me@example.com")
+        self.assertEqual(msg["Subject"], "Disk full")
+        self.assertIn("95% used", msg.get_content())
+
+    @patch("app.smtplib.SMTP_SSL")
+    @patch("app.smtplib.SMTP")
+    def test_send_email_with_auth(self, mock_smtp, mock_ssl):
+        mock_ctx = MagicMock()
+        mock_ssl.return_value = mock_ctx
+        app._send_email("mail.example.com", "465", True, "user", "pass",
+                        "a@b", "c@d", "info", "Test", "Body")
+        mock_ssl.assert_called_once_with("mail.example.com", 465, timeout=10)
+        mock_smtp.assert_not_called()
+        mock_ctx.starttls.assert_not_called()
+        mock_ctx.login.assert_called_once_with("user", "pass")
+        mock_ctx.send_message.assert_called_once()
+
+    @patch("app.smtplib.SMTP")
+    def test_send_email_without_tls(self, mock_smtp):
+        mock_ctx = MagicMock()
+        mock_smtp.return_value = mock_ctx
+        app._send_email("mail.example.com", "25", False, "", "",
+                        "a@b", "c@d", "info", "Test", "Body")
+        mock_ctx.starttls.assert_not_called()
+        mock_ctx.send_message.assert_called_once()
+
+
+class TestEmailDispatch(unittest.TestCase):
+    @patch("app.smtplib.SMTP")
+    def test_dispatch_includes_email_when_configured(self, mock_smtp):
+        mock_ctx = MagicMock()
+        mock_smtp.return_value = mock_ctx
+        s = {**app.SETTING_DEFAULTS,
+             "email_host": "smtp.example.com", "email_from": "a@b", "email_to": "c@d"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, ok, _ in results]
+        self.assertIn("email", chans)
+        self.assertTrue(all(ok for _, ok, _ in results))
+
+    @patch("app.smtplib.SMTP")
+    def test_dispatch_skips_email_without_host(self, mock_smtp):
+        s = {**app.SETTING_DEFAULTS, "email_host": "", "email_from": "a@b", "email_to": "c@d"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, _, _ in results]
+        self.assertNotIn("email", chans)
+        mock_smtp.assert_not_called()
+
+    @patch("app.smtplib.SMTP")
+    def test_dispatch_reports_email_errors(self, mock_smtp):
+        mock_smtp.side_effect = RuntimeError("SMTP timeout")
+        s = {**app.SETTING_DEFAULTS,
+             "email_host": "smtp.example.com", "email_from": "a@b", "email_to": "c@d"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        em = [r for r in results if r[0] == "email"]
+        self.assertEqual(len(em), 1)
+        self.assertFalse(em[0][1])
+        self.assertIn("SMTP timeout", em[0][2])
+
+
+class TestEmailHostLabel(unittest.TestCase):
+    @patch("app.smtplib.SMTP")
+    def test_email_prefixes_title_with_host(self, mock_smtp):
+        mock_ctx = MagicMock()
+        mock_smtp.return_value = mock_ctx
+        s = {**app.SETTING_DEFAULTS,
+             "email_host": "smtp.example.com", "email_from": "a@b", "email_to": "c@d"}
+        with patch.object(app, "_alert_host_label", return_value="ardi"):
+            app.dispatch_alert(s, "warning", "Container immich unhealthy", "down")
+        msg = mock_ctx.send_message.call_args[0][0]
+        self.assertIn("[ardi]", msg["Subject"])
+        self.assertIn("Container immich unhealthy", msg["Subject"])
+
+
+class TestEmailValidation(unittest.TestCase):
+    @patch.object(app, "get_settings", return_value=app.SETTING_DEFAULTS)
+    def test_email_validation_accepts_complete_config(self, _):
+        err = app._validate_email_settings({
+            "email_host": "smtp.example.com",
+            "email_from": "a@b",
+            "email_to": "c@d",
+            "email_port": "2525",
+        })
+        self.assertIsNone(err)
+
+    @patch.object(app, "get_settings", return_value=app.SETTING_DEFAULTS)
+    def test_email_validation_requires_core_fields(self, _):
+        err = app._validate_email_settings({
+            "email_from": "a@b",
+            "email_to": "c@d",
+        })
+        self.assertIsNotNone(err)
+
+    @patch.object(app, "get_settings", return_value=app.SETTING_DEFAULTS)
+    def test_email_validation_requires_numeric_port(self, _):
+        err = app._validate_email_settings({
+            "email_host": "smtp.example.com",
+            "email_from": "a@b",
+            "email_to": "c@d",
+            "email_port": "abc",
+        })
+        self.assertIn("number", err)
+
+
+class TestNotifyScan(unittest.TestCase):
+    @patch.object(app, "get_settings", return_value={**app.SETTING_DEFAULTS, "alerts_enabled": "1", "discord_webhook_url": "https://discord.example/webhook"})
+    def test_notify_scan_handles_docker_block(self, _):
+        with patch.dict(app.__dict__, {"HEALTH": {"docker": {"available": True, "containers": [{"name": "immich", "status": "ok", "status_text": ""}]}}}, clear=False):
+            app._NOTIFIED.clear()
+            app.notify_scan()
+            self.assertNotIn("container:immich", app._NOTIFIED)
+
+
+# ── Slack ──────────────────────────────────────────────────────────────────────
+
+class TestSlackSettings(unittest.TestCase):
+    def test_slack_defaults_present(self):
+        self.assertIn("slack_webhook_url", app.SETTING_DEFAULTS)
+        self.assertIn("slack_webhook_url", app.SETTING_SECRETS)
+
+    def test_public_settings_masks_slack_webhook(self):
+        with patch.object(app, "get_settings", return_value={
+            **app.SETTING_DEFAULTS, "slack_webhook_url": "https://hooks.slack.com/xxx",
+        }):
+            pub = app._public_settings()
+        self.assertNotIn("slack_webhook_url", pub)
+        self.assertTrue(pub["slack_webhook_url_set"])
+
+
+class TestSlackNotifier(unittest.TestCase):
+    @patch("app._post_json")
+    def test_send_slack_payload(self, mock_post):
+        mock_post.return_value = (200, b"{}")
+        app.send_slack("https://hooks.slack.com/xxx", "warning", "Disk full", "95% used")
+        url, payload = mock_post.call_args[0]
+        self.assertEqual(url, "https://hooks.slack.com/xxx")
+        self.assertIn("Disk full", payload["text"])
+        self.assertIn("95% used", payload["text"])
+        self.assertIn("warning", payload["text"])
+
+    @patch("app._post_json")
+    def test_dispatch_includes_slack_when_configured(self, mock_post):
+        mock_post.return_value = (200, b"{}")
+        s = {**app.SETTING_DEFAULTS, "slack_webhook_url": "https://hooks.slack.com/xxx"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, ok, _ in results]
+        self.assertIn("slack", chans)
+        self.assertTrue(all(ok for _, ok, _ in results))
+
+    @patch("app._post_json")
+    def test_dispatch_skips_slack_without_url(self, mock_post):
+        s = {**app.SETTING_DEFAULTS, "slack_webhook_url": ""}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, _, _ in results]
+        self.assertNotIn("slack", chans)
+        mock_post.assert_not_called()
+
+    @patch("app._post_json")
+    def test_dispatch_reports_slack_errors(self, mock_post):
+        mock_post.side_effect = RuntimeError("webhook rejected")
+        s = {**app.SETTING_DEFAULTS, "slack_webhook_url": "https://hooks.slack.com/xxx"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        sl = [r for r in results if r[0] == "slack"]
+        self.assertEqual(len(sl), 1)
+        self.assertFalse(sl[0][1])
+        self.assertIn("webhook rejected", sl[0][2])
+
+
+# ── Generic webhook ────────────────────────────────────────────────────────────
+
+class TestWebhookSettings(unittest.TestCase):
+    def test_webhook_defaults_present(self):
+        self.assertIn("webhook_url", app.SETTING_DEFAULTS)
+        self.assertIn("webhook_url", app.SETTING_SECRETS)
+
+    def test_public_settings_masks_webhook_url(self):
+        with patch.object(app, "get_settings", return_value={
+            **app.SETTING_DEFAULTS, "webhook_url": "https://hooks.example.com/alerts",
+        }):
+            pub = app._public_settings()
+        self.assertNotIn("webhook_url", pub)
+        self.assertTrue(pub["webhook_url_set"])
+
+
+class TestWebhookNotifier(unittest.TestCase):
+    @patch("app._post_json")
+    def test_send_webhook_payload(self, mock_post):
+        mock_post.return_value = (200, b"{}")
+        app.send_webhook("https://hooks.example.com/alerts", "critical",
+                         "Disk full", "95% used", "ardi")
+        url, payload = mock_post.call_args[0]
+        self.assertEqual(url, "https://hooks.example.com/alerts")
+        self.assertEqual(payload["level"], "critical")
+        self.assertEqual(payload["title"], "Disk full")
+        self.assertEqual(payload["detail"], "95% used")
+        self.assertEqual(payload["host"], "ardi")
+
+    @patch("app._post_json")
+    def test_dispatch_includes_webhook_when_configured(self, mock_post):
+        mock_post.return_value = (200, b"{}")
+        s = {**app.SETTING_DEFAULTS, "webhook_url": "https://hooks.example.com/alerts"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, ok, _ in results]
+        self.assertIn("webhook", chans)
+        self.assertTrue(all(ok for _, ok, _ in results))
+
+    @patch("app._post_json")
+    def test_dispatch_skips_webhook_without_url(self, mock_post):
+        s = {**app.SETTING_DEFAULTS, "webhook_url": ""}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        chans = [c for c, _, _ in results]
+        self.assertNotIn("webhook", chans)
+        mock_post.assert_not_called()
+
+    @patch("app._post_json")
+    def test_dispatch_reports_webhook_errors(self, mock_post):
+        mock_post.side_effect = RuntimeError("timeout")
+        s = {**app.SETTING_DEFAULTS, "webhook_url": "https://hooks.example.com/alerts"}
+        results = app.dispatch_alert(s, "info", "Title", "Body")
+        wh = [r for r in results if r[0] == "webhook"]
+        self.assertEqual(len(wh), 1)
+        self.assertFalse(wh[0][1])
+        self.assertIn("timeout", wh[0][2])
+
+
+# ── URL validation ─────────────────────────────────────────────────────────────
+
+class TestURLValidation(unittest.TestCase):
+    def test_slack_webhook_validated(self):
+        self.assertIn("slack_webhook_url", app._URL_SETTING_KEYS)
+
+    def test_webhook_url_validated(self):
+        self.assertIn("webhook_url", app._URL_SETTING_KEYS)
+
+    def test_validate_rejects_bad_slack_url(self):
+        err = app._validate_url_settings({"slack_webhook_url": "ftp://bad"})
+        self.assertIsNotNone(err)
+
+    def test_validate_accepts_http_webhook(self):
+        err = app._validate_url_settings({"webhook_url": "http://example.com/hook"})
+        self.assertIsNone(err)
+
+
+# ── Per-service rules × email/Slack/webhook channels (PR #151 × #191 merge) ─────
+class TestRulesRouteNewChannels(unittest.TestCase):
+    """A routing rule must be able to target email/Slack/webhook, and 'all'
+    must include them — otherwise combining per-service rules (#24) with the
+    new alert channels (#27/#191) silently drops those channels under any rule."""
+
+    def _settings(self):
+        return {**app.SETTING_DEFAULTS,
+                "email_host": "smtp.example.com", "email_from": "a@b.c", "email_to": "d@e.f",
+                "slack_webhook_url": "https://hooks.slack.com/services/x",
+                "webhook_url": "https://hooks.example.com/alerts"}
+
+    def test_apply_rules_all_includes_new_channels(self):
+        rule = {"match_kind": "container", "match_pattern": "*", "channel": "all",
+                "min_level": "warning", "enabled": True}
+        chans = app._apply_rules("container:immich", "critical", [rule])
+        for ch in ("discord", "ntfy", "telegram", "email", "slack", "webhook"):
+            self.assertIn(ch, chans)
+
+    def test_dispatch_to_channels_reaches_new_channels(self):
+        s = self._settings()
+        with patch("app._send_email") as me, \
+             patch("app.send_slack") as ms, \
+             patch("app.send_webhook") as mw, \
+             patch("app.send_discord") as md:
+            app._dispatch_to_channels(s, "critical", "T", "B", {"email", "slack", "webhook"})
+        me.assert_called_once()
+        ms.assert_called_once()
+        mw.assert_called_once()
+        md.assert_not_called()   # not in the channel set → must stay silent
+
+    def test_rule_targeting_email_only_routes_to_email(self):
+        rule = {"match_kind": "container", "match_pattern": "immich", "channel": "email",
+                "min_level": "warning", "enabled": True}
+        chans = app._apply_rules("container:immich", "critical", [rule])
+        self.assertEqual(chans, {"email"})
 
 
 if __name__ == "__main__":
