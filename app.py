@@ -4182,9 +4182,22 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
         last_checked, last_latency, last_code, last_err = last[0], last[2], last[3], last[4]
     # Heartbeat strip: most recent up-to-N results, oldest→newest, carrying {up, t}.
     strip = [{"up": bool(r[1]), "t": r[0]} for r in rows[-_UPTIME_STRIP_CELLS:]]
+    # Surface the most recent cert expiry data (index 5, 6 from the last row).
+    cert_days = last[5] if last and len(last) > 5 else None
+    cert_expires_at = last[6] if last and len(last) > 6 else None
+    cert_status = None
+    if cert_days is not None:
+        if cert_days <= 7:
+            cert_status = "red"
+        elif cert_days <= 21:
+            cert_status = "amber"
+        else:
+            cert_status = "ok"
     return {"state": state, "uptime": uptime, "uptime7": uptime7, "window_total": total,
             "last_latency_ms": last_latency, "last_checked": last_checked,
-            "last_code": last_code, "last_err": last_err, "strip": strip}
+            "last_code": last_code, "last_err": last_err, "strip": strip,
+            "cert_days_remaining": cert_days, "cert_expires_at": cert_expires_at,
+            "cert_status": cert_status}
 
 def uptime_overview(window=86400):
     """All checks + their current state. The user-facing private payload."""
