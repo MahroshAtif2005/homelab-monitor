@@ -4320,18 +4320,18 @@ def _send_email(host, port, use_tls, username, password, from_addr, to_addr, lev
     msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
 
     port_num = int(port)
-    if use_tls and port_num == 465:
-        ctx = smtplib.SMTP_SSL(host, port_num, timeout=10)
-    else:
-        ctx = smtplib.SMTP(host, port_num, timeout=10)
+    ctx = None
     try:
+        ctx = (smtplib.SMTP_SSL(host, port_num, timeout=10) if (use_tls and port_num == 465)
+               else smtplib.SMTP(host, port_num, timeout=10))
         if use_tls and port_num != 465:
             ctx.starttls()
         if username and password:
             ctx.login(username, password)
         ctx.send_message(msg)
     finally:
-        ctx.quit()
+        if ctx is not None:
+            ctx.quit()
 
 def send_slack(webhook, level, title, detail):
     payload = {"text": f"[{level}] {title}\n\n{detail}"}
@@ -7232,18 +7232,18 @@ def _send_brief_email(s, subject, html, text):
     msg.add_alternative(html, subtype="html")
     host = s["email_host"]; port = int(s.get("email_port", "587") or 587)
     use_tls = s.get("email_use_tls", "1") == "1"
-    if use_tls and port == 465:
-        ctx = smtplib.SMTP_SSL(host, port, timeout=10)
-    else:
-        ctx = smtplib.SMTP(host, port, timeout=10)
+    ctx = None
     try:
+        ctx = (smtplib.SMTP_SSL(host, port, timeout=10) if (use_tls and port == 465)
+               else smtplib.SMTP(host, port, timeout=10))
         if use_tls and port != 465:
             ctx.starttls()
         if s.get("email_username") and s.get("email_password"):
             ctx.login(s["email_username"], s["email_password"])
         ctx.send_message(msg)
     finally:
-        ctx.quit()
+        if ctx is not None:
+            ctx.quit()
 
 def send_brief(s, channel):
     """Render and deliver the brief to one channel. Raises on delivery failure."""

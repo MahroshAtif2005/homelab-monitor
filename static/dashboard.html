@@ -2638,6 +2638,7 @@ const ICONS={
   '📊':'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
   '📋':'<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01"/>',
   '📦':'<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" x2="12" y1="22" y2="12"/>',
+  '📰':'<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8z"/>',
   '📶':'<path d="M2 20h.01M7 20v-4M12 20v-8M17 20V8M22 4v16"/>',
   '🔬':'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   '🖥':'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
@@ -4055,12 +4056,15 @@ function fillBrief(s){
     : '<option value="">— configure a channel above first —</option>';
   document.getElementById('al_brief_chan_cap').style.display = chans.length ? 'none' : '';
 }
-function showBriefStatus(level,text){
-  const el=document.getElementById('brief-status');
+// Shared renderer for the dismissing .ins status banners (brief, rules, …).
+function showInlineStatus(id,level,text){
+  const el=document.getElementById(id);
+  if(!el) return;
   el.className='ins '+level; el.style.display='flex';
   el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
   setTimeout(()=>{el.style.display='none';}, 6000);
 }
+function showBriefStatus(level,text){ showInlineStatus('brief-status',level,text); }
 function briefPreview(){
   const theme=document.getElementById('al_brief_theme').value || 'dark';
   window.open('/api/brief/preview?theme='+encodeURIComponent(theme), '_blank');
@@ -4186,12 +4190,7 @@ let RULES = [];
 const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
 const RULE_CHANNELS = ['all','discord','ntfy','telegram','email','slack','webhook'];
 const RULE_LEVELS = ['info','warning','critical'];
-function showRulesStatus(level, text){
-  const el=document.getElementById('rules-status');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
-  setTimeout(()=>{el.style.display='none';}, 6000);
-}
+function showRulesStatus(level, text){ showInlineStatus('rules-status',level,text); }
 async function loadRules(){
   let j; try{ j=await(await fetch('/api/notify/rules')).json(); }catch(e){ return; }
   RULES = j.rules || [];
