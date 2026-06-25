@@ -88,6 +88,11 @@ class TestRenderContract(unittest.TestCase):
         html, _, _ = app.render_brief("light")
         self.assertIn(app._BRIEF_PALETTE["light"]["bg"], html)
 
+    def test_no_dead_fragment_link(self):
+        """Email clients strip/neutralise href="#"; the brief must not ship one."""
+        html, _, _ = app.render_brief("dark")
+        self.assertNotIn('href="#"', html)
+
 
 class TestSchedule(unittest.TestCase):
     def setUp(self):

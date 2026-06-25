@@ -4311,20 +4311,17 @@ def _post_to_telegram(token, chat_id, level, title, body):
             f"_HomeLab Monitor · {level}_")
     return _post_json(url, {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-def _send_email(host, port, use_tls, username, password, from_addr, to_addr, level, title, detail):
-    """Send alert via SMTP. Raises on error."""
-    msg = email.message.EmailMessage()
-    msg["Subject"] = title
-    msg["From"] = from_addr
-    msg["To"] = to_addr
-    msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
-
-    port_num = int(port)
+def _smtp_send(msg, host, port, use_tls, username, password):
+    """Connect, optionally STARTTLS + authenticate, send, and always close. Shared by
+    the alert and daily-brief email paths so any fix (timeouts, TLS, error handling)
+    lives in one place. The connection is built inside the try with a None-guarded
+    quit() so a constructor failure can never reach an unbound name."""
+    port = int(port)
     ctx = None
     try:
-        ctx = (smtplib.SMTP_SSL(host, port_num, timeout=10) if (use_tls and port_num == 465)
-               else smtplib.SMTP(host, port_num, timeout=10))
-        if use_tls and port_num != 465:
+        ctx = (smtplib.SMTP_SSL(host, port, timeout=10) if (use_tls and port == 465)
+               else smtplib.SMTP(host, port, timeout=10))
+        if use_tls and port != 465:
             ctx.starttls()
         if username and password:
             ctx.login(username, password)
@@ -4332,6 +4329,15 @@ def _send_email(host, port, use_tls, username, password, from_addr, to_addr, lev
     finally:
         if ctx is not None:
             ctx.quit()
+
+def _send_email(host, port, use_tls, username, password, from_addr, to_addr, level, title, detail):
+    """Send alert via SMTP. Raises on error."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = title
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
+    _smtp_send(msg, host, port, use_tls, username, password)
 
 def send_slack(webhook, level, title, detail):
     payload = {"text": f"[{level}] {title}\n\n{detail}"}
@@ -6992,15 +6998,19 @@ def _brief_fleet():
     return {"hosts": out, "up": sum(1 for x in out if x["up"]), "total": len(out)}
 
 def _brief_checks():
-    """Uptime rollup: counts, any down, and certs expiring within 21 days. The cert
-    list is empty until per-check TLS expiry (#163) lands — the section just hides it."""
-    summ = uptime_summary()
-    downs, certs = [], []
-    for c in uptime_overview().get("checks", []):
-        if not c.get("enabled"):
-            continue
-        if c.get("state") == "down":
-            downs.append(c.get("label", "?"))
+    """Uptime rollup: counts, any down, and certs expiring within 21 days. Derived
+    from a SINGLE uptime_overview() read so the counts and the per-check lists can't
+    diverge across two snapshots. The cert list stays empty until per-check TLS
+    expiry (#163) lands — the section just hides it."""
+    checks = [c for c in uptime_overview().get("checks", []) if c.get("enabled")]
+    up = sum(1 for c in checks if c.get("state") == "up")
+    down = sum(1 for c in checks if c.get("state") == "down")
+    summ = {"total": len(checks), "up": up, "down": down,
+            "unknown": len(checks) - up - down,
+            "worst_down": next((c.get("label") for c in checks if c.get("state") == "down"), None)}
+    downs = [c.get("label", "?") for c in checks if c.get("state") == "down"]
+    certs = []
+    for c in checks:
         cd = c.get("cert_days_remaining")
         if isinstance(cd, (int, float)) and cd <= 21:
             certs.append((c.get("label", "?"), int(cd)))
@@ -7187,11 +7197,9 @@ def render_brief(theme="dark"):
     if d["capacity"]:
         parts.append(head("📈 Capacity nudges"))
         parts.append(rows_table([f'{ic} {_he(txt)}' for ic, txt in d["capacity"]]))
-    # cta + footer
-    parts.append(f'<tr><td style="padding:14px 24px 22px" align="center">'
-                 f'<a href="#" style="display:inline-block;background:{P["accent"]};color:{P["bg"]};'
-                 f'font-weight:700;text-decoration:none;padding:10px 22px;border-radius:8px;font-size:14px">'
-                 f'Open dashboard →</a></td></tr>')
+    # footer — no CTA link: a brief has no absolute dashboard URL to point at, and
+    # a fragment-only href="#" is stripped/dead in Gmail/Outlook/Apple Mail. The
+    # footer line tells the reader where the brief is configured instead.
     parts.append(f'<tr><td style="padding:14px 24px;border-top:1px solid {P["bd"]};font-size:12px;color:{P["mut"]}">'
                  f'HomeLab Monitor v{VERSION} · daily brief from {_he(hub)} · configure in Settings → Alerts</td></tr>')
 
@@ -7230,20 +7238,9 @@ def _send_brief_email(s, subject, html, text):
     msg["To"] = s["email_to"]
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
-    host = s["email_host"]; port = int(s.get("email_port", "587") or 587)
-    use_tls = s.get("email_use_tls", "1") == "1"
-    ctx = None
-    try:
-        ctx = (smtplib.SMTP_SSL(host, port, timeout=10) if (use_tls and port == 465)
-               else smtplib.SMTP(host, port, timeout=10))
-        if use_tls and port != 465:
-            ctx.starttls()
-        if s.get("email_username") and s.get("email_password"):
-            ctx.login(s["email_username"], s["email_password"])
-        ctx.send_message(msg)
-    finally:
-        if ctx is not None:
-            ctx.quit()
+    _smtp_send(msg, s["email_host"], s.get("email_port", "587") or 587,
+               s.get("email_use_tls", "1") == "1",
+               s.get("email_username"), s.get("email_password"))
 
 def send_brief(s, channel):
     """Render and deliver the brief to one channel. Raises on delivery failure."""
@@ -7251,15 +7248,15 @@ def send_brief(s, channel):
     if channel == "email":
         _send_brief_email(s, subject, html, summary)
     elif channel == "discord":
-        send_discord(s["discord_webhook_url"], "info", subject, summary)
+        send_discord(s.get("discord_webhook_url"), "info", subject, summary)
     elif channel == "telegram":
-        _post_to_telegram(s["telegram_token"], s["telegram_chat_id"], "info", subject, summary)
+        _post_to_telegram(s.get("telegram_token"), s.get("telegram_chat_id"), "info", subject, summary)
     elif channel == "ntfy":
-        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s["ntfy_topic"], "info", subject, summary)
+        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s.get("ntfy_topic"), "info", subject, summary)
     elif channel == "slack":
-        send_slack(s["slack_webhook_url"], "info", subject, summary)
+        send_slack(s.get("slack_webhook_url"), "info", subject, summary)
     elif channel == "webhook":
-        send_webhook(s["webhook_url"], "info", subject, summary, _alert_host_label() or "")
+        send_webhook(s.get("webhook_url"), "info", subject, summary, _alert_host_label() or "")
     else:
         raise ValueError(f"unknown brief channel: {channel}")
 
