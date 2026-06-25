@@ -3829,6 +3829,22 @@ def _validate_email_settings(updates):
             return f"{label} must include '@'."
     return None
 
+_BRIEF_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+def _validate_brief_settings(updates):
+    """Reject malformed daily-brief fields. Enum-validating brief_channel/theme here
+    means an arbitrary value can never reach the settings store (or the dashboard
+    that renders it into an <option>), closing the stored-XSS surface at the source."""
+    if "brief_channel" in updates:
+        v = (updates["brief_channel"] or "").strip()
+        if v and v not in _BRIEF_CHANNELS:
+            return "Unknown daily-brief channel."
+    if "brief_theme" in updates and (updates["brief_theme"] or "").strip() not in ("dark", "light"):
+        return "Daily-brief theme must be 'dark' or 'light'."
+    if "brief_time" in updates and not _BRIEF_TIME_RE.match((updates["brief_time"] or "").strip()):
+        return "Daily-brief time must be HH:MM (24-hour)."
+    return None
+
 def save_settings(updates):
     """Persist any subset of known setting keys. Unknown keys are ignored."""
     safe = [(k, "" if v is None else str(v)) for k, v in updates.items() if k in SETTING_DEFAULTS]
@@ -4308,11 +4324,11 @@ def _send_email(host, port, use_tls, username, password, from_addr, to_addr, lev
         ctx = smtplib.SMTP_SSL(host, port_num, timeout=10)
     else:
         ctx = smtplib.SMTP(host, port_num, timeout=10)
-        if use_tls:
-            ctx.starttls()
-    if username and password:
-        ctx.login(username, password)
     try:
+        if use_tls and port_num != 465:
+            ctx.starttls()
+        if username and password:
+            ctx.login(username, password)
         ctx.send_message(msg)
     finally:
         ctx.quit()
@@ -6767,7 +6783,8 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
-        err = _validate_url_settings(updates) or _validate_email_settings(updates)
+        err = (_validate_url_settings(updates) or _validate_email_settings(updates)
+               or _validate_brief_settings(updates))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
@@ -7219,11 +7236,11 @@ def _send_brief_email(s, subject, html, text):
         ctx = smtplib.SMTP_SSL(host, port, timeout=10)
     else:
         ctx = smtplib.SMTP(host, port, timeout=10)
-        if use_tls:
-            ctx.starttls()
-    if s.get("email_username") and s.get("email_password"):
-        ctx.login(s["email_username"], s["email_password"])
     try:
+        if use_tls and port != 465:
+            ctx.starttls()
+        if s.get("email_username") and s.get("email_password"):
+            ctx.login(s["email_username"], s["email_password"])
         ctx.send_message(msg)
     finally:
         ctx.quit()
@@ -7266,20 +7283,29 @@ def _brief_due(now=None):
         return None
     return s, ch, today
 
+def _brief_run_once(now=None):
+    """One scheduler pass. Returns True if a brief was due (and attempted). The day
+    is claimed *before* the send so a transient failure can't trigger a same-minute
+    retry / duplicate delivery — a daily digest prefers a single best-effort send
+    over risking two."""
+    due = _brief_due(now)
+    if not due:
+        return False
+    s, ch, today = due
+    _BRIEF_LAST_SENT["date"] = today
+    try:
+        send_brief(s, ch)
+        print(f"daily brief sent to {ch}", flush=True)
+    except Exception as e:
+        print("brief send error:", e, flush=True)
+    return True
+
 def brief_worker():
     """Dedicated daemon: every 30s, send the daily brief if it's due. Inert unless
     the brief is enabled with a configured channel."""
     while True:
         try:
-            due = _brief_due()
-            if due:
-                s, ch, today = due
-                try:
-                    send_brief(s, ch)
-                    _BRIEF_LAST_SENT["date"] = today
-                    print(f"daily brief sent to {ch}", flush=True)
-                except Exception as e:
-                    print("brief send error:", e, flush=True)
+            _brief_run_once()
         except Exception as e:
             print("brief_worker error:", e, flush=True)
         time.sleep(30)

@@ -4051,14 +4051,14 @@ function fillBrief(s){
   // Keep the saved channel visible even if it's no longer configured (flag it).
   if(saved && !chans.some(c=>c[0]===saved)) chans.push([saved, (labels[saved]||saved)+' (not configured)']);
   sel.innerHTML = chans.length
-    ? chans.map(c=>`<option value="${c[0]}"${c[0]===saved?' selected':''}>${esc(c[1])}</option>`).join('')
+    ? chans.map(c=>`<option value="${esc(c[0]).replace(/"/g,'&quot;')}"${c[0]===saved?' selected':''}>${esc(c[1])}</option>`).join('')
     : '<option value="">— configure a channel above first —</option>';
   document.getElementById('al_brief_chan_cap').style.display = chans.length ? 'none' : '';
 }
 function showBriefStatus(level,text){
   const el=document.getElementById('brief-status');
   el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${(window.ICON&&ICON[level])||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
   setTimeout(()=>{el.style.display='none';}, 6000);
 }
 function briefPreview(){

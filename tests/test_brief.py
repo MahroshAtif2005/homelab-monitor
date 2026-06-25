@@ -125,6 +125,20 @@ class TestSchedule(unittest.TestCase):
         self.assertFalse(app._brief_channel_ready({}, "email"))
         self.assertTrue(app._brief_channel_ready({"discord_webhook_url": "u"}, "discord"))
 
+    def test_run_once_claims_day_before_send_no_duplicate(self):
+        """A transient send failure must still claim the day so the worker can't
+        re-fire in the same minute and deliver a duplicate."""
+        now = time.time()
+        hhmm = time.strftime("%H:%M", time.localtime(now))
+        self._enable()
+        app.save_settings({"brief_time": hhmm})
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        with patch.object(app, "send_brief", MagicMock(side_effect=RuntimeError("smtp down"))) as m:
+            self.assertTrue(app._brief_run_once(now))     # due → attempted
+            self.assertEqual(app._BRIEF_LAST_SENT["date"], today)  # claimed despite failure
+            self.assertFalse(app._brief_run_once(now))    # same minute → not due again
+        m.assert_called_once()                            # exactly one delivery attempt
+
 
 class TestApi(unittest.TestCase):
     def setUp(self):
@@ -149,6 +163,16 @@ class TestApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.get_json()["ok"])
         m.assert_called_once()
+
+    def test_unknown_channel_rejected(self):
+        """brief_channel is enum-validated server-side, so a crafted value can never
+        reach the store (or the dashboard's <option>). Closes the stored-XSS surface."""
+        r = self.c.post("/api/settings", json={"brief_channel": 'discord" onmouseover="x'})
+        self.assertEqual(r.status_code, 400)
+        r2 = self.c.post("/api/settings", json={"brief_theme": "neon"})
+        self.assertEqual(r2.status_code, 400)
+        r3 = self.c.post("/api/settings", json={"brief_time": "9am"})
+        self.assertEqual(r3.status_code, 400)
 
     def test_brief_settings_round_trip(self):
         r = self.c.post("/api/settings", json={"brief_enabled": "1", "brief_time": "07:30",
