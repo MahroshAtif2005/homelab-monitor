@@ -3830,6 +3830,9 @@ def _validate_email_settings(updates):
     return None
 
 _BRIEF_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Channels the daily brief can target (also used by the worker/test route below).
+# Defined here, next to the validator that enum-checks it, so the dependency is local.
+_BRIEF_CHANNELS = ("email", "discord", "telegram", "ntfy", "slack", "webhook")
 
 def _validate_brief_settings(updates):
     """Reject malformed daily-brief fields. Enum-validating brief_channel/theme here
@@ -6930,7 +6933,7 @@ def index():
 # full self-contained, inline-styled HTML (survives Gmail/Outlook with no external
 # assets); chat channels get a compact text summary with the things that need
 # attention. Pure stdlib. Each section degrades gracefully when its data is absent.
-_BRIEF_CHANNELS = ("email", "discord", "telegram", "ntfy", "slack", "webhook")
+# (_BRIEF_CHANNELS is defined up by the settings validators that consume it.)
 
 _BRIEF_PALETTE = {
     "dark":  {"bg": "#0d1117", "card": "#161b22", "bd": "#30363d", "sub": "#21262d",
