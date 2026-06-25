@@ -743,10 +743,21 @@ a{color:var(--info)}
 /* System / Network / Security detail */
 .infogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px}
 .infocard{background:var(--inset);border:1px solid var(--bd);border-radius:9px;padding:12px 14px}
-.infocard h3{margin:0 0 8px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.infocard h3{margin:0 0 8px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:flex;align-items:center;gap:7px}
 .inforow{display:flex;gap:10px;padding:4px 0;font-size:13px;align-items:baseline}
 .inforow .k{color:var(--mut);flex:0 0 104px}
-.inforow .v{color:var(--tx);font-family:var(--mono);word-break:break-word}
+.inforow .v{color:var(--tx);font-family:var(--mono);word-break:break-word;min-width:0}
+/* per-field + per-card copy buttons — quiet until hover, ✓/accent on action */
+.copybtn{margin-left:auto;flex:none;align-self:center;display:inline-flex;align-items:center;
+  background:none;border:0;color:var(--mut);cursor:pointer;padding:2px;border-radius:5px;
+  opacity:0;transition:opacity .12s,color .12s,background .12s}
+.inforow:hover .copybtn{opacity:.6}
+.copybtn:hover{color:var(--accent);background:var(--hover);opacity:1}
+.copybtn:focus-visible{opacity:1;outline:1px solid var(--accent);outline-offset:1px}
+.copybtn.copied{color:var(--ok);opacity:1}
+.copybtn .sic{width:13px;height:13px}
+.infocard h3 .copybtn{opacity:.5;padding:1px}
+.infocard h3 .copybtn:hover{opacity:1}
 .kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .kpirow .kpi{flex:1;min-width:120px}
 /* Security check rows reuse the app's .badge + .sdot + table styling; the only
@@ -1938,6 +1949,44 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
           <button class="rb" id="rules-add-btn" data-i18n="rules.add" data-i18n-def="+ Add rule">+ Add rule</button>
         </div>
       </div>
+
+      <!-- ── Daily brief (#170) ── -->
+      <div style="margin-top:24px;border-top:1px solid var(--bd);padding-top:16px;max-width:800px">
+        <h2 class="card-sub" data-i18n="brief.title" data-i18n-def="📰 Daily brief">📰 Daily brief</h2>
+        <p class="cap" data-i18n="brief.intro" data-i18n-def="A scheduled “is the lab OK?” digest — the calm counterpart to alerts. Sent once a day to one channel: email gets the full HTML report, chat channels get a compact summary with the things that need attention.">A scheduled “is the lab OK?” digest — the calm counterpart to alerts. Sent once a day to one channel: email gets the full HTML report, chat channels get a compact summary with the things that need attention.</p>
+
+        <div id="brief-status" class="ins info" style="display:none;margin:8px 0"></div>
+
+        <label style="display:flex;align-items:center;gap:9px;margin:10px 0">
+          <input type="checkbox" id="al_brief_enabled">
+          <span data-i18n-html="brief.enabled_label"><b>Daily brief enabled</b> — send once a day at the time below.</span>
+        </label>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:560px">
+          <div>
+            <div class="flabel" data-i18n="brief.time" data-i18n-def="Send at (local time)">Send at (local time)</div>
+            <input type="time" id="al_brief_time" class="field" value="08:00">
+          </div>
+          <div>
+            <div class="flabel" data-i18n="brief.channel" data-i18n-def="Send to channel">Send to channel</div>
+            <select id="al_brief_channel" class="field"></select>
+          </div>
+          <div>
+            <div class="flabel" data-i18n="brief.theme" data-i18n-def="Theme">Theme</div>
+            <select id="al_brief_theme" class="field">
+              <option value="dark" data-i18n="opt.theme_dark" data-i18n-def="Dark">Dark</option>
+              <option value="light" data-i18n="opt.theme_light" data-i18n-def="Light">Light</option>
+            </select>
+          </div>
+        </div>
+        <p class="cap" id="al_brief_chan_cap" style="margin-top:6px" data-i18n="brief.chan_cap" data-i18n-def="Only channels you've configured above appear here. Save the channel first if it isn't listed.">Only channels you've configured above appear here. Save the channel first if it isn't listed.</p>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button class="rb" id="al_brief_preview" data-i18n="brief.preview" data-i18n-def="Preview">Preview</button>
+          <button class="rb" id="al_brief_test" data-i18n="brief.test" data-i18n-def="Send test brief">Send test brief</button>
+        </div>
+        <p class="cap" style="margin-top:6px" data-i18n="brief.note" data-i18n-def="Preview and Send test use your last saved settings — click Save above first if you just changed the channel.">Preview and Send test use your last saved settings — click Save above first if you just changed the channel.</p>
+      </div>
     </div>
     </div><!-- /set-pane-alerts -->
     <div id="set-pane-costs" hidden>
@@ -2600,6 +2649,7 @@ const ICONS={
   '📊':'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
   '📋':'<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01"/>',
   '📦':'<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" x2="12" y1="22" y2="12"/>',
+  '📰':'<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8z"/>',
   '📶':'<path d="M2 20h.01M7 20v-4M12 20v-8M17 20V8M22 4v16"/>',
   '🔬':'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   '🖥':'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
@@ -2640,6 +2690,7 @@ const SIC={
   trendUp:'<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
   trendDown:'<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>',
   scale:'<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10M12 3v18M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
+  copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
 };
 function sic(name){ const d=SIC[name]; return d ? `<svg class="sic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>` : ''; }
 const RUN_SRC_COLOR={jupyter:'#a371f7',colab:'#f59e0b',kaggle:'#4dabf7',mlflow:'#3fb950',api:'#8b949e',cli:'#6b7280'};
@@ -3986,7 +4037,59 @@ async function loadAlerts(){
   document.getElementById('al_webhook_state').textContent = s.webhook_url_set
     ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
     : 'No webhook saved yet.';
+  fillBrief(s);
   ALERTS_LOADED=true;
+}
+
+// ── Daily brief (#170) ────────────────────────────────────────────────────────
+// Which channels are configured (so the brief dropdown only offers usable ones).
+function configuredChannels(s){
+  const out=[];
+  if(s.email_host && s.email_from && s.email_to) out.push(['email', 'Email ('+s.email_to+')']);
+  if(s.discord_webhook_url_set) out.push(['discord','Discord']);
+  if(s.telegram_token_set && s.telegram_chat_id) out.push(['telegram','Telegram']);
+  if(s.ntfy_topic) out.push(['ntfy','ntfy ('+s.ntfy_topic+')']);
+  if(s.slack_webhook_url_set) out.push(['slack','Slack']);
+  if(s.webhook_url_set) out.push(['webhook','Webhook']);
+  return out;
+}
+function fillBrief(s){
+  document.getElementById('al_brief_enabled').checked = s.brief_enabled==='1';
+  document.getElementById('al_brief_time').value = s.brief_time || '08:00';
+  document.getElementById('al_brief_theme').value = (s.brief_theme==='light') ? 'light' : 'dark';
+  const sel=document.getElementById('al_brief_channel');
+  const chans=configuredChannels(s);
+  const saved=s.brief_channel || '';
+  const labels={email:'Email',discord:'Discord',telegram:'Telegram',ntfy:'ntfy',slack:'Slack',webhook:'Webhook'};
+  // Keep the saved channel visible even if it's no longer configured (flag it).
+  if(saved && !chans.some(c=>c[0]===saved)) chans.push([saved, (labels[saved]||saved)+' (not configured)']);
+  sel.innerHTML = chans.length
+    ? chans.map(c=>`<option value="${esc(c[0]).replace(/"/g,'&quot;')}"${c[0]===saved?' selected':''}>${esc(c[1])}</option>`).join('')
+    : '<option value="">— configure a channel above first —</option>';
+  document.getElementById('al_brief_chan_cap').style.display = chans.length ? 'none' : '';
+}
+// Shared renderer for the dismissing .ins status banners (brief, rules, …).
+function showInlineStatus(id,level,text){
+  const el=document.getElementById(id);
+  if(!el) return;
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+function showBriefStatus(level,text){ showInlineStatus('brief-status',level,text); }
+function briefPreview(){
+  const theme=document.getElementById('al_brief_theme').value || 'dark';
+  window.open('/api/brief/preview?theme='+encodeURIComponent(theme), '_blank');
+}
+async function briefTest(){
+  const ch=document.getElementById('al_brief_channel').value;
+  if(!ch){ showBriefStatus('warning','Configure and save a channel first.'); return; }
+  showBriefStatus('info','Sending test brief to '+ch+'…');
+  let j; try{ j=await(await fetch('/api/brief/test',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({channel:ch})})).json(); }
+  catch(e){ showBriefStatus('critical','Test failed: '+e); return; }
+  if(j.ok) showBriefStatus('ok','Test brief sent to '+j.channel+'.');
+  else showBriefStatus('critical', j.error || 'Test failed — check the channel settings above.');
 }
 
 function toast(level,text){
@@ -4042,6 +4145,10 @@ async function saveAlerts(){
     system_idle_watts: (document.getElementById('al_idle_w')||{}).value || '',
     mlflow_uri:        (document.getElementById('al_mlflow_uri')||{}).value || '',
     country:          document.getElementById('al_country').value,
+    brief_enabled:    document.getElementById('al_brief_enabled').checked ? '1' : '0',
+    brief_time:       document.getElementById('al_brief_time').value || '08:00',
+    brief_channel:    document.getElementById('al_brief_channel').value || '',
+    brief_theme:      document.getElementById('al_brief_theme').value || 'dark',
   };
   // Only send the webhook field if the user actually typed in it — empty means
   // "no change" when one is already saved (matching the placeholder hint),
@@ -4095,12 +4202,7 @@ let RULES = [];
 const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
 const RULE_CHANNELS = ['all','discord','ntfy','telegram','email','slack','webhook'];
 const RULE_LEVELS = ['info','warning','critical'];
-function showRulesStatus(level, text){
-  const el=document.getElementById('rules-status');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
-  setTimeout(()=>{el.style.display='none';}, 6000);
-}
+function showRulesStatus(level, text){ showInlineStatus('rules-status',level,text); }
 async function loadRules(){
   let j; try{ j=await(await fetch('/api/notify/rules')).json(); }catch(e){ return; }
   RULES = j.rules || [];
@@ -6059,7 +6161,60 @@ function waitingHostMsg(){
   return null;
 }
 function infoRow(k, v){
-  return (v==null || v==='') ? '' : `<div class="inforow"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  if(v==null || v==='') return '';
+  const t = I18N.t('copy.field','Copy value');
+  return `<div class="inforow"><span class="k">${k}</span><span class="v">${v}</span>`
+       + `<button type="button" class="copybtn" title="${t}" aria-label="${t}">${sic('copy')}</button></div>`;
+}
+// One System/Hardware card: title (+ a "copy whole card" button when it has rows)
+// and the rows. The per-row and per-card copy values are read at click time from
+// the rendered .k/.v text, so nothing sensitive is duplicated into attributes.
+function infoCard(title, rowsHtml, emptyMsg){
+  const t = I18N.t('copy.card','Copy whole card');
+  const copyAll = rowsHtml
+    ? `<button type="button" class="copybtn copyall" title="${t}" aria-label="${t}">${sic('copy')}</button>` : '';
+  return `<div class="infocard"><h3>${title}${copyAll}</h3>${rowsHtml || '<div class="muted">'+emptyMsg+'</div>'}</div>`;
+}
+// Copy text to the clipboard with a brief ✓ on the button. Falls back to a hidden
+// textarea + execCommand where the async Clipboard API isn't available (http / old).
+async function copyText(text, btn){
+  if(!text) return;
+  let ok = true;
+  try { await navigator.clipboard.writeText(text); }
+  catch(e){
+    const ta=document.createElement('textarea');
+    try {
+      ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      ok = document.execCommand('copy');
+    } catch(_){ ok=false; }
+    finally { ta.remove(); }   // always clean up, even if execCommand/select threw
+  }
+  if(btn && ok && !btn._copyTimer){   // ignore re-clicks while ✓ is showing, so a
+    const old=btn.innerHTML;          // rapid double-click can't capture ✓ as the
+    btn.classList.add('copied'); btn.innerHTML=sic('check');   // "original" icon
+    btn._copyTimer=setTimeout(()=>{ btn.classList.remove('copied'); btn.innerHTML=old; btn._copyTimer=null; }, 1100);
+  }
+}
+// Wire per-row + per-card copy buttons inside a freshly-rendered .infogrid.
+function wireCopyButtons(root){
+  root.querySelectorAll('.copybtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if(btn.classList.contains('copyall')){
+        const card = btn.closest('.infocard');
+        const title = (card.querySelector('h3')?.childNodes[0]?.textContent || '').trim();
+        const lines = [...card.querySelectorAll('.inforow')].map(r => {
+          const kk = (r.querySelector('.k')?.textContent || '').trim();
+          const vv = (r.querySelector('.v')?.textContent || '').replace(/\s+/g,' ').trim();
+          return (kk && vv) ? `${kk}: ${vv}` : '';
+        }).filter(Boolean);
+        copyText((title ? title+'\n' : '') + lines.join('\n'), btn);
+      } else {
+        const vv = (btn.previousElementSibling?.textContent || '').replace(/\s+/g,' ').trim();
+        copyText(vv, btn);
+      }
+    });
+  });
 }
 
 function renderSysInfo(){
@@ -6088,8 +6243,9 @@ function renderSysInfo(){
     infoRow(I18N.t('sys.gpu','GPU'),      gpu),
   ].join('');
   el.innerHTML = `<div class="infogrid">
-    <div class="infocard"><h3>${I18N.t('sys.card_system','System')}</h3>${sys||'<div class="muted">'+I18N.t('sys.no_system','No system info reported.')+'</div>'}</div>
-    <div class="infocard"><h3>${I18N.t('sys.card_hardware','Hardware')}</h3>${hwh||'<div class="muted">'+I18N.t('sys.no_hardware','No hardware info reported.')+'</div>'}</div></div>`;
+    ${infoCard(I18N.t('sys.card_system','System'), sys, I18N.t('sys.no_system','No system info reported.'))}
+    ${infoCard(I18N.t('sys.card_hardware','Hardware'), hwh, I18N.t('sys.no_hardware','No hardware info reported.'))}</div>`;
+  wireCopyButtons(el);
 }
 
 // Compact byte formatter for interface RX/TX counters (distinct from fmtBytes,
@@ -6302,21 +6458,61 @@ function hostCapability(hostName, capId){
   return ((h.last_check.checks||[]).find(c => c.id === capId)) || null;
 }
 
+// The GPU the probe actually captured for this host (any vendor). The Windows
+// probe reports AMD / Intel cards via WMI + GPU perf counters, so a host can have
+// a real, monitored GPU even when the nvidia-smi capability check came back
+// "missing" — that check only looks for the NVIDIA driver.
+function hostGpu(hostName){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === hostName);
+  return (h && h.host && h.host.gpu) ? h.host.gpu : null;
+}
+
 function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
   if(tabId === 'gpu' || tabId === 'models'){
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
-    if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
-      return {ic:'🚫',
-        title:`${CURRENT_HOST} has no NVIDIA GPU`,
-        detail:'During the last Test, <code>nvidia-smi</code> was not detected on this host. ' +
-               (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
-                                 : 'GPU monitoring relies on the NVIDIA driver + nvidia-smi.')};
-    }
+    // NVIDIA with a working nvidia-smi → the full per-host view is the next slice.
     if(nv && nv.status === 'ok'){
       return {ic:'🛠️',
         title:`Per-host ${tabId.toUpperCase()} view is on the way`,
         detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')}, but per-host VRAM and process attribution lands in the next slice. For now, switch to <b>Local</b> to see the hub's ${tabId.toUpperCase()} view.`};
+    }
+    // The probe may have captured a GPU even when nvidia-smi isn't available:
+    // an AMD / Intel card via the Windows probe, or an NVIDIA card whose
+    // nvidia-smi isn't reachable. Show that card + its live util / VRAM instead
+    // of a misleading "no GPU" dead-end — only the nvidia-smi-only deep metrics
+    // are missing. Don't gate on a name: a probe may send vendor+stats with none.
+    const g = hostGpu(CURRENT_HOST);
+    if(g && (g.name || g.vendor || g.util != null || g.mem_total > 0)){
+      const gname = g.name ? String(g.name) : 'GPU';
+      const gvendor = g.vendor || (/NVIDIA|GeForce|Quadro|Tesla|RTX|GTX/i.test(gname) ? 'nvidia'
+                                 : /AMD|Radeon/i.test(gname) ? 'amd'
+                                 : /Intel|Arc|Iris|UHD|HD Graphics/i.test(gname) ? 'intel' : 'unknown');
+      const vlabel = gvendor === 'amd' ? 'AMD' : gvendor === 'intel' ? 'Intel' : gvendor === 'nvidia' ? 'NVIDIA' : 'this';
+      const parts = [];
+      if(g.util != null) parts.push(`${Math.round(g.util)}% util`);
+      if(g.mem_total > 0) parts.push(`${Math.round(g.mem_used||0)} / ${Math.round(g.mem_total)} MB VRAM`);
+      const stats = parts.join(' · ');
+      const why = gvendor === 'nvidia'
+        ? `need <code>nvidia-smi</code>, which isn't reachable on this host`
+        : `need <code>nvidia-smi</code> and aren't available for ${vlabel} cards`;
+      if(tabId === 'models'){
+        const lack = gvendor === 'nvidia' ? `isn't reachable here` : `isn't exposed by ${vlabel} GPUs`;
+        return {ic:'🤖',
+          title:`No per-model VRAM for ${gname}`,
+          detail:`AI-model VRAM attribution is read from <code>nvidia-smi</code>, which ${lack} — so this tab can't break down models on ${esc(CURRENT_HOST)}. The card itself is monitored${stats?` (${esc(stats)})`:''} on the <b>GPU</b> tab.`};
+      }
+      return {ic:'🎮',
+        title:`${gname} on ${CURRENT_HOST}`,
+        detail:`${stats?`Currently <b>${esc(stats)}</b>. `:''}This ${vlabel} GPU is read from the host's built-in counters. Deep metrics (temperature, power draw and per-process VRAM) ${why}.`};
+    }
+    // No GPU of any vendor was detected.
+    if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
+      return {ic:'🚫',
+        title:`${CURRENT_HOST} has no GPU detected`,
+        detail:'During the last Test, no GPU was found on this host — <code>nvidia-smi</code> was absent and the probe reported no GPU adapter. ' +
+               (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
+                                 : 'GPU monitoring needs an NVIDIA card (via nvidia-smi) or an AMD / Intel GPU visible to the host probe.')};
     }
     return {ic:'⏳',
       title:`${tabId.toUpperCase()} info not yet probed for ${CURRENT_HOST}`,
@@ -6719,6 +6915,8 @@ async function maybeWhatsNew(curVersion){
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
+document.getElementById('al_brief_preview').onclick = briefPreview;
+document.getElementById('al_brief_test').onclick = briefTest;
 wireUptime();
 const al_save_costs = document.getElementById('al_save_costs');
 if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
