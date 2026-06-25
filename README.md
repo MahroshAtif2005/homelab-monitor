@@ -10,9 +10,7 @@
 
 **One page for your whole home lab & AI rig — GPU truth (any vendor), tokens/sec, power cost by the hour, uptime, training runs, containers, disks. No agents, no separate metrics stack, no cloud.**
 
-<a href="https://youtu.be/RGUmJlJaOVI"><img src="docs/screenshots/promo.gif" alt="HomeLab Monitor — a one-minute tour of the dashboard: Overview, GPU truth, Costs, AI Models, a priced training run, Containers, the Windows VM over SSH, and a fleet-wide Security review" width="860"></a>
-
-▶ **[Watch the 1-minute tour on YouTube](https://youtu.be/RGUmJlJaOVI)**
+<img src="docs/screenshots/tour.gif" alt="HomeLab Monitor — a tour of the dashboard: Overview, GPU truth, Costs, AI Models and Experiments" width="860">
 
 Your home lab grew into a couple of machines, a Pi, and a GPU that's mysteriously always busy — and lately it's running models too. HomeLab Monitor gives you one self-hosted page that answers the real questions: **what's that GPU actually doing, which model is holding it, what's it costing you to run, which container is eating RAM, what's filling your disks**, and **is anything down** — across every box over SSH: Linux, a Pi, even Windows. Readable from your phone over the VPN.
 
