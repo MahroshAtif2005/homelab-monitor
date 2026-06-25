@@ -6302,16 +6302,48 @@ function hostCapability(hostName, capId){
   return ((h.last_check.checks||[]).find(c => c.id === capId)) || null;
 }
 
+// The GPU the probe actually captured for this host (any vendor). The Windows
+// probe reports AMD / Intel cards via WMI + GPU perf counters, so a host can have
+// a real, monitored GPU even when the nvidia-smi capability check came back
+// "missing" — that check only looks for the NVIDIA driver.
+function hostGpu(hostName){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === hostName);
+  return (h && h.host && h.host.gpu) ? h.host.gpu : null;
+}
+
 function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
   if(tabId === 'gpu' || tabId === 'models'){
+    // The probe may have captured a non-NVIDIA GPU (AMD / Intel via the Windows
+    // probe). Show that card and its live util / VRAM instead of a misleading
+    // "no NVIDIA GPU" dead-end — only the nvidia-smi-only deep metrics are missing.
+    const g = hostGpu(CURRENT_HOST);
+    const gname = (g && g.name) ? String(g.name) : '';
+    const gvendor = g ? (g.vendor || (/NVIDIA|GeForce|Quadro|Tesla|RTX|GTX/i.test(gname) ? 'nvidia'
+                                    : /AMD|Radeon/i.test(gname) ? 'amd'
+                                    : /Intel|Arc|Iris|UHD|HD Graphics/i.test(gname) ? 'intel' : 'unknown')) : '';
+    if(g && gname && gvendor !== 'nvidia'){
+      const vlabel = gvendor === 'amd' ? 'AMD' : gvendor === 'intel' ? 'Intel' : 'non-NVIDIA';
+      const parts = [];
+      if(g.util != null) parts.push(`${Math.round(g.util)}% util`);
+      if(g.mem_total > 0) parts.push(`${Math.round(g.mem_used||0)} / ${Math.round(g.mem_total)} MB VRAM`);
+      const stats = parts.join(' · ');
+      if(tabId === 'models'){
+        return {ic:'🤖',
+          title:`No per-model VRAM for ${esc(gname)}`,
+          detail:`AI-model VRAM attribution is read from <code>nvidia-smi</code>, which ${vlabel} GPUs don't expose — so this tab can't break down models on ${esc(CURRENT_HOST)}. The card itself is monitored${stats?` (${esc(stats)})`:''} on the <b>GPU</b> tab.`};
+      }
+      return {ic:'🎮',
+        title:`${esc(gname)} on ${esc(CURRENT_HOST)}`,
+        detail:`${stats?`Currently <b>${esc(stats)}</b>. `:''}This ${vlabel} GPU is read from the host's built-in counters. NVIDIA-only metrics (temperature, power draw and per-process VRAM) need <code>nvidia-smi</code> and aren't available for ${vlabel} cards.`};
+    }
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
     if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
       return {ic:'🚫',
-        title:`${CURRENT_HOST} has no NVIDIA GPU`,
-        detail:'During the last Test, <code>nvidia-smi</code> was not detected on this host. ' +
+        title:`${esc(CURRENT_HOST)} has no GPU detected`,
+        detail:'During the last Test, no GPU was found on this host — <code>nvidia-smi</code> was absent and the probe reported no AMD / Intel adapter. ' +
                (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
-                                 : 'GPU monitoring relies on the NVIDIA driver + nvidia-smi.')};
+                                 : 'GPU monitoring needs an NVIDIA card (via nvidia-smi) or an AMD / Intel GPU visible to the host probe.')};
     }
     if(nv && nv.status === 'ok'){
       return {ic:'🛠️',
