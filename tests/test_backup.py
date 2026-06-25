@@ -1,16 +1,10 @@
 """Unit tests for database backup and restore (issue #86)."""
-from http import client
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-
-from flask.testing import FlaskClient
-
-from tests.test_public_status import client
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
 import db_backup
