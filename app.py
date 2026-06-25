@@ -3759,6 +3759,11 @@ SETTING_DEFAULTS = {
     "api_key":             "",         # Bearer/X-API-Key for run ingest; empty => not generated (ingest fail-closed)
     "mlflow_uri":          "",         # MLflow tracking server base (blank = off)
     "mlflow_token":        "",         # optional bearer for a secured MLflow
+    # ── Daily brief (#170) — opt-in once-a-day HTML health digest ──────────────
+    "brief_enabled":       "0",        # "0" / "1"
+    "brief_time":          "08:00",    # local time-of-day "HH:MM" to send
+    "brief_channel":       "",         # one of: email|discord|telegram|ntfy|slack|webhook (must be configured)
+    "brief_theme":         "dark",     # "dark" | "light" — palette for the HTML brief
 }
 SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "slack_webhook_url", "webhook_url", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
@@ -3822,6 +3827,25 @@ def _validate_email_settings(updates):
     for label, addr in (("From address", from_addr), ("To address", to_addr)):
         if "@" not in addr or addr.startswith("@") or addr.endswith("@"):
             return f"{label} must include '@'."
+    return None
+
+_BRIEF_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Channels the daily brief can target (also used by the worker/test route below).
+# Defined here, next to the validator that enum-checks it, so the dependency is local.
+_BRIEF_CHANNELS = ("email", "discord", "telegram", "ntfy", "slack", "webhook")
+
+def _validate_brief_settings(updates):
+    """Reject malformed daily-brief fields. Enum-validating brief_channel/theme here
+    means an arbitrary value can never reach the settings store (or the dashboard
+    that renders it into an <option>), closing the stored-XSS surface at the source."""
+    if "brief_channel" in updates:
+        v = (updates["brief_channel"] or "").strip()
+        if v and v not in _BRIEF_CHANNELS:
+            return "Unknown daily-brief channel."
+    if "brief_theme" in updates and (updates["brief_theme"] or "").strip() not in ("dark", "light"):
+        return "Daily-brief theme must be 'dark' or 'light'."
+    if "brief_time" in updates and not _BRIEF_TIME_RE.match((updates["brief_time"] or "").strip()):
+        return "Daily-brief time must be HH:MM (24-hour)."
     return None
 
 def save_settings(updates):
@@ -4290,6 +4314,25 @@ def _post_to_telegram(token, chat_id, level, title, body):
             f"_HomeLab Monitor · {level}_")
     return _post_json(url, {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+def _smtp_send(msg, host, port, use_tls, username, password):
+    """Connect, optionally STARTTLS + authenticate, send, and always close. Shared by
+    the alert and daily-brief email paths so any fix (timeouts, TLS, error handling)
+    lives in one place. The connection is built inside the try with a None-guarded
+    quit() so a constructor failure can never reach an unbound name."""
+    port = int(port)
+    ctx = None
+    try:
+        ctx = (smtplib.SMTP_SSL(host, port, timeout=10) if (use_tls and port == 465)
+               else smtplib.SMTP(host, port, timeout=10))
+        if use_tls and port != 465:
+            ctx.starttls()
+        if username and password:
+            ctx.login(username, password)
+        ctx.send_message(msg)
+    finally:
+        if ctx is not None:
+            ctx.quit()
+
 def _send_email(host, port, use_tls, username, password, from_addr, to_addr, level, title, detail):
     """Send alert via SMTP. Raises on error."""
     msg = email.message.EmailMessage()
@@ -4297,20 +4340,7 @@ def _send_email(host, port, use_tls, username, password, from_addr, to_addr, lev
     msg["From"] = from_addr
     msg["To"] = to_addr
     msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
-
-    port_num = int(port)
-    if use_tls and port_num == 465:
-        ctx = smtplib.SMTP_SSL(host, port_num, timeout=10)
-    else:
-        ctx = smtplib.SMTP(host, port_num, timeout=10)
-        if use_tls:
-            ctx.starttls()
-    if username and password:
-        ctx.login(username, password)
-    try:
-        ctx.send_message(msg)
-    finally:
-        ctx.quit()
+    _smtp_send(msg, host, port, use_tls, username, password)
 
 def send_slack(webhook, level, title, detail):
     payload = {"text": f"[{level}] {title}\n\n{detail}"}
@@ -6762,7 +6792,8 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
-        err = _validate_url_settings(updates) or _validate_email_settings(updates)
+        err = (_validate_url_settings(updates) or _validate_email_settings(updates)
+               or _validate_brief_settings(updates))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
@@ -6896,9 +6927,416 @@ def api_notify_rules_test():
 def index():
     return app.send_static_file("dashboard.html")
 
+# ── Daily brief (#170) ───────────────────────────────────────────────────────
+# An opt-in, once-a-day HTML health digest assembled from data we already collect
+# (overview + fleet + uptime checks + recent events + GPU/cost). Email gets the
+# full self-contained, inline-styled HTML (survives Gmail/Outlook with no external
+# assets); chat channels get a compact text summary with the things that need
+# attention. Pure stdlib. Each section degrades gracefully when its data is absent.
+# (_BRIEF_CHANNELS is defined up by the settings validators that consume it.)
+
+_BRIEF_PALETTE = {
+    "dark":  {"bg": "#0d1117", "card": "#161b22", "bd": "#30363d", "sub": "#21262d",
+              "tx": "#e6edf3", "mut": "#8b949e", "ok": "#3fb950", "warn": "#d29922",
+              "crit": "#f85149", "accent": "#d29922", "inset": "#0d1117"},
+    "light": {"bg": "#f6f8fa", "card": "#ffffff", "bd": "#d0d7de", "sub": "#eaeef2",
+              "tx": "#1f2328", "mut": "#636c76", "ok": "#1a7f37", "warn": "#9a6700",
+              "crit": "#cf222e", "accent": "#9a6700", "inset": "#f6f8fa"},
+}
+
+def _he(s):
+    """Minimal HTML escape (no new import; the brief never embeds attributes)."""
+    return str("" if s is None else s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _brief_channel_ready(s, ch):
+    """True when channel `ch` has enough config saved to actually deliver."""
+    if ch == "email":    return bool(s.get("email_host") and s.get("email_from") and s.get("email_to"))
+    if ch == "discord":  return bool(s.get("discord_webhook_url"))
+    if ch == "telegram": return bool(s.get("telegram_token") and s.get("telegram_chat_id"))
+    if ch == "ntfy":     return bool(s.get("ntfy_topic"))
+    if ch == "slack":    return bool(s.get("slack_webhook_url"))
+    if ch == "webhook":  return bool(s.get("webhook_url"))
+    return False
+
+def _brief_yesterday_cost():
+    """(cost, kwh, currency) for the previous local calendar day, tariff-aware.
+    (None, None, currency) when cost tracking is off or there were no samples."""
+    ctx = _cost_ctx()
+    cur = ctx.get("currency") or "$"
+    if not ctx.get("day"):                       # no price configured → cost card hidden
+        return None, None, cur
+    now = int(time.time())
+    lt = time.localtime(now)
+    today0 = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+    y0 = today0 - 86400
+    kwh_per = INTERVAL / 3_600_000.0
+    cost = kwh = 0.0
+    try:
+        with LOCK:
+            for ts, w in DB.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? AND ts<?", (y0, today0)):
+                cost += (w or 0) * kwh_per * _price_at(ctx, ts)
+                kwh  += (w or 0) * kwh_per
+    except Exception:
+        return None, None, cur
+    if kwh <= 0:
+        return None, None, cur
+    return round(cost, 2), round(kwh, 2), cur
+
+def _brief_fleet():
+    """Hub + registered hosts with an up/down flag. The hub is always up (we're the
+    one rendering). A registered host counts as up if its last check exists and its
+    summary didn't fail."""
+    out = []
+    host = LATEST.get("host") or {}
+    cpu = round(host.get("cpu", 0) or 0)
+    ram_pct = round(host["ram_used"] / host["ram_total"] * 100) if host.get("ram_total") else 0
+    out.append({"name": host.get("hostname") or "this host", "up": True, "hub": True,
+                "detail": f"{cpu}% CPU · {ram_pct}% RAM"})
+    for h in list_hosts():
+        chk = h.get("last_check") or {}
+        overall = ((chk.get("summary") or {}).get("overall"))
+        up = bool(chk) and overall != "fail"
+        out.append({"name": h.get("name", "?"), "up": up, "hub": False,
+                    "detail": "" if up else "not reachable at last check"})
+    return {"hosts": out, "up": sum(1 for x in out if x["up"]), "total": len(out)}
+
+def _brief_checks():
+    """Uptime rollup: counts, any down, and certs expiring within 21 days. Derived
+    from a SINGLE uptime_overview() read so the counts and the per-check lists can't
+    diverge across two snapshots. The cert list stays empty until per-check TLS
+    expiry (#163) lands — the section just hides it."""
+    checks = [c for c in uptime_overview().get("checks", []) if c.get("enabled")]
+    up = sum(1 for c in checks if c.get("state") == "up")
+    down = sum(1 for c in checks if c.get("state") == "down")
+    summ = {"total": len(checks), "up": up, "down": down,
+            "unknown": len(checks) - up - down,
+            "worst_down": next((c.get("label") for c in checks if c.get("state") == "down"), None)}
+    downs = [c.get("label", "?") for c in checks if c.get("state") == "down"]
+    certs = []
+    for c in checks:
+        cd = c.get("cert_days_remaining")
+        if isinstance(cd, (int, float)) and cd <= 21:
+            certs.append((c.get("label", "?"), int(cd)))
+    return {"summary": summ, "downs": downs, "certs": certs, "enabled": summ["total"] > 0}
+
+def _brief_events(window=86400, limit=8):
+    """Recent rows from the events log (OOM/down/recovery, etc.) over the window."""
+    now = int(time.time())
+    try:
+        with LOCK:
+            rows = DB.execute("SELECT ts, service, kind, detail FROM events "
+                              "WHERE ts>=? ORDER BY ts DESC LIMIT ?", (now - window, limit)).fetchall()
+    except Exception:
+        rows = []
+    return [{"ts": r[0], "service": r[1], "kind": r[2], "detail": r[3]} for r in rows]
+
+def _brief_ai_cost():
+    models = [{"model": m.get("model", "?"), "service": m.get("service", "?"), "vram": m.get("vram")}
+              for m in (LATEST.get("models") or [])]
+    cost, kwh, cur = _brief_yesterday_cost()
+    gpus = LATEST.get("gpus") or []
+    gpu_name = (gpus[0].get("name") if gpus else None) or ((LATEST.get("host") or {}).get("hw") or {}).get("gpu_name")
+    return {"available": bool(LATEST.get("gpu_avail")), "gpu_name": gpu_name,
+            "temp": LATEST.get("temp"), "util": LATEST.get("util"),
+            "mem_used": LATEST.get("mem_used"), "mem_total": LATEST.get("mem_total"),
+            "models": models, "cost": cost, "kwh": kwh, "currency": cur}
+
+def _brief_capacity():
+    """Disks at/above 80% (trending full) + an idle-VRAM squatter when the GPU sits idle."""
+    out = []
+    host = LATEST.get("host") or {}
+    for d in (host.get("disks") or []):
+        if (d.get("pct") or 0) >= 80:
+            out.append(("💾", f"{d.get('mount', '?')} at {round(d.get('pct', 0))}%"))
+    if (LATEST.get("util") or 0) < 5:
+        for m in (LATEST.get("models") or []):
+            if (m.get("vram") or 0) >= 256:
+                out.append(("🅿️", f"{m.get('service', '?')} holding {round(m['vram'])} MB while the GPU is idle"))
+                break
+    return out
+
+def _brief_assemble():
+    """Gather every section's data + derive the headline / action list. One dict."""
+    gpu_avail = LATEST.get("gpu_avail")
+    now = {"gpu": {"util": LATEST.get("util"), "mem_used": LATEST.get("mem_used"),
+                   "mem_total": (LATEST.get("mem_total") or 24576) if gpu_avail else 0,
+                   "power": LATEST.get("power"), "temp": LATEST.get("temp"),
+                   "available": bool(gpu_avail)},
+           "host": LATEST.get("host") or {}}
+    docker  = HEALTH.get("docker")  or {"available": False, "summary": {"total": 0, "running": 0, "problems": 0}, "containers": []}
+    systemd = HEALTH.get("systemd") or {"available": False, "summary": {}, "services": []}
+    overview = build_overview(now, docker, systemd)
+    fleet    = _brief_fleet()
+    checks   = _brief_checks()
+    events   = _brief_events()
+    ai       = _brief_ai_cost()
+    capacity = _brief_capacity()
+
+    actions = []
+    for x in fleet["hosts"]:
+        if not x["up"]:
+            actions.append((2, f"Host {x['name']} is offline"))
+    for lbl in checks["downs"]:
+        actions.append((2, f"Check “{lbl}” is down"))
+    for lbl, d in checks["certs"]:
+        actions.append((1 if d > 7 else 2, f"TLS cert {lbl} expires in {d} day{'s' if d != 1 else ''}"))
+    for c in overview:
+        if c["status"] in ("crit", "warn"):
+            actions.append((2 if c["status"] == "crit" else 1, f"{c['label']}: {c['detail']}"))
+    crit = any(p == 2 for p, _ in actions)
+    actions_text = [t for _, t in sorted(actions, key=lambda a: -a[0])]
+
+    return {"overview": overview, "fleet": fleet, "checks": checks, "events": events,
+            "ai": ai, "capacity": capacity, "actions": actions_text,
+            "issues": len(actions_text), "crit": crit, "now": int(time.time())}
+
+def render_brief(theme="dark"):
+    """Return (html, summary, subject). `html` is a self-contained inline-styled
+    email body; `summary` is the compact text for chat channels; `subject` is the
+    email/notification title."""
+    P = _BRIEF_PALETTE["light"] if theme == "light" else _BRIEF_PALETTE["dark"]
+    d = _brief_assemble()
+    hub = _alert_host_label() or "homelab"
+    when = time.strftime("%a %d %b", time.localtime(d["now"]))
+    issues, crit = d["issues"], d["crit"]
+    fleet, checks, ai = d["fleet"], d["checks"], d["ai"]
+
+    if issues == 0:
+        head_emoji, head_text, head_col = "✅", "All systems healthy", P["ok"]
+        head_sub = "nothing needs you today"
+    else:
+        head_emoji = "🔴" if crit else "🟠"
+        head_text = f"{issues} thing{'s' if issues != 1 else ''} to look at"
+        head_col = P["crit"] if crit else P["warn"]
+        head_sub = "otherwise the lab is healthy"
+
+    cost_kpi = f"{ai['cost']}" if ai["cost"] is not None else "—"
+    cur = ai["currency"]
+    kpis = [(f"{fleet['up']}/{fleet['total']}", "Hosts up", P["ok"] if fleet["up"] == fleet["total"] else P["warn"]),
+            ((f"{checks['summary']['up']}/{checks['summary']['total']}" if checks["enabled"] else "—"),
+             "Checks up", P["ok"] if checks["enabled"] and not checks["downs"] else (P["warn"] if checks["downs"] else P["mut"])),
+            (str(issues), "To look at", head_col if issues else P["ok"]),
+            (cost_kpi, f"{cur} ydy", P["tx"])]
+
+    # ── HTML assembly (table layout, inline styles only) ──────────────────────
+    def head(t):
+        return (f'<tr><td style="padding:18px 24px 6px"><div style="font-size:12px;text-transform:uppercase;'
+                f'letter-spacing:.06em;color:{P["accent"]};font-weight:600">{t}</div></td></tr>')
+    def rows_table(lines):
+        body = "".join(f'<tr><td style="padding:6px 0;border-bottom:1px solid {P["sub"]};'
+                       f'font-size:14px;color:{P["tx"]}">{ln}</td></tr>' for ln in lines)
+        return (f'<tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" '
+                f'cellpadding="0" cellspacing="0">{body}</table></td></tr>')
+
+    parts = []
+    parts.append(f'<tr><td style="padding:20px 24px;border-bottom:1px solid {P["bd"]}">'
+                 f'<table role="presentation" width="100%"><tr>'
+                 f'<td style="font-size:18px;font-weight:700;color:{P["tx"]}">📰 Daily brief</td>'
+                 f'<td align="right" style="font-size:13px;color:{P["mut"]}">{when} · {_he(hub)}</td>'
+                 f'</tr></table></td></tr>')
+    # KPI strip
+    tiles = "".join(
+        f'<td width="25%" style="padding:11px 6px;text-align:center;background:{P["inset"]};'
+        f'border:1px solid {P["sub"]};border-radius:8px">'
+        f'<div style="font-size:20px;font-weight:700;color:{col}">{_he(val)}</div>'
+        f'<div style="font-size:10px;color:{P["mut"]};text-transform:uppercase;letter-spacing:.05em">{_he(lbl)}</div></td>'
+        for val, lbl, col in kpis)
+    parts.append(f'<tr><td style="padding:16px 24px 2px"><table role="presentation" width="100%" '
+                 f'cellpadding="0" cellspacing="6"><tr>{tiles}</tr></table></td></tr>')
+    # headline
+    parts.append(f'<tr><td style="padding:18px 24px"><table role="presentation" width="100%" '
+                 f'style="background:{head_col}1a;border:1px solid {head_col};border-radius:10px">'
+                 f'<tr><td style="padding:14px 16px;font-size:16px;color:{P["tx"]}">'
+                 f'<span style="font-size:20px">{head_emoji}</span> &nbsp;<b>{_he(head_text)}</b> '
+                 f'&nbsp;<span style="color:{P["mut"]}">· {head_sub}</span></td></tr></table></td></tr>')
+    # action needed
+    if d["actions"]:
+        parts.append(head("⚡ Action needed"))
+        parts.append(rows_table([_he(a) for a in d["actions"]]))
+    # fleet
+    parts.append(head("🖥️ Fleet"))
+    fleet_lines = []
+    for x in fleet["hosts"]:
+        dot = "🟢" if x["up"] else "🔴"
+        extra = f' <span style="color:{P["mut"]}">· {_he(x["detail"])}</span>' if x["detail"] else ""
+        tag = " (hub)" if x["hub"] else ""
+        fleet_lines.append(f'{dot} {_he(x["name"])}{tag}{extra}')
+    parts.append(rows_table(fleet_lines))
+    # checks
+    if checks["enabled"]:
+        parts.append(head("📡 Checks"))
+        sm = checks["summary"]
+        clines = [f'{"🟢" if not checks["downs"] else "🔴"} {sm["up"]}/{sm["total"]} checks responding']
+        for lbl in checks["downs"]:
+            clines.append(f'🔴 {_he(lbl)} is down')
+        for lbl, dd in checks["certs"]:
+            clines.append(f'🟠 cert {_he(lbl)} expires in {dd} day{"s" if dd != 1 else ""}')
+        parts.append(rows_table(clines))
+    # alerts (events) last 24h
+    if d["events"]:
+        parts.append(head("🔔 Alerts · last 24h"))
+        elines = []
+        for e in d["events"]:
+            t = time.strftime("%H:%M", time.localtime(e["ts"]))
+            who = e.get("service") or e.get("kind") or "event"
+            elines.append(f'{_he(t)} — {_he(who)}: {_he(e.get("detail") or e.get("kind") or "")}')
+        parts.append(rows_table(elines))
+    # ai & cost
+    parts.append(head("🤖 AI &amp; cost"))
+    ailines = []
+    if ai["available"]:
+        gname = ai["gpu_name"] or "GPU"
+        t = f' · {round(ai["temp"])}°C' if ai.get("temp") is not None else ""
+        ailines.append(f'{_he(gname)}{t} · {len(ai["models"])} model{"s" if len(ai["models"]) != 1 else ""} loaded')
+    else:
+        ailines.append("No GPU detected on the hub")
+    if ai["cost"] is not None:
+        ailines.append(f'Yesterday\'s energy: <b>{ai["cost"]} {_he(cur)}</b> · {ai["kwh"]} kWh')
+    if ai["models"]:
+        names = ", ".join(_he(m["model"]) for m in ai["models"][:4])
+        ailines.append(f'<span style="color:{P["mut"]}">models: {names}</span>')
+    parts.append(rows_table(ailines))
+    # capacity nudges
+    if d["capacity"]:
+        parts.append(head("📈 Capacity nudges"))
+        parts.append(rows_table([f'{ic} {_he(txt)}' for ic, txt in d["capacity"]]))
+    # footer — no CTA link: a brief has no absolute dashboard URL to point at, and
+    # a fragment-only href="#" is stripped/dead in Gmail/Outlook/Apple Mail. The
+    # footer line tells the reader where the brief is configured instead.
+    parts.append(f'<tr><td style="padding:14px 24px;border-top:1px solid {P["bd"]};font-size:12px;color:{P["mut"]}">'
+                 f'HomeLab Monitor v{VERSION} · daily brief from {_he(hub)} · configure in Settings → Alerts</td></tr>')
+
+    html = (f'<!DOCTYPE html><html><body style="margin:0;background:{P["bg"]};padding:24px 0;'
+            f'font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
+            f'<table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" '
+            f'style="width:600px;max-width:92%;margin:0 auto;background:{P["card"]};'
+            f'border:1px solid {P["bd"]};border-radius:12px;overflow:hidden">'
+            f'{"".join(parts)}</table></body></html>')
+
+    # ── compact text summary for chat channels ────────────────────────────────
+    slines = [f'{head_emoji} {head_text}']
+    if d["actions"]:
+        slines.append("")
+        slines.append("⚡ Action needed:")
+        slines += [f'• {a}' for a in d["actions"][:5]]
+    slines.append("")
+    stat = f'🖥️ {fleet["up"]}/{fleet["total"]} up'
+    if checks["enabled"]:
+        stat += f' · 📡 {checks["summary"]["up"]}/{checks["summary"]["total"]} checks'
+    if d["events"]:
+        stat += f' · 🔔 {len(d["events"])} in 24h'
+    if ai["cost"] is not None:
+        stat += f' · 🤖 {ai["cost"]} {cur}'
+    slines.append(stat)
+    summary = "\n".join(slines)
+
+    subject = f"[{hub}] Daily brief — {head_text}"
+    return html, summary, subject
+
+def _send_brief_email(s, subject, html, text):
+    """Send the brief as a multipart email: plain-text fallback + HTML body."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = s["email_from"]
+    msg["To"] = s["email_to"]
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
+    _smtp_send(msg, s["email_host"], s.get("email_port", "587") or 587,
+               s.get("email_use_tls", "1") == "1",
+               s.get("email_username"), s.get("email_password"))
+
+def send_brief(s, channel):
+    """Render and deliver the brief to one channel. Raises on delivery failure."""
+    html, summary, subject = render_brief(s.get("brief_theme", "dark"))
+    if channel == "email":
+        _send_brief_email(s, subject, html, summary)
+    elif channel == "discord":
+        send_discord(s.get("discord_webhook_url"), "info", subject, summary)
+    elif channel == "telegram":
+        _post_to_telegram(s.get("telegram_token"), s.get("telegram_chat_id"), "info", subject, summary)
+    elif channel == "ntfy":
+        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s.get("ntfy_topic"), "info", subject, summary)
+    elif channel == "slack":
+        send_slack(s.get("slack_webhook_url"), "info", subject, summary)
+    elif channel == "webhook":
+        send_webhook(s.get("webhook_url"), "info", subject, summary, _alert_host_label() or "")
+    else:
+        raise ValueError(f"unknown brief channel: {channel}")
+
+_BRIEF_LAST_SENT = {"date": None}
+
+def _brief_due(now=None):
+    """Return (settings, channel, date_str) when a brief should fire right now, else None.
+    Fires once per local day at the configured HH:MM, only if enabled and the chosen
+    channel is configured."""
+    s = get_settings()
+    if s.get("brief_enabled") != "1":
+        return None
+    ch = s.get("brief_channel") or ""
+    if not ch or not _brief_channel_ready(s, ch):
+        return None
+    lt = time.localtime(now or time.time())
+    if time.strftime("%H:%M", lt) != (s.get("brief_time") or "08:00"):
+        return None
+    today = time.strftime("%Y-%m-%d", lt)
+    if _BRIEF_LAST_SENT["date"] == today:
+        return None
+    return s, ch, today
+
+def _brief_run_once(now=None):
+    """One scheduler pass. Returns True if a brief was due (and attempted). The day
+    is claimed *before* the send so a transient failure can't trigger a same-minute
+    retry / duplicate delivery — a daily digest prefers a single best-effort send
+    over risking two."""
+    due = _brief_due(now)
+    if not due:
+        return False
+    s, ch, today = due
+    _BRIEF_LAST_SENT["date"] = today
+    try:
+        send_brief(s, ch)
+        print(f"daily brief sent to {ch}", flush=True)
+    except Exception as e:
+        print("brief send error:", e, flush=True)
+    return True
+
+def brief_worker():
+    """Dedicated daemon: every 30s, send the daily brief if it's due. Inert unless
+    the brief is enabled with a configured channel."""
+    while True:
+        try:
+            _brief_run_once()
+        except Exception as e:
+            print("brief_worker error:", e, flush=True)
+        time.sleep(30)
+
+@app.route("/api/brief/preview")
+def api_brief_preview():
+    """Render the current brief as HTML (the Preview button opens this in a tab)."""
+    theme = request.args.get("theme") or get_settings().get("brief_theme", "dark")
+    html, _, _ = render_brief("light" if theme == "light" else "dark")
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+@app.route("/api/brief/test", methods=["POST"])
+def api_brief_test():
+    """Render + deliver a brief now to the chosen channel (Send-test button)."""
+    s = get_settings()
+    body = request.get_json(silent=True) or {}
+    ch = (body.get("channel") or s.get("brief_channel") or "").strip()
+    if ch not in _BRIEF_CHANNELS:
+        return jsonify({"ok": False, "error": "Pick a channel for the daily brief first."}), 400
+    if not _brief_channel_ready(s, ch):
+        return jsonify({"ok": False, "error": f"The {ch} channel isn't configured yet — fill it in above under Alerts."}), 400
+    try:
+        send_brief(s, ch)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "channel": ch})
+
 threading.Thread(target=collector, daemon=True).start()
 threading.Thread(target=host_poller, daemon=True).start()
 threading.Thread(target=uptime_worker, daemon=True).start()
+threading.Thread(target=brief_worker, daemon=True).start()
 
 if __name__ == "__main__":
     print(

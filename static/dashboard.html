@@ -1938,6 +1938,44 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
           <button class="rb" id="rules-add-btn" data-i18n="rules.add" data-i18n-def="+ Add rule">+ Add rule</button>
         </div>
       </div>
+
+      <!-- ── Daily brief (#170) ── -->
+      <div style="margin-top:24px;border-top:1px solid var(--bd);padding-top:16px;max-width:800px">
+        <h2 class="card-sub" data-i18n="brief.title" data-i18n-def="📰 Daily brief">📰 Daily brief</h2>
+        <p class="cap" data-i18n="brief.intro" data-i18n-def="A scheduled “is the lab OK?” digest — the calm counterpart to alerts. Sent once a day to one channel: email gets the full HTML report, chat channels get a compact summary with the things that need attention.">A scheduled “is the lab OK?” digest — the calm counterpart to alerts. Sent once a day to one channel: email gets the full HTML report, chat channels get a compact summary with the things that need attention.</p>
+
+        <div id="brief-status" class="ins info" style="display:none;margin:8px 0"></div>
+
+        <label style="display:flex;align-items:center;gap:9px;margin:10px 0">
+          <input type="checkbox" id="al_brief_enabled">
+          <span data-i18n-html="brief.enabled_label"><b>Daily brief enabled</b> — send once a day at the time below.</span>
+        </label>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:560px">
+          <div>
+            <div class="flabel" data-i18n="brief.time" data-i18n-def="Send at (local time)">Send at (local time)</div>
+            <input type="time" id="al_brief_time" class="field" value="08:00">
+          </div>
+          <div>
+            <div class="flabel" data-i18n="brief.channel" data-i18n-def="Send to channel">Send to channel</div>
+            <select id="al_brief_channel" class="field"></select>
+          </div>
+          <div>
+            <div class="flabel" data-i18n="brief.theme" data-i18n-def="Theme">Theme</div>
+            <select id="al_brief_theme" class="field">
+              <option value="dark" data-i18n="opt.theme_dark" data-i18n-def="Dark">Dark</option>
+              <option value="light" data-i18n="opt.theme_light" data-i18n-def="Light">Light</option>
+            </select>
+          </div>
+        </div>
+        <p class="cap" id="al_brief_chan_cap" style="margin-top:6px" data-i18n="brief.chan_cap" data-i18n-def="Only channels you've configured above appear here. Save the channel first if it isn't listed.">Only channels you've configured above appear here. Save the channel first if it isn't listed.</p>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button class="rb" id="al_brief_preview" data-i18n="brief.preview" data-i18n-def="Preview">Preview</button>
+          <button class="rb" id="al_brief_test" data-i18n="brief.test" data-i18n-def="Send test brief">Send test brief</button>
+        </div>
+        <p class="cap" style="margin-top:6px" data-i18n="brief.note" data-i18n-def="Preview and Send test use your last saved settings — click Save above first if you just changed the channel.">Preview and Send test use your last saved settings — click Save above first if you just changed the channel.</p>
+      </div>
     </div>
     </div><!-- /set-pane-alerts -->
     <div id="set-pane-costs" hidden>
@@ -2600,6 +2638,7 @@ const ICONS={
   '📊':'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/>',
   '📋':'<rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01"/>',
   '📦':'<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" x2="12" y1="22" y2="12"/>',
+  '📰':'<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8z"/>',
   '📶':'<path d="M2 20h.01M7 20v-4M12 20v-8M17 20V8M22 4v16"/>',
   '🔬':'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
   '🖥':'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
@@ -3986,7 +4025,59 @@ async function loadAlerts(){
   document.getElementById('al_webhook_state').textContent = s.webhook_url_set
     ? 'A webhook is saved. Leave blank to keep it; type a new one to replace; type CLEAR and save to remove.'
     : 'No webhook saved yet.';
+  fillBrief(s);
   ALERTS_LOADED=true;
+}
+
+// ── Daily brief (#170) ────────────────────────────────────────────────────────
+// Which channels are configured (so the brief dropdown only offers usable ones).
+function configuredChannels(s){
+  const out=[];
+  if(s.email_host && s.email_from && s.email_to) out.push(['email', 'Email ('+s.email_to+')']);
+  if(s.discord_webhook_url_set) out.push(['discord','Discord']);
+  if(s.telegram_token_set && s.telegram_chat_id) out.push(['telegram','Telegram']);
+  if(s.ntfy_topic) out.push(['ntfy','ntfy ('+s.ntfy_topic+')']);
+  if(s.slack_webhook_url_set) out.push(['slack','Slack']);
+  if(s.webhook_url_set) out.push(['webhook','Webhook']);
+  return out;
+}
+function fillBrief(s){
+  document.getElementById('al_brief_enabled').checked = s.brief_enabled==='1';
+  document.getElementById('al_brief_time').value = s.brief_time || '08:00';
+  document.getElementById('al_brief_theme').value = (s.brief_theme==='light') ? 'light' : 'dark';
+  const sel=document.getElementById('al_brief_channel');
+  const chans=configuredChannels(s);
+  const saved=s.brief_channel || '';
+  const labels={email:'Email',discord:'Discord',telegram:'Telegram',ntfy:'ntfy',slack:'Slack',webhook:'Webhook'};
+  // Keep the saved channel visible even if it's no longer configured (flag it).
+  if(saved && !chans.some(c=>c[0]===saved)) chans.push([saved, (labels[saved]||saved)+' (not configured)']);
+  sel.innerHTML = chans.length
+    ? chans.map(c=>`<option value="${esc(c[0]).replace(/"/g,'&quot;')}"${c[0]===saved?' selected':''}>${esc(c[1])}</option>`).join('')
+    : '<option value="">— configure a channel above first —</option>';
+  document.getElementById('al_brief_chan_cap').style.display = chans.length ? 'none' : '';
+}
+// Shared renderer for the dismissing .ins status banners (brief, rules, …).
+function showInlineStatus(id,level,text){
+  const el=document.getElementById(id);
+  if(!el) return;
+  el.className='ins '+level; el.style.display='flex';
+  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
+  setTimeout(()=>{el.style.display='none';}, 6000);
+}
+function showBriefStatus(level,text){ showInlineStatus('brief-status',level,text); }
+function briefPreview(){
+  const theme=document.getElementById('al_brief_theme').value || 'dark';
+  window.open('/api/brief/preview?theme='+encodeURIComponent(theme), '_blank');
+}
+async function briefTest(){
+  const ch=document.getElementById('al_brief_channel').value;
+  if(!ch){ showBriefStatus('warning','Configure and save a channel first.'); return; }
+  showBriefStatus('info','Sending test brief to '+ch+'…');
+  let j; try{ j=await(await fetch('/api/brief/test',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({channel:ch})})).json(); }
+  catch(e){ showBriefStatus('critical','Test failed: '+e); return; }
+  if(j.ok) showBriefStatus('ok','Test brief sent to '+j.channel+'.');
+  else showBriefStatus('critical', j.error || 'Test failed — check the channel settings above.');
 }
 
 function toast(level,text){
@@ -4042,6 +4133,10 @@ async function saveAlerts(){
     system_idle_watts: (document.getElementById('al_idle_w')||{}).value || '',
     mlflow_uri:        (document.getElementById('al_mlflow_uri')||{}).value || '',
     country:          document.getElementById('al_country').value,
+    brief_enabled:    document.getElementById('al_brief_enabled').checked ? '1' : '0',
+    brief_time:       document.getElementById('al_brief_time').value || '08:00',
+    brief_channel:    document.getElementById('al_brief_channel').value || '',
+    brief_theme:      document.getElementById('al_brief_theme').value || 'dark',
   };
   // Only send the webhook field if the user actually typed in it — empty means
   // "no change" when one is already saved (matching the placeholder hint),
@@ -4095,12 +4190,7 @@ let RULES = [];
 const RULE_KINDS = ['container','systemd','gpu','host','uptime'];
 const RULE_CHANNELS = ['all','discord','ntfy','telegram','email','slack','webhook'];
 const RULE_LEVELS = ['info','warning','critical'];
-function showRulesStatus(level, text){
-  const el=document.getElementById('rules-status');
-  el.className='ins '+level; el.style.display='flex';
-  el.innerHTML=`<div class="ic">${ICON[level]||'•'}</div><div><div class="t">${esc(text)}</div></div>`;
-  setTimeout(()=>{el.style.display='none';}, 6000);
-}
+function showRulesStatus(level, text){ showInlineStatus('rules-status',level,text); }
 async function loadRules(){
   let j; try{ j=await(await fetch('/api/notify/rules')).json(); }catch(e){ return; }
   RULES = j.rules || [];
@@ -6759,6 +6849,8 @@ async function maybeWhatsNew(curVersion){
 window.addEventListener('hashchange',()=>{const h=location.hash.slice(1); if(h && TABS.some(t=>t.id===h) && h!==TAB) showTab(h);});
 document.getElementById('al_save').onclick = saveAlerts;
 document.getElementById('al_test').onclick = testAlerts;
+document.getElementById('al_brief_preview').onclick = briefPreview;
+document.getElementById('al_brief_test').onclick = briefTest;
 wireUptime();
 const al_save_costs = document.getElementById('al_save_costs');
 if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
