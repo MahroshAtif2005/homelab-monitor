@@ -6314,41 +6314,49 @@ function hostGpu(hostName){
 function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
   if(tabId === 'gpu' || tabId === 'models'){
-    // The probe may have captured a non-NVIDIA GPU (AMD / Intel via the Windows
-    // probe). Show that card and its live util / VRAM instead of a misleading
-    // "no NVIDIA GPU" dead-end — only the nvidia-smi-only deep metrics are missing.
-    const g = hostGpu(CURRENT_HOST);
-    const gname = (g && g.name) ? String(g.name) : '';
-    const gvendor = g ? (g.vendor || (/NVIDIA|GeForce|Quadro|Tesla|RTX|GTX/i.test(gname) ? 'nvidia'
-                                    : /AMD|Radeon/i.test(gname) ? 'amd'
-                                    : /Intel|Arc|Iris|UHD|HD Graphics/i.test(gname) ? 'intel' : 'unknown')) : '';
-    if(g && gname && gvendor !== 'nvidia'){
-      const vlabel = gvendor === 'amd' ? 'AMD' : gvendor === 'intel' ? 'Intel' : 'non-NVIDIA';
-      const parts = [];
-      if(g.util != null) parts.push(`${Math.round(g.util)}% util`);
-      if(g.mem_total > 0) parts.push(`${Math.round(g.mem_used||0)} / ${Math.round(g.mem_total)} MB VRAM`);
-      const stats = parts.join(' · ');
-      if(tabId === 'models'){
-        return {ic:'🤖',
-          title:`No per-model VRAM for ${gname}`,
-          detail:`AI-model VRAM attribution is read from <code>nvidia-smi</code>, which ${vlabel} GPUs don't expose — so this tab can't break down models on ${esc(CURRENT_HOST)}. The card itself is monitored${stats?` (${esc(stats)})`:''} on the <b>GPU</b> tab.`};
-      }
-      return {ic:'🎮',
-        title:`${gname} on ${CURRENT_HOST}`,
-        detail:`${stats?`Currently <b>${esc(stats)}</b>. `:''}This ${vlabel} GPU is read from the host's built-in counters. NVIDIA-only metrics (temperature, power draw and per-process VRAM) need <code>nvidia-smi</code> and aren't available for ${vlabel} cards.`};
-    }
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
-    if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
-      return {ic:'🚫',
-        title:`${CURRENT_HOST} has no GPU detected`,
-        detail:'During the last Test, no GPU was found on this host — <code>nvidia-smi</code> was absent and the probe reported no AMD / Intel adapter. ' +
-               (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
-                                 : 'GPU monitoring needs an NVIDIA card (via nvidia-smi) or an AMD / Intel GPU visible to the host probe.')};
-    }
+    // NVIDIA with a working nvidia-smi → the full per-host view is the next slice.
     if(nv && nv.status === 'ok'){
       return {ic:'🛠️',
         title:`Per-host ${tabId.toUpperCase()} view is on the way`,
         detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')}, but per-host VRAM and process attribution lands in the next slice. For now, switch to <b>Local</b> to see the hub's ${tabId.toUpperCase()} view.`};
+    }
+    // The probe may have captured a GPU even when nvidia-smi isn't available:
+    // an AMD / Intel card via the Windows probe, or an NVIDIA card whose
+    // nvidia-smi isn't reachable. Show that card + its live util / VRAM instead
+    // of a misleading "no GPU" dead-end — only the nvidia-smi-only deep metrics
+    // are missing. Don't gate on a name: a probe may send vendor+stats with none.
+    const g = hostGpu(CURRENT_HOST);
+    if(g && (g.name || g.vendor || g.util != null || g.mem_total > 0)){
+      const gname = g.name ? String(g.name) : 'GPU';
+      const gvendor = g.vendor || (/NVIDIA|GeForce|Quadro|Tesla|RTX|GTX/i.test(gname) ? 'nvidia'
+                                 : /AMD|Radeon/i.test(gname) ? 'amd'
+                                 : /Intel|Arc|Iris|UHD|HD Graphics/i.test(gname) ? 'intel' : 'unknown');
+      const vlabel = gvendor === 'amd' ? 'AMD' : gvendor === 'intel' ? 'Intel' : gvendor === 'nvidia' ? 'NVIDIA' : 'this';
+      const parts = [];
+      if(g.util != null) parts.push(`${Math.round(g.util)}% util`);
+      if(g.mem_total > 0) parts.push(`${Math.round(g.mem_used||0)} / ${Math.round(g.mem_total)} MB VRAM`);
+      const stats = parts.join(' · ');
+      const why = gvendor === 'nvidia'
+        ? `need <code>nvidia-smi</code>, which isn't reachable on this host`
+        : `need <code>nvidia-smi</code> and aren't available for ${vlabel} cards`;
+      if(tabId === 'models'){
+        const lack = gvendor === 'nvidia' ? `isn't reachable here` : `isn't exposed by ${vlabel} GPUs`;
+        return {ic:'🤖',
+          title:`No per-model VRAM for ${gname}`,
+          detail:`AI-model VRAM attribution is read from <code>nvidia-smi</code>, which ${lack} — so this tab can't break down models on ${esc(CURRENT_HOST)}. The card itself is monitored${stats?` (${esc(stats)})`:''} on the <b>GPU</b> tab.`};
+      }
+      return {ic:'🎮',
+        title:`${gname} on ${CURRENT_HOST}`,
+        detail:`${stats?`Currently <b>${esc(stats)}</b>. `:''}This ${vlabel} GPU is read from the host's built-in counters. Deep metrics (temperature, power draw and per-process VRAM) ${why}.`};
+    }
+    // No GPU of any vendor was detected.
+    if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
+      return {ic:'🚫',
+        title:`${CURRENT_HOST} has no GPU detected`,
+        detail:'During the last Test, no GPU was found on this host — <code>nvidia-smi</code> was absent and the probe reported no GPU adapter. ' +
+               (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
+                                 : 'GPU monitoring needs an NVIDIA card (via nvidia-smi) or an AMD / Intel GPU visible to the host probe.')};
     }
     return {ic:'⏳',
       title:`${tabId.toUpperCase()} info not yet probed for ${CURRENT_HOST}`,
