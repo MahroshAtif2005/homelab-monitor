@@ -6182,12 +6182,13 @@ async function copyText(text, btn){
   let ok = true;
   try { await navigator.clipboard.writeText(text); }
   catch(e){
+    const ta=document.createElement('textarea');
     try {
-      const ta=document.createElement('textarea');
       ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
       document.body.appendChild(ta); ta.focus(); ta.select();
-      ok = document.execCommand('copy'); ta.remove();
+      ok = document.execCommand('copy');
     } catch(_){ ok=false; }
+    finally { ta.remove(); }   // always clean up, even if execCommand/select threw
   }
   if(btn && ok && !btn._copyTimer){   // ignore re-clicks while ✓ is showing, so a
     const old=btn.innerHTML;          // rapid double-click can't capture ✓ as the
