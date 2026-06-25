@@ -6330,17 +6330,17 @@ function describeMissingCapability(tabId){
       const stats = parts.join(' · ');
       if(tabId === 'models'){
         return {ic:'🤖',
-          title:`No per-model VRAM for ${esc(gname)}`,
+          title:`No per-model VRAM for ${gname}`,
           detail:`AI-model VRAM attribution is read from <code>nvidia-smi</code>, which ${vlabel} GPUs don't expose — so this tab can't break down models on ${esc(CURRENT_HOST)}. The card itself is monitored${stats?` (${esc(stats)})`:''} on the <b>GPU</b> tab.`};
       }
       return {ic:'🎮',
-        title:`${esc(gname)} on ${esc(CURRENT_HOST)}`,
+        title:`${gname} on ${CURRENT_HOST}`,
         detail:`${stats?`Currently <b>${esc(stats)}</b>. `:''}This ${vlabel} GPU is read from the host's built-in counters. NVIDIA-only metrics (temperature, power draw and per-process VRAM) need <code>nvidia-smi</code> and aren't available for ${vlabel} cards.`};
     }
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
     if(nv && (nv.status === 'info' || (nv.detail||'').toLowerCase().includes('not found'))){
       return {ic:'🚫',
-        title:`${esc(CURRENT_HOST)} has no GPU detected`,
+        title:`${CURRENT_HOST} has no GPU detected`,
         detail:'During the last Test, no GPU was found on this host — <code>nvidia-smi</code> was absent and the probe reported no AMD / Intel adapter. ' +
                (tabId==='models' ? 'AI model VRAM monitoring relies on a GPU, so this tab has nothing to show here.'
                                  : 'GPU monitoring needs an NVIDIA card (via nvidia-smi) or an AMD / Intel GPU visible to the host probe.')};
