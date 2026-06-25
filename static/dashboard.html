@@ -743,7 +743,7 @@ a{color:var(--info)}
 /* System / Network / Security detail */
 .infogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px}
 .infocard{background:var(--inset);border:1px solid var(--bd);border-radius:9px;padding:12px 14px}
-.infocard h3{margin:0 0 8px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.infocard h3{margin:0 0 8px;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600;display:flex;align-items:center;gap:7px}
 .inforow{display:flex;gap:10px;padding:4px 0;font-size:13px;align-items:baseline}
 .inforow .k{color:var(--mut);flex:0 0 104px}
 .inforow .v{color:var(--tx);font-family:var(--mono);word-break:break-word;min-width:0}
@@ -756,7 +756,6 @@ a{color:var(--info)}
 .copybtn:focus-visible{opacity:1;outline:1px solid var(--accent);outline-offset:1px}
 .copybtn.copied{color:var(--ok);opacity:1}
 .copybtn .sic{width:13px;height:13px}
-.infocard h3{display:flex;align-items:center;gap:7px}
 .infocard h3 .copybtn{opacity:.5;padding:1px}
 .infocard h3 .copybtn:hover{opacity:1}
 .kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
@@ -6190,10 +6189,10 @@ async function copyText(text, btn){
       ok = document.execCommand('copy'); ta.remove();
     } catch(_){ ok=false; }
   }
-  if(btn && ok){
-    const old=btn.innerHTML;
-    btn.classList.add('copied'); btn.innerHTML=sic('check');
-    setTimeout(()=>{ btn.classList.remove('copied'); btn.innerHTML=old; }, 1100);
+  if(btn && ok && !btn._copyTimer){   // ignore re-clicks while ✓ is showing, so a
+    const old=btn.innerHTML;          // rapid double-click can't capture ✓ as the
+    btn.classList.add('copied'); btn.innerHTML=sic('check');   // "original" icon
+    btn._copyTimer=setTimeout(()=>{ btn.classList.remove('copied'); btn.innerHTML=old; btn._copyTimer=null; }, 1100);
   }
 }
 // Wire per-row + per-card copy buttons inside a freshly-rendered .infogrid.
