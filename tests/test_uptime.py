@@ -519,6 +519,33 @@ class TestTlsCertExpiry(unittest.TestCase):
         self.assertIsNone(days)
         self.assertIsNone(expires_at)
 
+    def test_cert_days_reads_expired_cert_unverified(self):
+        """_tls_cert_days must still return a date for an expired/self-signed cert.
+
+        A verifying SSLContext raises during the handshake on these certs,
+        before getpeercert() ever runs, which silently breaks the expiry
+        monitor at the exact moment it matters. This confirms the context
+        is built with check_hostname=False / verify_mode=CERT_NONE so the
+        unverified read succeeds and yields a negative days_remaining."""
+        import ssl
+        mock_cert = {"notAfter": "Jan 01 00:00:00 2000 GMT"}  # long-expired
+        mock_ssock = MagicMock()
+        mock_ssock.__enter__ = MagicMock(return_value=mock_ssock)
+        mock_ssock.__exit__ = MagicMock(return_value=False)
+        mock_ssock.getpeercert.return_value = mock_cert
+        mock_ctx_instance = MagicMock()
+        mock_ctx_instance.wrap_socket.return_value = mock_ssock
+        with patch("ssl.SSLContext", return_value=mock_ctx_instance) as mock_ctx_cls,              patch("socket.create_connection", return_value=MagicMock()):
+            days, expires_at = app._tls_cert_days("expired.example.com", 443, 5)
+        # The expiry read must succeed unconditionally — this is the exact
+        # case (expired cert) that a verifying context would have raised on.
+        self.assertIsNotNone(days)
+        self.assertIsNotNone(expires_at)
+        self.assertEqual(days, 0)  # max(0, negative_delta) per the function's floor
+        # Confirm the context is unverified, not the verifying default.
+        self.assertEqual(mock_ctx_instance.check_hostname, False)
+        self.assertEqual(mock_ctx_instance.verify_mode, ssl.CERT_NONE)
+
     def test_cert_status_red_when_le_7_days(self):
         """cert_status is 'red' when cert_days_remaining <= 7."""
         _clean_db()
