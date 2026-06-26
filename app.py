@@ -4099,16 +4099,18 @@ def _http_probe_once(target, timeout, method):
 
 def _tls_cert_days(host, port, timeout):
     """Return (days_remaining, expires_at_ts) or (None, None)."""
-    import ssl, datetime
+    import ssl, datetime, socket
 
     try:
-        ctx = ssl.create_default_context()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
         with ctx.wrap_socket(
-            __import__("socket").create_connection((host, port), timeout=timeout),
+            socket.create_connection((host, port), timeout=timeout),
             server_hostname=host,
         ) as ssock:
             cert = ssock.getpeercert()
-            not_after = cert.get("notAfter", "")
+            not_after = cert.get("notAfter", "") if cert else ""
             if not not_after:
                 return None, None
 
@@ -4183,19 +4185,26 @@ def run_uptime_check(check):
 
         cert_days, cert_expires_at = _tls_cert_days(host, port, min(timeout, 10))
 
-    DB.execute(
-        "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
-    )
+    if _DB_MAINTENANCE:
+        return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 
-    DB.execute(
-        "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
-        "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
-        (check["id"], check["id"], _UPTIME_RESULT_CAP)
-    )
+    try:
+        with LOCK:
+            DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
+            )
 
-    DB.commit()
+            DB.execute(
+                "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
+                "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
+                (check["id"], check["id"], _UPTIME_RESULT_CAP)
+            )
+
+            DB.commit()
+    except Exception as e:
+        print("run_uptime_check DB error:", e, flush=True)
 
     return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 def _uptime_state(check_id, now, window=86400, window2=604800):
@@ -4749,6 +4758,19 @@ def notify_uptime(s):
                       f"{tgt} — {round(lat)} ms (warns above {lw} ms).", rules=rules)
             else:
                 _clear(slow_key)
+            cert_key = f"uptime:cert:{cid}"
+            cert_days = st.get("cert_days_remaining")
+            if cert_days is not None:
+                if cert_days <= 7:
+                    _emit(s, cert_key, "critical", f"🔒 {c['label']} TLS cert expiring",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                elif cert_days <= 21:
+                    _emit(s, cert_key, "warning", f"🔒 {c['label']} TLS cert expiring soon",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                else:
+                    _clear(cert_key)
+            else:
+                _clear(cert_key)
 
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):

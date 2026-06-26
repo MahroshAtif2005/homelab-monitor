@@ -504,8 +504,9 @@ class TestTlsCertExpiry(unittest.TestCase):
         mock_ssock.__enter__ = MagicMock(return_value=mock_ssock)
         mock_ssock.__exit__ = MagicMock(return_value=False)
         mock_ssock.getpeercert.return_value = mock_cert
-        with patch("ssl.create_default_context") as mock_ctx,              patch("socket.create_connection", return_value=MagicMock()):
-            mock_ctx.return_value.wrap_socket.return_value = mock_ssock
+        mock_ctx_instance = MagicMock()
+        mock_ctx_instance.wrap_socket.return_value = mock_ssock
+        with patch("ssl.SSLContext", return_value=mock_ctx_instance),              patch("socket.create_connection", return_value=MagicMock()):
             days, expires_at = app._tls_cert_days("example.com", 443, 5)
         self.assertIsNotNone(days)
         self.assertGreater(days, 365 * 70)  # far future cert
