@@ -1069,6 +1069,7 @@ body.mc-customizing .mc-whide:hover{ color:var(--crit); border-color:var(--crit)
 .mc-pill-ok{ background:var(--okbg); color:var(--ok); border-color:var(--ok) }
 .mc-pill-warn{ background:var(--warnbg); color:var(--warn); border-color:var(--warn); cursor:help }
 .mc-pill-crit{ background:var(--critbg); color:var(--crit); border-color:var(--crit) }
+.cert-ok{ color:var(--ok) } .cert-amber{ color:var(--warn) } .cert-red{ color:var(--crit) }
 .mc-svc-line{ display:flex; align-items:baseline; gap:8px; margin-bottom:7px }
 .mc-failed-note{ font-size:10px; color:var(--mut); position:relative; cursor:help; display:inline-flex; align-items:center; gap:5px }
 .mc-tip{ position:absolute; bottom:130%; left:0; width:255px; background:var(--card); border:1px solid var(--bd); border-radius:9px;
@@ -3829,6 +3830,9 @@ function upCard(c){
   const up=c.uptime!=null?c.uptime+'%':'—';
   const up7=c.uptime7!=null?c.uptime7+'%':'—';
   const lat=c.last_latency_ms!=null?Math.round(c.last_latency_ms)+' ms':'—';
+  const certPill=(c.cert_days_remaining!=null)
+    ? `<span>${esc(I18N.t('uptime.cert','Cert'))} <b class="cert-${esc(c.cert_status||'ok')}">${esc(I18N.tf('uptime.cert_days','{d}d',{d:c.cert_days_remaining}))}</b></span>`
+    : '';
   const tgt=c.type==='http'?c.target:(I18N.t('uptime.tcp_prefix','TCP')+' '+c.target);
   const dotcls=st==='up'?'mc-on':st==='down'?'mc-offdot':'';
   const pill=st==='up'?`<span class="mc-pill mc-pill-ok">${esc(upStateLabel(st))}</span>`
@@ -3858,6 +3862,7 @@ function upCard(c){
       <span>${esc(I18N.t('uptime.uptime7','7d'))} <b>${up7}</b></span>
       <span>${esc(I18N.t('uptime.latency','Latency'))} <b>${lat}</b></span>
       <span>${esc(I18N.t('uptime.checked','Checked'))} <b>${esc(c.last_checked?relTime(c.last_checked):'—')}</b></span>
+      ${certPill}
     </div>
     ${err}
     ${bell}

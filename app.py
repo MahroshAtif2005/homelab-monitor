@@ -165,6 +165,7 @@ _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL
 _HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
 # Which API key pushed a run (for per-key attribution); added to the runs table.
 _RUNS_MIGRATIONS = ("key_id TEXT",)
+_UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -197,6 +198,11 @@ def _apply_schema_migrations(conn):
     for col in _RUNS_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _UPTIME_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE uptime_results ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     # Migrate a legacy single instance-wide api_key (the previous design) into the
@@ -4089,6 +4095,37 @@ def _http_probe_once(target, timeout, method):
             raise
     return last_code
 
+
+
+def _tls_cert_days(host, port, timeout):
+    """Return (days_remaining, expires_at_ts) or (None, None)."""
+    import ssl, datetime, socket
+
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(
+            socket.create_connection((host, port), timeout=timeout),
+            server_hostname=host,
+        ) as ssock:
+            cert = ssock.getpeercert()
+            not_after = cert.get("notAfter", "") if cert else ""
+            if not not_after:
+                return None, None
+
+            exp = datetime.datetime.strptime(
+                not_after,
+                "%b %d %H:%M:%S %Y %Z"
+            ).replace(tzinfo=datetime.timezone.utc)
+
+            delta = exp - datetime.datetime.now(datetime.timezone.utc)
+            return max(0, delta.days), int(exp.timestamp())
+
+    except Exception:
+        return None, None
+
+
 def probe_http(target, timeout, expected=None):
     """GET the URL, following ≤ _UPTIME_MAX_REDIRECTS redirects. Returns
     (up, latency_ms, code, err). up = connected AND status matches expected (or any
@@ -4125,36 +4162,51 @@ def probe_tcp(target, timeout):
         latency = round((time.monotonic() - start) * 1000, 1)
         return False, latency, None, _redact_target(str(e))[:200]
 
+
 def run_uptime_check(check):
-    """Execute one check (dict) and persist its result. The probe is bounded by the
-    check's timeout; the only LOCK held is the brief DB write. Called from the
-    dedicated uptime worker thread. Returns the result dict."""
     ctype = check["type"]
     timeout = min(int(check.get("timeout_sec") or 10), _UPTIME_MAX_TIMEOUT)
+
     if ctype == "tcp":
         up, latency, code, err = probe_tcp(check["target"], timeout)
     else:
         up, latency, code, err = probe_http(check["target"], timeout, check.get("expected_status"))
-    ts = int(time.time())
-    if not _DB_MAINTENANCE:
-        try:
-            with LOCK:
-                DB.execute("INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err) "
-                           "VALUES(?,?,?,?,?,?)",
-                           (check["id"], ts, 1 if up else 0, latency, code, err))
-                # Per-check ring buffer: keep only the newest CAP rows. Trim by rowid
-                # (monotonic + unique) so it's exact even when many results share a
-                # second — a ts-based MIN() would under-trim on timestamp collisions.
-                DB.execute(
-                    "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
-                    "(SELECT rowid FROM uptime_results WHERE check_id=? "
-                    "ORDER BY rowid DESC LIMIT ?)",
-                    (check["id"], check["id"], _UPTIME_RESULT_CAP))
-                DB.commit()
-        except Exception as e:
-            print("uptime persist error:", e, flush=True)
-    return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 
+    ts = int(time.time())
+
+    cert_days = None
+    cert_expires_at = None
+
+    if ctype != "tcp" and check["target"].lower().startswith("https://"):
+        import urllib.parse
+        parsed = urllib.parse.urlparse(check["target"])
+        host = parsed.hostname
+        port = parsed.port or 443
+
+        cert_days, cert_expires_at = _tls_cert_days(host, port, min(timeout, 10))
+
+    if _DB_MAINTENANCE:
+        return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
+
+    try:
+        with LOCK:
+            DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
+            )
+
+            DB.execute(
+                "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
+                "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
+                (check["id"], check["id"], _UPTIME_RESULT_CAP)
+            )
+
+            DB.commit()
+    except Exception as e:
+        print("run_uptime_check DB error:", e, flush=True)
+
+    return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 def _uptime_state(check_id, now, window=86400, window2=604800):
     """Read-only summary for one check: current state (up/down/unknown), last latency,
     uptime% over `window` (24h) and `window2` (7d), last_checked, last_err, and a
@@ -4162,13 +4214,13 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
     since, since2 = now - window, now - window2
     with LOCK:
         rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? "
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? AND ts>=? "
             "ORDER BY ts", (check_id, since)).fetchall()
         agg2 = DB.execute(
             "SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
             (check_id, since2)).fetchone()
         last = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? "
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? "
             "ORDER BY ts DESC LIMIT 1", (check_id,)).fetchone()
     total = len(rows)
     up_n = sum(1 for r in rows if r[1])
@@ -4182,9 +4234,22 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
         last_checked, last_latency, last_code, last_err = last[0], last[2], last[3], last[4]
     # Heartbeat strip: most recent up-to-N results, oldest→newest, carrying {up, t}.
     strip = [{"up": bool(r[1]), "t": r[0]} for r in rows[-_UPTIME_STRIP_CELLS:]]
+    # Surface the most recent cert expiry data (index 5, 6 from the last row).
+    cert_days = last[5] if last and len(last) > 5 else None
+    cert_expires_at = last[6] if last and len(last) > 6 else None
+    cert_status = None
+    if cert_days is not None:
+        if cert_days <= 7:
+            cert_status = "red"
+        elif cert_days <= 21:
+            cert_status = "amber"
+        else:
+            cert_status = "ok"
     return {"state": state, "uptime": uptime, "uptime7": uptime7, "window_total": total,
             "last_latency_ms": last_latency, "last_checked": last_checked,
-            "last_code": last_code, "last_err": last_err, "strip": strip}
+            "last_code": last_code, "last_err": last_err, "strip": strip,
+            "cert_days_remaining": cert_days, "cert_expires_at": cert_expires_at,
+            "cert_status": cert_status}
 
 def uptime_overview(window=86400):
     """All checks + their current state. The user-facing private payload."""
@@ -4693,6 +4758,19 @@ def notify_uptime(s):
                       f"{tgt} — {round(lat)} ms (warns above {lw} ms).", rules=rules)
             else:
                 _clear(slow_key)
+            cert_key = f"uptime:cert:{cid}"
+            cert_days = st.get("cert_days_remaining")
+            if cert_days is not None:
+                if cert_days <= 7:
+                    _emit(s, cert_key, "critical", f"🔒 {c['label']} TLS cert expiring",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                elif cert_days <= 21:
+                    _emit(s, cert_key, "warning", f"🔒 {c['label']} TLS cert expiring soon",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                else:
+                    _clear(cert_key)
+            else:
+                _clear(cert_key)
 
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
