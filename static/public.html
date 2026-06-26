@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Status</title>
+<style>
+  :root{--bg:#0f1117;--card:#1a1d27;--bd:#2a2d3a;--tx:#e2e8f0;--tx2:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--ok-bg:#052e16;--warn-bg:#451a03;--crit-bg:#450a0a;--r:12px}
+  @media(prefers-color-scheme:light){:root{--bg:#f1f5f9;--card:#fff;--bd:#e2e8f0;--tx:#0f172a;--tx2:#64748b;--ok-bg:#f0fdf4;--warn-bg:#fffbeb;--crit-bg:#fef2f2}}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;padding:1.5rem}
+  header{display:flex;align-items:center;gap:.75rem;margin-bottom:2rem;flex-wrap:wrap}
+  header h1{font-size:1.4rem;font-weight:700}
+  .banner{flex:1 1 100%;display:flex;align-items:center;gap:.6rem;padding:.75rem 1rem;border-radius:var(--r);border:1px solid var(--bd);font-weight:600;font-size:.95rem}
+  .banner.ok{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
+  .banner.warn{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
+  .banner.crit{background:var(--crit-bg);border-color:var(--crit);color:var(--crit)}
+  .dot{width:10px;height:10px;border-radius:50%;background:currentColor;flex-shrink:0}
+  .dot.pulse{animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
+  .ov-card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);padding:1.25rem 1rem;display:flex;flex-direction:column;gap:.35rem}
+  .ov-card .ov-top{display:flex;align-items:center;gap:.5rem;font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--tx2)}
+  .ov-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .ov-dot.ok{background:var(--ok)} .ov-dot.warn{background:var(--warn)} .ov-dot.crit{background:var(--crit)}
+  .ov-metric{font-size:1.6rem;font-weight:700;line-height:1.1}
+  .ov-detail{font-size:.8rem;color:var(--tx2)}
+  .skel{background:var(--bd);border-radius:4px;animation:skel 1.5s infinite}
+  @keyframes skel{0%,100%{opacity:.5}50%{opacity:1}}
+  footer{margin-top:2.5rem;text-align:center;font-size:.75rem;color:var(--tx2)}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="lab-title">…</h1>
+  <div class="banner" id="banner"><span class="dot pulse" id="banner-dot"></span><span id="banner-text">Loading…</span></div>
+</header>
+<div class="grid" id="grid">
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+</div>
+<footer id="footer"></footer>
+<script>
+async function load(){
+  try{
+    const r=await fetch('/api/public-status');
+    if(!r.ok){document.body.innerHTML='<p style="padding:2rem;color:var(--crit)">Status page not enabled.</p>';return;}
+    const d=await r.json();
+    document.title=(d.lab_emoji||'')+" "+(d.lab_name||'Status');
+    document.getElementById('lab-title').textContent=(d.lab_emoji||'')+" "+(d.lab_name||'HomeLab Status');
+    const b=document.getElementById('banner');
+    const ok=d.status==='ok';
+    b.className='banner '+(ok?'ok':'warn');
+    document.getElementById('banner-dot').className='dot'+(ok?' pulse':'');
+    document.getElementById('banner-text').textContent=ok?'All systems normal':'Some systems need attention';
+    const grid=document.getElementById('grid');
+    grid.innerHTML='';
+    for(const c of (d.overview||[])){
+      const el=document.createElement('div');
+      el.className='ov-card';
+      el.innerHTML=`<div class="ov-top"><div class="ov-dot ${c.status||'ok'}"></div>${c.label||c.key}</div><div class="ov-metric">${c.metric||'—'}</div><div class="ov-detail">${c.detail||''}</div>`;
+      grid.appendChild(el);
+    }
+    document.getElementById('footer').textContent='Last updated '+new Date().toLocaleTimeString();
+  }catch(e){console.error(e);}
+}
+load();
+setInterval(load,30000);
+</script>
+</body>
+</html>

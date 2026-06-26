@@ -25,7 +25,7 @@ try:
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g
+from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -7001,6 +7001,7 @@ def api_notify_rules_test():
                           channels)
     return jsonify({"ok": True, "channels": list(channels)})
 
+
 @app.route("/")
 def index():
     return app.send_static_file("dashboard.html")
@@ -7415,6 +7416,39 @@ threading.Thread(target=collector, daemon=True).start()
 threading.Thread(target=host_poller, daemon=True).start()
 threading.Thread(target=uptime_worker, daemon=True).start()
 threading.Thread(target=brief_worker, daemon=True).start()
+
+
+import os as _os
+
+@app.route("/api/public-status")
+def api_public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    cfg = get_settings()
+    gpu_avail = LATEST.get("gpu_avail")
+    now = {"gpu": {"util": LATEST.get("util"), "mem_used": LATEST.get("mem_used"),
+                   "mem_total": (LATEST.get("mem_total") or 24576) if gpu_avail else 0,
+                   "power": LATEST.get("power"), "temp": LATEST.get("temp"),
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or [],
+                   "extra": LATEST.get("gpu_extra") or {}},
+           "host": LATEST.get("host") or {}}
+    docker  = HEALTH.get("docker")  or {"available": False, "reason": "warming up", "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    systemd = HEALTH.get("systemd") or {"available": False, "reason": "warming up", "services": [], "summary": {}}
+    cards = build_overview(now, docker, systemd)
+    safe_cards = [{k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")} for c in cards]
+    return jsonify({
+        "lab_name": cfg.get("lab_name", "My HomeLab"),
+        "lab_emoji": cfg.get("lab_emoji", "🏠"),
+        "overview": safe_cards,
+        "status": "ok" if all(c.get("status") == "ok" for c in safe_cards) else "warn"
+    })
+
+@app.route("/public")
+def public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    return send_from_directory("static", "public.html")
 
 if __name__ == "__main__":
     print(
