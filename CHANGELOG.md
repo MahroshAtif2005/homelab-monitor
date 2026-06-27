@@ -5,6 +5,24 @@ loosely based on [Keep a Changelog](https://keepachangelog.com/), and the
 project follows semantic-ish versioning. Each entry links to its full GitHub
 release notes.
 
+## [Unreleased]
+
+## [0.22.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.22.0) — 2026-06-27 · **A real status page — public lab health, plus a page per service**
+*The throwaway `/public` page is reborn in the app's own skin: overall lab health, a live list of the services you watch, and a dedicated status page for each one — uptime over 24h/7d/30d/90d, incident history and response times. Alerts also gain email, Slack and generic-webhook channels, services get brand logos, and the AI Models tab now lists every model pulled to disk.*
+
+**Added**
+- **A proper status page — overview + a page per monitored service.** The public page (`/public`) is rebuilt in the app's own design system (it was a bare throwaway before): the lab's system health *plus* a list of the services you monitor on the Uptime tab, each with a live heartbeat, 24h uptime and latency. Click any service for its **own status page** (`/public/<id>`) — current state and how long it's held, uptime over **24h / 7d / 30d / 90d**, a day-by-day history bar, a response-time chart, and a reconstructed list of past incidents (when it went down, for how long, and why), plus TLS-cert days-remaining. Each Uptime check has a new **"public" toggle** (off by default) so you choose exactly what's listed; the whole page stays gated behind `PUBLIC_STATUS`, and only the service name + host are ever exposed — never the raw target or credentials. New read-only endpoints: `GET /api/public-status` (now includes the monitors) and `GET /api/public-status/<id>`.
+- Alerts now support **email (SMTP)**, **Slack incoming webhooks**, and a **generic webhook** target alongside Discord, ntfy and Telegram. All three channels configure from the Alerts settings panel and honour the existing minimum severity + disk threshold rules.
+- **Brand logos for famous services** on the Containers and Services tables. The monitor now shows the recognisable icon (Immich, Plex, Pi-hole, Home Assistant, Postgres, Grafana, n8n, Ollama, and ~60 more) in front of the name, matched from the container image or unit name — faster visual scanning of a busy host. Logos are embedded Simple Icons (MIT), so there are **no runtime external requests**; near-black brands fall back to the theme text colour so they stay visible in dark mode, and unrecognised entries are unchanged.
+- **Installed-models registry on the AI Models tab.** A new panel lists every model **pulled to disk** on this host's local LLM (ollama) — name, on-disk size, params · quantization, a **Loaded** badge (with live VRAM) for models resident right now, and last-modified — with an *N models · X GB on disk · M loaded* header. Read-only (`GET /api/models` → ollama `/api/tags`+`/api/ps`, cached ~45s, always-200 graceful-degrade when ollama is off, no secret leak). Loads on tab view + manual refresh.
+
+**Changed**
+- Wired the new Alerts form labels to the locale files so translated dashboards automatically pick up the email/Slack/webhook copy.
+- **Overview engine gauges**: the `%` now rides inline on the number's baseline (reads as `67%`) instead of as a detached superscript, and the **GPU gauge shows live power draw (W)** on its own line beneath the VRAM.
+
+**Fixed**
+- **GPU went undetected on hosts where nvidia isn't Docker's default runtime** (stock Ubuntu/Debian/Mint, where GPU containers normally opt in per-container with `--gpus all`). The monitor exposed the card only through the `NVIDIA_*` env vars, which the toolkit honours only for the default runtime — so the card worked everywhere else but the dashboard reported "no GPU detected" (#203). Added a **`docker-compose.gpu.yml` override** that requests the nvidia runtime for just this container (no global-default change, still starts on GPU-less hosts), and corrected the Setup-tab remedy + compose comments to include the **`--force-recreate`** step a plain restart was silently skipping.
+
 ## [0.21.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.21.0) — 2026-06-23 · **See your power bill by the hour — and which GPU is burning it**
 *Three new questions answered at a glance: when is your lab most expensive, which GPU is doing the work (whoever made it), and is anything down?*
 

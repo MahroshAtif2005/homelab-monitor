@@ -18,14 +18,14 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib
+import os, re, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
 except ImportError:
     fcntl = None
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g
+from flask import Flask, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import db_backup
 try:
     from prometheus_client import (Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.21.0"
+VERSION      = "0.22.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -143,6 +143,14 @@ CREATE TABLE IF NOT EXISTS run_metrics(run_id TEXT NOT NULL, ts INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS api_keys(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER);
+CREATE TABLE IF NOT EXISTS notification_rules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  match_kind TEXT NOT NULL DEFAULT 'container',
+  match_pattern TEXT NOT NULL DEFAULT '*',
+  channel TEXT NOT NULL DEFAULT 'all',
+  min_level TEXT NOT NULL DEFAULT 'warning',
+  enabled INTEGER NOT NULL DEFAULT 1
+);
 CREATE INDEX IF NOT EXISTS idx_powerproc_ts   ON power_proc(ts);
 CREATE INDEX IF NOT EXISTS idx_powerproc_name ON power_proc(name, ts);
 CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
@@ -157,6 +165,9 @@ _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL
 _HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "poll_calibrated_at INTEGER")
 # Which API key pushed a run (for per-key attribution); added to the runs table.
 _RUNS_MIGRATIONS = ("key_id TEXT",)
+_UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
+# Per-check opt-in to the public status page (off by default).
+_UPTIME_CHECK_MIGRATIONS = ("public INTEGER NOT NULL DEFAULT 0",)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -189,6 +200,16 @@ def _apply_schema_migrations(conn):
     for col in _RUNS_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _UPTIME_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE uptime_results ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _UPTIME_CHECK_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE uptime_checks ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     # Migrate a legacy single instance-wide api_key (the previous design) into the
@@ -2492,9 +2513,15 @@ def local_diagnostics():
     else:
         _diag(checks, "nvidia", "NVIDIA GPU", "info",
               "no GPU detected — GPU panels are hidden (everything else works)",
-              {"where": "on the host — only if it actually has an NVIDIA GPU",
+              {"where": "on the host — only if it actually has an NVIDIA GPU. "
+                        "GPU containers use the env vars below only when nvidia is "
+                        "Docker's DEFAULT runtime; the recreate step is what was "
+                        "missing if a previous attempt 'did nothing'.",
                "cmd": "sudo nvidia-ctk runtime configure --runtime=docker --set-as-default\n"
-                      "sudo systemctl restart docker"})
+                      "sudo systemctl restart docker\n"
+                      "docker compose up -d --force-recreate   # recreate — restart keeps the old runtime\n"
+                      "# don't want nvidia as the global default? skip all three lines above and instead run:\n"
+                      "#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d"})
     # Docker socket — powers Containers + Services + model APIs.
     try:
         json.loads(_docker("/version"))
@@ -3721,6 +3748,15 @@ SETTING_DEFAULTS = {
     "ntfy_server":         "https://ntfy.sh",
     "telegram_token":      "",
     "telegram_chat_id":    "",
+    "email_host":          "",
+    "email_port":          "587",
+    "email_use_tls":       "1",
+    "email_username":      "",
+    "email_password":      "",
+    "email_from":          "",
+    "email_to":            "",
+    "slack_webhook_url":   "",
+    "webhook_url":         "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
     "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
@@ -3736,8 +3772,13 @@ SETTING_DEFAULTS = {
     "api_key":             "",         # Bearer/X-API-Key for run ingest; empty => not generated (ingest fail-closed)
     "mlflow_uri":          "",         # MLflow tracking server base (blank = off)
     "mlflow_token":        "",         # optional bearer for a secured MLflow
+    # ── Daily brief (#170) — opt-in once-a-day HTML health digest ──────────────
+    "brief_enabled":       "0",        # "0" / "1"
+    "brief_time":          "08:00",    # local time-of-day "HH:MM" to send
+    "brief_channel":       "",         # one of: email|discord|telegram|ntfy|slack|webhook (must be configured)
+    "brief_theme":         "dark",     # "dark" | "light" — palette for the HTML brief
 }
-SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
+SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "slack_webhook_url", "webhook_url", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
@@ -3757,7 +3798,7 @@ def get_settings():
 # LAN, so validating the scheme/host on save keeps someone who can reach the
 # dashboard from pointing these at a non-HTTP scheme or an empty host — a small
 # SSRF-surface tightening, not a change to the trusted-LAN model.
-_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server"}
+_URL_SETTING_KEYS = {"discord_webhook_url", "ntfy_server", "slack_webhook_url", "webhook_url"}
 
 def _validate_url_settings(updates):
     """Return an error string if any URL-valued setting is malformed, else None.
@@ -3774,6 +3815,50 @@ def _validate_url_settings(updates):
             return f"{key} is not a valid URL."
         if u.scheme not in ("http", "https") or not u.netloc:
             return f"{key} must be an http(s) URL with a host."
+    return None
+
+def _validate_email_settings(updates):
+    """Return an error string for malformed email alert fields, else None."""
+    effective = {**get_settings(), **updates}
+    host = (effective.get("email_host") or "").strip()
+    from_addr = (effective.get("email_from") or "").strip()
+    to_addr = (effective.get("email_to") or "").strip()
+    port = (effective.get("email_port") or "587").strip()
+    user = (effective.get("email_username") or "").strip()
+    pwd  = (effective.get("email_password") or "").strip()
+    # If nothing is provided, allow it (email alerts stay off).
+    if not any((host, from_addr, to_addr, user, pwd)):
+        return None
+    if not (host and from_addr and to_addr):
+        return "Email alerts require host, from, and to addresses."
+    try:
+        port_num = int(port)
+        if port_num <= 0:
+            return "Email port must be a positive integer."
+    except ValueError:
+        return "Email port must be a number."
+    for label, addr in (("From address", from_addr), ("To address", to_addr)):
+        if "@" not in addr or addr.startswith("@") or addr.endswith("@"):
+            return f"{label} must include '@'."
+    return None
+
+_BRIEF_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Channels the daily brief can target (also used by the worker/test route below).
+# Defined here, next to the validator that enum-checks it, so the dependency is local.
+_BRIEF_CHANNELS = ("email", "discord", "telegram", "ntfy", "slack", "webhook")
+
+def _validate_brief_settings(updates):
+    """Reject malformed daily-brief fields. Enum-validating brief_channel/theme here
+    means an arbitrary value can never reach the settings store (or the dashboard
+    that renders it into an <option>), closing the stored-XSS surface at the source."""
+    if "brief_channel" in updates:
+        v = (updates["brief_channel"] or "").strip()
+        if v and v not in _BRIEF_CHANNELS:
+            return "Unknown daily-brief channel."
+    if "brief_theme" in updates and (updates["brief_theme"] or "").strip() not in ("dark", "light"):
+        return "Daily-brief theme must be 'dark' or 'light'."
+    if "brief_time" in updates and not _BRIEF_TIME_RE.match((updates["brief_time"] or "").strip()):
+        return "Daily-brief time must be HH:MM (24-hour)."
     return None
 
 def save_settings(updates):
@@ -3806,10 +3891,11 @@ _uptime_down_since = {}        # check_id -> wall-clock ts the current DOWN stre
 def _uptime_row_to_dict(r):
     cols = ("id", "label", "type", "target", "interval_sec", "timeout_sec",
             "expected_status", "alerts_enabled", "fail_threshold", "latency_warn_ms",
-            "enabled", "created_at")
+            "enabled", "created_at", "public")
     d = dict(zip(cols, r))
     d["enabled"] = bool(d["enabled"])
     d["alerts_enabled"] = bool(d["alerts_enabled"])
+    d["public"] = bool(d.get("public"))
     return d
 
 _CRED_RE = re.compile(r"(://)[^/\s:@]+:[^/\s@]+@")
@@ -3824,7 +3910,7 @@ def list_uptime_checks():
     with LOCK:
         rows = DB.execute(
             "SELECT id,label,type,target,interval_sec,timeout_sec,expected_status,"
-            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at "
+            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public "
             "FROM uptime_checks ORDER BY created_at").fetchall()
     return [_uptime_row_to_dict(r) for r in rows]
 
@@ -3932,7 +4018,8 @@ def _validate_uptime_check(body):
             "expected_status": expected,
             "alerts_enabled": 1 if body.get("alerts_enabled", True) else 0,
             "fail_threshold": fail_threshold, "latency_warn_ms": latency_warn,
-            "enabled": 1 if body.get("enabled", True) else 0}, None
+            "enabled": 1 if body.get("enabled", True) else 0,
+            "public": 1 if body.get("public") else 0}, None
 
 def create_uptime_check(body):
     clean, err = _validate_uptime_check(body)
@@ -3942,11 +4029,12 @@ def create_uptime_check(body):
     with LOCK:
         DB.execute(
             "INSERT INTO uptime_checks(id,label,type,target,interval_sec,timeout_sec,"
-            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
              clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time())))
+             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
+             clean["public"]))
         DB.commit()
     _uptime_due.pop(cid, None)   # probe promptly on next scheduler pass
     return cid, None
@@ -3958,11 +4046,16 @@ def update_uptime_check(cid, body):
         return False, "not found"
     if not body:
         return False, "empty update"
-    # Quick enable/disable toggle without full revalidation.
-    if "enabled" in body and set(body.keys()) <= {"enabled"}:
+    # Quick toggles without full revalidation: enabled (pause/resume) and/or public
+    # (show on the public status page). Accepts either alone or both together.
+    if body and set(body.keys()) <= {"enabled", "public"}:
+        sets, vals = [], []
+        if "enabled" in body:
+            sets.append("enabled=?"); vals.append(1 if body.get("enabled") else 0)
+        if "public" in body:
+            sets.append("public=?"); vals.append(1 if body.get("public") else 0)
         with LOCK:
-            DB.execute("UPDATE uptime_checks SET enabled=? WHERE id=?",
-                       (1 if body.get("enabled") else 0, cid))
+            DB.execute(f"UPDATE uptime_checks SET {','.join(sets)} WHERE id=?", (*vals, cid))
             DB.commit()
         return True, None
     clean, err = _validate_uptime_check(body)
@@ -3971,10 +4064,10 @@ def update_uptime_check(cid, body):
     with LOCK:
         DB.execute(
             "UPDATE uptime_checks SET label=?,type=?,target=?,interval_sec=?,timeout_sec=?,"
-            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=? WHERE id=?",
+            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=?,public=? WHERE id=?",
             (clean["label"], clean["type"], clean["target"], clean["interval_sec"],
              clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], cid))
+             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"], cid))
         DB.commit()
     _uptime_due.pop(cid, None)   # re-probe with new config promptly
     return True, None
@@ -4017,6 +4110,37 @@ def _http_probe_once(target, timeout, method):
             raise
     return last_code
 
+
+
+def _tls_cert_days(host, port, timeout):
+    """Return (days_remaining, expires_at_ts) or (None, None)."""
+    import ssl, datetime, socket
+
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(
+            socket.create_connection((host, port), timeout=timeout),
+            server_hostname=host,
+        ) as ssock:
+            cert = ssock.getpeercert()
+            not_after = cert.get("notAfter", "") if cert else ""
+            if not not_after:
+                return None, None
+
+            exp = datetime.datetime.strptime(
+                not_after,
+                "%b %d %H:%M:%S %Y %Z"
+            ).replace(tzinfo=datetime.timezone.utc)
+
+            delta = exp - datetime.datetime.now(datetime.timezone.utc)
+            return max(0, delta.days), int(exp.timestamp())
+
+    except Exception:
+        return None, None
+
+
 def probe_http(target, timeout, expected=None):
     """GET the URL, following ≤ _UPTIME_MAX_REDIRECTS redirects. Returns
     (up, latency_ms, code, err). up = connected AND status matches expected (or any
@@ -4053,36 +4177,51 @@ def probe_tcp(target, timeout):
         latency = round((time.monotonic() - start) * 1000, 1)
         return False, latency, None, _redact_target(str(e))[:200]
 
+
 def run_uptime_check(check):
-    """Execute one check (dict) and persist its result. The probe is bounded by the
-    check's timeout; the only LOCK held is the brief DB write. Called from the
-    dedicated uptime worker thread. Returns the result dict."""
     ctype = check["type"]
     timeout = min(int(check.get("timeout_sec") or 10), _UPTIME_MAX_TIMEOUT)
+
     if ctype == "tcp":
         up, latency, code, err = probe_tcp(check["target"], timeout)
     else:
         up, latency, code, err = probe_http(check["target"], timeout, check.get("expected_status"))
-    ts = int(time.time())
-    if not _DB_MAINTENANCE:
-        try:
-            with LOCK:
-                DB.execute("INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err) "
-                           "VALUES(?,?,?,?,?,?)",
-                           (check["id"], ts, 1 if up else 0, latency, code, err))
-                # Per-check ring buffer: keep only the newest CAP rows. Trim by rowid
-                # (monotonic + unique) so it's exact even when many results share a
-                # second — a ts-based MIN() would under-trim on timestamp collisions.
-                DB.execute(
-                    "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
-                    "(SELECT rowid FROM uptime_results WHERE check_id=? "
-                    "ORDER BY rowid DESC LIMIT ?)",
-                    (check["id"], check["id"], _UPTIME_RESULT_CAP))
-                DB.commit()
-        except Exception as e:
-            print("uptime persist error:", e, flush=True)
-    return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 
+    ts = int(time.time())
+
+    cert_days = None
+    cert_expires_at = None
+
+    if ctype != "tcp" and check["target"].lower().startswith("https://"):
+        import urllib.parse
+        parsed = urllib.parse.urlparse(check["target"])
+        host = parsed.hostname
+        port = parsed.port or 443
+
+        cert_days, cert_expires_at = _tls_cert_days(host, port, min(timeout, 10))
+
+    if _DB_MAINTENANCE:
+        return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
+
+    try:
+        with LOCK:
+            DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
+            )
+
+            DB.execute(
+                "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
+                "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
+                (check["id"], check["id"], _UPTIME_RESULT_CAP)
+            )
+
+            DB.commit()
+    except Exception as e:
+        print("run_uptime_check DB error:", e, flush=True)
+
+    return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 def _uptime_state(check_id, now, window=86400, window2=604800):
     """Read-only summary for one check: current state (up/down/unknown), last latency,
     uptime% over `window` (24h) and `window2` (7d), last_checked, last_err, and a
@@ -4090,13 +4229,13 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
     since, since2 = now - window, now - window2
     with LOCK:
         rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? "
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? AND ts>=? "
             "ORDER BY ts", (check_id, since)).fetchall()
         agg2 = DB.execute(
             "SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
             (check_id, since2)).fetchone()
         last = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? "
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? "
             "ORDER BY ts DESC LIMIT 1", (check_id,)).fetchone()
     total = len(rows)
     up_n = sum(1 for r in rows if r[1])
@@ -4110,9 +4249,22 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
         last_checked, last_latency, last_code, last_err = last[0], last[2], last[3], last[4]
     # Heartbeat strip: most recent up-to-N results, oldest→newest, carrying {up, t}.
     strip = [{"up": bool(r[1]), "t": r[0]} for r in rows[-_UPTIME_STRIP_CELLS:]]
+    # Surface the most recent cert expiry data (index 5, 6 from the last row).
+    cert_days = last[5] if last and len(last) > 5 else None
+    cert_expires_at = last[6] if last and len(last) > 6 else None
+    cert_status = None
+    if cert_days is not None:
+        if cert_days <= 7:
+            cert_status = "red"
+        elif cert_days <= 21:
+            cert_status = "amber"
+        else:
+            cert_status = "ok"
     return {"state": state, "uptime": uptime, "uptime7": uptime7, "window_total": total,
             "last_latency_ms": last_latency, "last_checked": last_checked,
-            "last_code": last_code, "last_err": last_err, "strip": strip}
+            "last_code": last_code, "last_err": last_err, "strip": strip,
+            "cert_days_remaining": cert_days, "cert_expires_at": cert_expires_at,
+            "cert_status": cert_status}
 
 def uptime_overview(window=86400):
     """All checks + their current state. The user-facing private payload."""
@@ -4242,6 +4394,42 @@ def _post_to_telegram(token, chat_id, level, title, body):
             f"_HomeLab Monitor · {level}_")
     return _post_json(url, {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+def _smtp_send(msg, host, port, use_tls, username, password):
+    """Connect, optionally STARTTLS + authenticate, send, and always close. Shared by
+    the alert and daily-brief email paths so any fix (timeouts, TLS, error handling)
+    lives in one place. The connection is built inside the try with a None-guarded
+    quit() so a constructor failure can never reach an unbound name."""
+    port = int(port)
+    ctx = None
+    try:
+        ctx = (smtplib.SMTP_SSL(host, port, timeout=10) if (use_tls and port == 465)
+               else smtplib.SMTP(host, port, timeout=10))
+        if use_tls and port != 465:
+            ctx.starttls()
+        if username and password:
+            ctx.login(username, password)
+        ctx.send_message(msg)
+    finally:
+        if ctx is not None:
+            ctx.quit()
+
+def _send_email(host, port, use_tls, username, password, from_addr, to_addr, level, title, detail):
+    """Send alert via SMTP. Raises on error."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = title
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.set_content(f"{detail}\n\nHomeLab Monitor · {level}")
+    _smtp_send(msg, host, port, use_tls, username, password)
+
+def send_slack(webhook, level, title, detail):
+    payload = {"text": f"[{level}] {title}\n\n{detail}"}
+    return _post_json(webhook, payload)
+
+def send_webhook(url, level, title, detail, host):
+    payload = {"level": level, "title": title, "detail": detail, "host": host}
+    return _post_json(url, payload)
+
 def _alert_host_label():
     """Machine name to stamp on every alert so a notification says *where* the
     problem is. Alerts are raised from the hub's own docker/systemd/disk/GPU
@@ -4263,7 +4451,8 @@ def dispatch_alert(s, level, title, detail, host=None):
     """Send to whichever channels are configured. Returns list of (channel, ok, err).
 
     `title` is prefixed with the machine name (`[host] …`) so every channel —
-    Discord, ntfy and Telegram alike — names which machine the alert is about.
+    Discord, ntfy, Telegram, email, Slack and generic webhook alike — names
+    which machine the alert is about.
     Pass host="" to opt out (e.g. a generic message that isn't host-specific)."""
     if host is None:
         host = _alert_host_label()
@@ -4281,9 +4470,95 @@ def dispatch_alert(s, level, title, detail, host=None):
         try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
                                level, title, detail); out.append(("telegram", True, None))
         except Exception as e: out.append(("telegram", False, str(e)))
+    # Email via SMTP
+    if s.get("email_host") and s.get("email_from") and s.get("email_to"):
+        try:
+            _send_email(s["email_host"], s.get("email_port", "587"),
+                        s.get("email_use_tls", "1") == "1",
+                        s.get("email_username", ""), s.get("email_password", ""),
+                        s["email_from"], s["email_to"],
+                        level, title, detail)
+            out.append(("email", True, None))
+        except Exception as e:
+            out.append(("email", False, str(e)))
+    # Slack incoming webhook
+    if s.get("slack_webhook_url"):
+        try: send_slack(s["slack_webhook_url"], level, title, detail); out.append(("slack", True, None))
+        except Exception as e: out.append(("slack", False, str(e)))
+    # Generic webhook
+    if s.get("webhook_url"):
+        try: send_webhook(s["webhook_url"], level, title, detail, host or ""); out.append(("webhook", True, None))
+        except Exception as e: out.append(("webhook", False, str(e)))
     return out
 
-def _emit(s, key, level, title, detail):
+def _dispatch_to_channels(s, level, title, detail, channels):
+    """Dispatch to a specific set of channels only."""
+    if "discord" in channels and s.get("discord_webhook_url"):
+        try: send_discord(s["discord_webhook_url"], level, title, detail)
+        except Exception as e: print("notifier discord error:", e, flush=True)
+    if "ntfy" in channels and s.get("ntfy_topic"):
+        try: send_ntfy(s.get("ntfy_server") or "https://ntfy.sh",
+                       s["ntfy_topic"], level, title, detail)
+        except Exception as e: print("notifier ntfy error:", e, flush=True)
+    if "telegram" in channels and s.get("telegram_token") and s.get("telegram_chat_id"):
+        try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
+                               level, title, detail)
+        except Exception as e: print("notifier telegram error:", e, flush=True)
+    if "email" in channels and s.get("email_host") and s.get("email_from") and s.get("email_to"):
+        try: _send_email(s["email_host"], s.get("email_port", "587"),
+                         s.get("email_use_tls", "1") == "1",
+                         s.get("email_username", ""), s.get("email_password", ""),
+                         s["email_from"], s["email_to"], level, title, detail)
+        except Exception as e: print("notifier email error:", e, flush=True)
+    if "slack" in channels and s.get("slack_webhook_url"):
+        try: send_slack(s["slack_webhook_url"], level, title, detail)
+        except Exception as e: print("notifier slack error:", e, flush=True)
+    if "webhook" in channels and s.get("webhook_url"):
+        try: send_webhook(s["webhook_url"], level, title, detail, _alert_host_label() or "")
+        except Exception as e: print("notifier webhook error:", e, flush=True)
+
+def _match_kind(key):
+    prefix = key.split(":")[0] if ":" in key else key
+    if prefix in ("container", "systemd", "uptime"):
+        return prefix
+    if prefix in ("gpu", "oom"):
+        return "gpu"
+    if prefix == "disk":
+        return "host"
+    return "host"
+
+def _alert_name(key):
+    parts = key.split(":")
+    return ":".join(parts[1:]) if len(parts) > 1 else key
+
+def _apply_rules(key, level, rules):
+    """Return set of channels if rules match, or None for default behavior."""
+    if not rules:
+        return None
+    kind = _match_kind(key)
+    name = _alert_name(key)
+    channels = set()
+    for rule in rules:
+        if not rule.get("enabled", True):
+            continue
+        if rule["match_kind"] != kind:
+            continue
+        if not fnmatch.fnmatch(name, rule["match_pattern"]):
+            continue
+        if LEVELS.get(level, 0) < LEVELS.get(rule.get("min_level", "warning"), 0):
+            continue
+        if rule["channel"] == "all":
+            channels.update(["discord", "ntfy", "telegram", "email", "slack", "webhook"])
+        else:
+            channels.add(rule["channel"])
+    return channels if channels else None
+
+def get_notification_rules():
+    with LOCK:
+        rows = DB.execute("SELECT id, match_kind, match_pattern, channel, min_level, enabled FROM notification_rules ORDER BY id").fetchall()
+    return [{"id": r[0], "match_kind": r[1], "match_pattern": r[2], "channel": r[3], "min_level": r[4], "enabled": bool(r[5])} for r in rows]
+
+def _emit(s, key, level, title, detail, rules=None):
     """Fire an alert once per edge. Skips below the configured min level."""
     if LEVELS.get(level, 0) < LEVELS.get(s.get("alert_min_level", "warning"), 1):
         return
@@ -4291,9 +4566,13 @@ def _emit(s, key, level, title, detail):
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
-    for ch, ok, err in dispatch_alert(s, level, title, detail):
-        if not ok:
-            print(f"notifier {ch} error:", err, flush=True)
+    channels = _apply_rules(key, level, rules)
+    if channels is not None:
+        _dispatch_to_channels(s, level, title, detail, channels)
+    else:
+        for ch, ok, err in dispatch_alert(s, level, title, detail):
+            if not ok:
+                print(f"notifier {ch} error:", err, flush=True)
 
 def _clear(key):
     with _NOTIFIER_LOCK:
@@ -4304,8 +4583,12 @@ def notify_scan():
     if s.get("alerts_enabled") != "1":
         return
     if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))
+            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
+            or s.get("slack_webhook_url")
+            or s.get("webhook_url")):
         return
+    rules = get_notification_rules()
 
     # ── Docker containers: edge-trigger on crit/warn, clear on ok ─────────────
     docker = HEALTH.get("docker") or {}
@@ -4316,10 +4599,10 @@ def notify_scan():
             st   = ct.get("status")
             if st == "crit":
                 _emit(s, key, "critical", f"🔴 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}")
+                      f"{name}: {ct.get('status_text','')}", rules=rules)
             elif st == "warn":
                 _emit(s, key, "warning", f"🟠 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}")
+                      f"{name}: {ct.get('status_text','')}", rules=rules)
             elif st == "ok":
                 _clear(key)
 
@@ -4331,7 +4614,8 @@ def notify_scan():
             key  = f"systemd:{name}"
             if svc.get("status") == "crit":
                 _emit(s, key, "critical", f"🔴 systemd unit failed: {name}",
-                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})")
+                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})",
+                      rules=rules)
             elif svc.get("status") == "ok":
                 _clear(key)
 
@@ -4344,7 +4628,7 @@ def notify_scan():
         if free < PRESSURE_MB:
             _emit(s, key, "warning", "🟠 GPU VRAM pressure",
                   f"Only {round(free)} MB free of {round(mem_total)} MB "
-                  f"({round(100*mem_used/mem_total)}% used).")
+                  f"({round(100*mem_used/mem_total)}% used).", rules=rules)
         else:
             _clear(key)
 
@@ -4361,7 +4645,8 @@ def notify_scan():
         if pct >= disk_thr:
             level = "critical" if pct >= 95 else "warning"
             _emit(s, key, level, f"{'🔴' if level=='critical' else '🟠'} Disk {mp} at {pct}%",
-                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).")
+                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).",
+                  rules=rules)
         else:
             _clear(key)
 
@@ -4381,9 +4666,13 @@ def notify_scan():
                 continue
             if LEVELS["critical"] < LEVELS.get(s.get("alert_min_level", "warning"), 1):
                 continue
-            for ch, ok, err in dispatch_alert(
-                    s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
-                if not ok: print(f"notifier {ch} error:", err, flush=True)
+            channels = _apply_rules(key, "critical", rules)
+            if channels is not None:
+                _dispatch_to_channels(s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500], channels)
+            else:
+                for ch, ok, err in dispatch_alert(
+                        s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
+                    if not ok: print(f"notifier {ch} error:", err, flush=True)
     except Exception as e:
         print("notify_scan oom error:", e, flush=True)
 
@@ -4441,8 +4730,11 @@ def notify_uptime(s):
       • DOWN      — fired once after `fail_threshold` consecutive failures (anti-flap).
       • RECOVERED — fired once when it comes back, quoting the downtime duration.
       • SLOW      — optional warning when an up endpoint exceeds latency_warn_ms.
-    Honours per-check alerts_enabled plus the global min-level/channel gating in _emit."""
+    Honours per-check alerts_enabled plus the global min-level/channel gating in _emit.
+    Routing rules (match_kind='uptime') are respected, so uptime alerts can be
+    steered to specific channels or muted like any other alert."""
     now = int(time.time())
+    rules = get_notification_rules()
     for c in list_uptime_checks():
         cid = c["id"]
         down_key, slow_key, rec_key = f"uptime:down:{cid}", f"uptime:slow:{cid}", f"uptime:rec:{cid}"
@@ -4459,7 +4751,7 @@ def notify_uptime(s):
                 _uptime_down_since[cid] = _uptime_streak_start(cid, now)
             _clear(rec_key)   # re-arm recovery so the eventual comeback fires once
             _emit(s, down_key, "critical", f"🔴 {c['label']} is DOWN",
-                  f"{tgt} — {_uptime_down_reason(st)}")
+                  f"{tgt} — {_uptime_down_reason(st)}", rules=rules)
             _clear(slow_key)
         elif st["state"] == "up":
             with _NOTIFIER_LOCK:
@@ -4472,15 +4764,28 @@ def notify_uptime(s):
                 # default min-level (a recovery the user never sees is worse than a
                 # slightly louder one). It clears the moment the check drops again.
                 _emit(s, rec_key, "warning", f"🟢 {c['label']} recovered",
-                      f"{tgt} — back up after {dur} down.")
+                      f"{tgt} — back up after {dur} down.", rules=rules)
             else:
                 _clear(rec_key)
             lw, lat = c.get("latency_warn_ms"), st.get("last_latency_ms")
             if lw and lat is not None and lat > lw:
                 _emit(s, slow_key, "warning", f"🐢 {c['label']} is slow",
-                      f"{tgt} — {round(lat)} ms (warns above {lw} ms).")
+                      f"{tgt} — {round(lat)} ms (warns above {lw} ms).", rules=rules)
             else:
                 _clear(slow_key)
+            cert_key = f"uptime:cert:{cid}"
+            cert_days = st.get("cert_days_remaining")
+            if cert_days is not None:
+                if cert_days <= 7:
+                    _emit(s, cert_key, "critical", f"🔒 {c['label']} TLS cert expiring",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                elif cert_days <= 21:
+                    _emit(s, cert_key, "warning", f"🔒 {c['label']} TLS cert expiring soon",
+                          f"{tgt} — cert expires in {cert_days}d.", rules=rules)
+                else:
+                    _clear(cert_key)
+            else:
+                _clear(cert_key)
 
 # ── Sampling ────────────────────────────────────────────────────────────────
 def smi(args):
@@ -5617,6 +5922,176 @@ def _run_cost_window(cur, started, ended, ctx):
         cost += p * kwh_per * (_price_at(ctx, ts) or 0.0)
     return round(e_kwh, 4), round(cost, 4), (round(sum_p / n) if n else 0), round(peak_u)
 
+
+# ── Local-LLM model registry (ollama) ─────────────────────────────────────────
+# Read-only inventory of the models pulled to this host's ollama. Self-contained:
+# a small /api/ps (resident) + /api/tags (on-disk) poller, cached briefly so a
+# chatty UI can't hammer ollama. No generation, no GPU spin, no secret leak.
+COPILOT_OLLAMA_URL = os.environ.get("COPILOT_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+COPILOT_ENABLED    = os.environ.get("COPILOT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_CACHE = None            # {"ts": int, "models": [...], "reachable": bool}
+_REGISTRY_TTL = float(os.environ.get("COPILOT_REGISTRY_TTL", "45"))  # seconds
+
+
+def _llm_resident_models():
+    """Poll ollama GET /api/ps for currently-LOADED models. Read-only, short
+    timeout, stdlib only. Returns (list, reachable). Each entry:
+    {name, size_mb, vram_mb, gpu_fraction, keep_alive_sec}. gpu_fraction is the
+    share of the model resident in VRAM (size_vram/size) — surfaces GPU vs CPU
+    offload. keep_alive_sec is seconds until expires_at (keep-alive countdown).
+
+    MUST be called OUTSIDE any held LOCK (it does network I/O)."""
+    if not COPILOT_ENABLED:
+        return [], False
+    url = COPILOT_OLLAMA_URL + "/api/ps"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return [], False
+    return _parse_resident_models(data), True
+
+
+def _parse_resident_models(data, now=None):
+    """Parse an ollama /api/ps payload into the resident-model list. Pure →
+    unit-testable. Tolerates missing/odd fields."""
+    now = now or time.time()
+    out = []
+    for m in (data or {}).get("models", []) if isinstance(data, dict) else []:
+        name = m.get("name") or m.get("model")
+        if not name:
+            continue
+        size = m.get("size") or 0
+        vram = m.get("size_vram") or 0
+        frac = round(vram / size, 3) if size > 0 else None
+        keep = None
+        exp = m.get("expires_at")
+        if exp:
+            try:
+                # ollama emits RFC3339, e.g. 2026-06-21T12:00:00.123456789Z or +TZ
+                from datetime import datetime
+                s = exp.strip()
+                # python's fromisoformat handles offsets; trim ns to µs and Z
+                s = re.sub(r"(\.\d{6})\d+", r"\1", s).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                keep = int(dt.timestamp() - now)
+            except Exception:
+                keep = None
+        out.append({
+            "name": name,
+            "size_mb": round(size / 1048576) if size else None,
+            "vram_mb": round(vram / 1048576) if vram else None,
+            "gpu_fraction": frac,
+            "keep_alive_sec": keep,
+        })
+    return out
+
+
+def _parse_model_registry(tags, resident=None):
+    """Parse an ollama /api/tags payload into the installed-model inventory. Pure
+    → unit-testable. Cross-references the resident set (by model name) to flag
+    which entries are loaded right now and surface their live VRAM. Tolerates
+    missing/odd fields; never raises.
+
+    Each entry: {name, size_bytes, size_gb, family, param_size, quant, modified,
+    loaded(bool), vram_mb}."""
+    res_by_name = {}
+    for m in (resident or []):
+        nm = m.get("name")
+        if nm:
+            res_by_name[nm] = m
+    out = []
+    for m in (tags or {}).get("models", []) if isinstance(tags, dict) else []:
+        name = m.get("name") or m.get("model")
+        if not name:
+            continue
+        size = m.get("size") or 0
+        det = m.get("details") or {}
+        r = res_by_name.get(name)
+        out.append({
+            "name": name,
+            "size_bytes": size,
+            "size_gb": round(size / 1073741824, 2) if size else 0.0,
+            "family": det.get("family") or None,
+            "param_size": det.get("parameter_size") or None,
+            "quant": det.get("quantization_level") or None,
+            "modified": m.get("modified_at") or m.get("modified") or None,
+            "loaded": r is not None,
+            "vram_mb": (r or {}).get("vram_mb"),
+        })
+    # Largest on disk first — the inventory's natural "what's eating my disk" sort.
+    out.sort(key=lambda x: x["size_bytes"] or 0, reverse=True)
+    return out
+
+
+def _registry_totals(models):
+    """Header summary for the registry: count, total disk bytes/GB, loaded count.
+    Pure."""
+    total = sum(m.get("size_bytes") or 0 for m in models)
+    return {
+        "count": len(models),
+        "loaded": sum(1 for m in models if m.get("loaded")),
+        "total_bytes": total,
+        "total_gb": round(total / 1073741824, 2) if total else 0.0,
+    }
+
+
+def _fetch_model_registry():
+    """Poll ollama GET /api/tags for the on-disk catalogue, cross-referenced with
+    the resident set. Returns (models, reachable). Read-only, short timeout,
+    stdlib only. MUST be called OUTSIDE any held LOCK (network I/O)."""
+    if not COPILOT_ENABLED:
+        return [], False
+    url = COPILOT_OLLAMA_URL + "/api/tags"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=4) as r:
+            tags = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return [], False
+    # Resident cross-ref is best-effort: if /api/ps fails we still return the
+    # on-disk list (just without loaded flags), never an error.
+    resident, _ = _llm_resident_models()
+    return _parse_model_registry(tags, resident), True
+
+
+def _model_registry(now=None):
+    """Cached registry accessor. Serves a fresh fetch at most once per _REGISTRY_TTL
+    so a chatty UI can't hammer ollama. Returns (models, reachable). Network I/O
+    happens OUTSIDE the cache lock."""
+    now = now or time.time()
+    with _REGISTRY_LOCK:
+        c = _REGISTRY_CACHE
+        if c and (now - c["ts"]) < _REGISTRY_TTL:
+            return list(c["models"]), c["reachable"]
+    models, reachable = _fetch_model_registry()
+    with _REGISTRY_LOCK:
+        globals()["_REGISTRY_CACHE"] = {
+            "ts": now, "models": models, "reachable": reachable}
+    return list(models), reachable
+
+
+@app.route("/api/models")
+def api_models():
+    """The Model Registry: the full inventory of models PULLED to disk on this
+    host's ollama (GET /api/tags), cross-referenced with what's loaded right now
+    (/api/ps) so the UI can flag resident models + their live VRAM.
+
+    Always 200, graceful-degrade, never 500, no secret leak (we echo a `reachable`
+    bool, never the URL/creds). Cached ~45s — this is rarely-changing metadata, so
+    a busy tab can't hammer ollama. Read-only: no generation, no GPU spin.
+    /api/tags is polled outside any held LOCK."""
+    models, reachable = _model_registry()
+    return jsonify({
+        "enabled": COPILOT_ENABLED,
+        "ollama_reachable": reachable,
+        "models": models,
+        "totals": _registry_totals(models),
+    })
+
+
 @app.route("/api/integration/keys", methods=["GET", "POST"])
 def api_keys_route():
     """GET -> {keys:[{id,name,prefix,created_at,expires_at,last_used_at,expired,runs}]}
@@ -6580,7 +7055,8 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
-        err = _validate_url_settings(updates)
+        err = (_validate_url_settings(updates) or _validate_email_settings(updates)
+               or _validate_brief_settings(updates))
         if err:
             return jsonify({"ok": False, "error": err}), 400
         save_settings(updates)
@@ -6591,9 +7067,12 @@ def api_notify_test():
     """Send a one-shot test alert using the currently saved settings."""
     s = get_settings()
     if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))
+            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
+            or s.get("slack_webhook_url")
+            or s.get("webhook_url")):
         return jsonify({"ok": False, "results": [],
-                        "reason": "No Discord webhook, ntfy topic, or Telegram bot configured."}), 400
+                        "reason": "No Discord webhook, ntfy topic, Telegram bot, email, Slack webhook, or generic webhook configured."}), 400
     results = dispatch_alert(s, "info",
                              "✅ HomeLab Monitor — test alert",
                              "If you see this, alerts are wired up correctly.")
@@ -6648,13 +7127,701 @@ def api_update_app_status():
     st["self_update_enabled"] = ALLOW_SELF_UPDATE
     return jsonify(st)
 
+@app.route("/api/notify/rules", methods=["GET", "POST"])
+def api_notify_rules():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        action = body.get("action", "add")
+        if action == "add":
+            with LOCK:
+                DB.execute("INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) VALUES (?, ?, ?, ?, ?)",
+                           (body.get("match_kind", "container"), body.get("match_pattern", "*"),
+                            body.get("channel", "all"), body.get("min_level", "warning"),
+                            1 if body.get("enabled", True) else 0))
+                DB.commit()
+        elif action == "update":
+            rule_id = body.get("id")
+            if not rule_id:
+                return jsonify({"ok": False, "error": "id required"}), 400
+            with LOCK:
+                DB.execute("UPDATE notification_rules SET match_kind=?, match_pattern=?, channel=?, min_level=?, enabled=? WHERE id=?",
+                           (body.get("match_kind"), body.get("match_pattern"),
+                            body.get("channel"), body.get("min_level"),
+                            1 if body.get("enabled", True) else 0, rule_id))
+                DB.commit()
+        elif action == "delete":
+            rule_id = body.get("id")
+            if not rule_id:
+                return jsonify({"ok": False, "error": "id required"}), 400
+            with LOCK:
+                DB.execute("DELETE FROM notification_rules WHERE id=?", (rule_id,))
+                DB.commit()
+        else:
+            return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
+        return jsonify({"ok": True, "rules": get_notification_rules()})
+    return jsonify({"rules": get_notification_rules()})
+
+@app.route("/api/notify/rules/test", methods=["POST"])
+def api_notify_rules_test():
+    """Test a notification rule by sending a sample alert that would match it."""
+    body = request.get_json(silent=True) or {}
+    s = get_settings()
+    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
+            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
+        return jsonify({"ok": False, "error": "No notification channels configured."}), 400
+    test_rule = {
+        "match_kind": body.get("match_kind", "container"),
+        "match_pattern": body.get("match_pattern", "*"),
+        "channel": body.get("channel", "all"),
+        "min_level": body.get("min_level", "warning"),
+        "enabled": True,
+    }
+    test_key = f"{test_rule['match_kind']}:test-rule"
+    channels = _apply_rules(test_key, body.get("level", "warning"), [test_rule])
+    if channels is None:
+        return jsonify({"ok": False, "error": "Rule would not match — check kind and pattern."}), 400
+    _dispatch_to_channels(s, body.get("level", "warning"),
+                          "🔔 HomeLab Monitor — rule test",
+                          f"Test of rule: {test_rule['match_kind']} / {test_rule['match_pattern']} → {test_rule['channel']} @ {test_rule['min_level']}",
+                          channels)
+    return jsonify({"ok": True, "channels": list(channels)})
+
+
 @app.route("/")
 def index():
     return app.send_static_file("dashboard.html")
 
+# ── Daily brief (#170) ───────────────────────────────────────────────────────
+# An opt-in, once-a-day HTML health digest assembled from data we already collect
+# (overview + fleet + uptime checks + recent events + GPU/cost). Email gets the
+# full self-contained, inline-styled HTML (survives Gmail/Outlook with no external
+# assets); chat channels get a compact text summary with the things that need
+# attention. Pure stdlib. Each section degrades gracefully when its data is absent.
+# (_BRIEF_CHANNELS is defined up by the settings validators that consume it.)
+
+_BRIEF_PALETTE = {
+    "dark":  {"bg": "#0d1117", "card": "#161b22", "bd": "#30363d", "sub": "#21262d",
+              "tx": "#e6edf3", "mut": "#8b949e", "ok": "#3fb950", "warn": "#d29922",
+              "crit": "#f85149", "accent": "#d29922", "inset": "#0d1117"},
+    "light": {"bg": "#f6f8fa", "card": "#ffffff", "bd": "#d0d7de", "sub": "#eaeef2",
+              "tx": "#1f2328", "mut": "#636c76", "ok": "#1a7f37", "warn": "#9a6700",
+              "crit": "#cf222e", "accent": "#9a6700", "inset": "#f6f8fa"},
+}
+
+def _he(s):
+    """Minimal HTML escape (no new import; the brief never embeds attributes)."""
+    return str("" if s is None else s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _brief_channel_ready(s, ch):
+    """True when channel `ch` has enough config saved to actually deliver."""
+    if ch == "email":    return bool(s.get("email_host") and s.get("email_from") and s.get("email_to"))
+    if ch == "discord":  return bool(s.get("discord_webhook_url"))
+    if ch == "telegram": return bool(s.get("telegram_token") and s.get("telegram_chat_id"))
+    if ch == "ntfy":     return bool(s.get("ntfy_topic"))
+    if ch == "slack":    return bool(s.get("slack_webhook_url"))
+    if ch == "webhook":  return bool(s.get("webhook_url"))
+    return False
+
+def _brief_yesterday_cost():
+    """(cost, kwh, currency) for the previous local calendar day, tariff-aware.
+    (None, None, currency) when cost tracking is off or there were no samples."""
+    ctx = _cost_ctx()
+    cur = ctx.get("currency") or "$"
+    if not ctx.get("day"):                       # no price configured → cost card hidden
+        return None, None, cur
+    now = int(time.time())
+    lt = time.localtime(now)
+    today0 = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+    y0 = today0 - 86400
+    kwh_per = INTERVAL / 3_600_000.0
+    cost = kwh = 0.0
+    try:
+        with LOCK:
+            for ts, w in DB.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? AND ts<?", (y0, today0)):
+                cost += (w or 0) * kwh_per * _price_at(ctx, ts)
+                kwh  += (w or 0) * kwh_per
+    except Exception:
+        return None, None, cur
+    if kwh <= 0:
+        return None, None, cur
+    return round(cost, 2), round(kwh, 2), cur
+
+def _brief_fleet():
+    """Hub + registered hosts with an up/down flag. The hub is always up (we're the
+    one rendering). A registered host counts as up if its last check exists and its
+    summary didn't fail."""
+    out = []
+    host = LATEST.get("host") or {}
+    cpu = round(host.get("cpu", 0) or 0)
+    ram_pct = round(host["ram_used"] / host["ram_total"] * 100) if host.get("ram_total") else 0
+    out.append({"name": host.get("hostname") or "this host", "up": True, "hub": True,
+                "detail": f"{cpu}% CPU · {ram_pct}% RAM"})
+    for h in list_hosts():
+        chk = h.get("last_check") or {}
+        overall = ((chk.get("summary") or {}).get("overall"))
+        up = bool(chk) and overall != "fail"
+        out.append({"name": h.get("name", "?"), "up": up, "hub": False,
+                    "detail": "" if up else "not reachable at last check"})
+    return {"hosts": out, "up": sum(1 for x in out if x["up"]), "total": len(out)}
+
+def _brief_checks():
+    """Uptime rollup: counts, any down, and certs expiring within 21 days. Derived
+    from a SINGLE uptime_overview() read so the counts and the per-check lists can't
+    diverge across two snapshots. The cert list stays empty until per-check TLS
+    expiry (#163) lands — the section just hides it."""
+    checks = [c for c in uptime_overview().get("checks", []) if c.get("enabled")]
+    up = sum(1 for c in checks if c.get("state") == "up")
+    down = sum(1 for c in checks if c.get("state") == "down")
+    summ = {"total": len(checks), "up": up, "down": down,
+            "unknown": len(checks) - up - down,
+            "worst_down": next((c.get("label") for c in checks if c.get("state") == "down"), None)}
+    downs = [c.get("label", "?") for c in checks if c.get("state") == "down"]
+    certs = []
+    for c in checks:
+        cd = c.get("cert_days_remaining")
+        if isinstance(cd, (int, float)) and cd <= 21:
+            certs.append((c.get("label", "?"), int(cd)))
+    return {"summary": summ, "downs": downs, "certs": certs, "enabled": summ["total"] > 0}
+
+def _brief_events(window=86400, limit=8):
+    """Recent rows from the events log (OOM/down/recovery, etc.) over the window."""
+    now = int(time.time())
+    try:
+        with LOCK:
+            rows = DB.execute("SELECT ts, service, kind, detail FROM events "
+                              "WHERE ts>=? ORDER BY ts DESC LIMIT ?", (now - window, limit)).fetchall()
+    except Exception:
+        rows = []
+    return [{"ts": r[0], "service": r[1], "kind": r[2], "detail": r[3]} for r in rows]
+
+def _brief_ai_cost():
+    models = [{"model": m.get("model", "?"), "service": m.get("service", "?"), "vram": m.get("vram")}
+              for m in (LATEST.get("models") or [])]
+    cost, kwh, cur = _brief_yesterday_cost()
+    gpus = LATEST.get("gpus") or []
+    gpu_name = (gpus[0].get("name") if gpus else None) or ((LATEST.get("host") or {}).get("hw") or {}).get("gpu_name")
+    return {"available": bool(LATEST.get("gpu_avail")), "gpu_name": gpu_name,
+            "temp": LATEST.get("temp"), "util": LATEST.get("util"),
+            "mem_used": LATEST.get("mem_used"), "mem_total": LATEST.get("mem_total"),
+            "models": models, "cost": cost, "kwh": kwh, "currency": cur}
+
+def _brief_capacity():
+    """Disks at/above 80% (trending full) + an idle-VRAM squatter when the GPU sits idle."""
+    out = []
+    host = LATEST.get("host") or {}
+    for d in (host.get("disks") or []):
+        if (d.get("pct") or 0) >= 80:
+            out.append(("💾", f"{d.get('mount', '?')} at {round(d.get('pct', 0))}%"))
+    if (LATEST.get("util") or 0) < 5:
+        for m in (LATEST.get("models") or []):
+            if (m.get("vram") or 0) >= 256:
+                out.append(("🅿️", f"{m.get('service', '?')} holding {round(m['vram'])} MB while the GPU is idle"))
+                break
+    return out
+
+def _brief_assemble():
+    """Gather every section's data + derive the headline / action list. One dict."""
+    gpu_avail = LATEST.get("gpu_avail")
+    now = {"gpu": {"util": LATEST.get("util"), "mem_used": LATEST.get("mem_used"),
+                   "mem_total": (LATEST.get("mem_total") or 24576) if gpu_avail else 0,
+                   "power": LATEST.get("power"), "temp": LATEST.get("temp"),
+                   "available": bool(gpu_avail)},
+           "host": LATEST.get("host") or {}}
+    docker  = HEALTH.get("docker")  or {"available": False, "summary": {"total": 0, "running": 0, "problems": 0}, "containers": []}
+    systemd = HEALTH.get("systemd") or {"available": False, "summary": {}, "services": []}
+    overview = build_overview(now, docker, systemd)
+    fleet    = _brief_fleet()
+    checks   = _brief_checks()
+    events   = _brief_events()
+    ai       = _brief_ai_cost()
+    capacity = _brief_capacity()
+
+    actions = []
+    for x in fleet["hosts"]:
+        if not x["up"]:
+            actions.append((2, f"Host {x['name']} is offline"))
+    for lbl in checks["downs"]:
+        actions.append((2, f"Check “{lbl}” is down"))
+    for lbl, d in checks["certs"]:
+        actions.append((1 if d > 7 else 2, f"TLS cert {lbl} expires in {d} day{'s' if d != 1 else ''}"))
+    for c in overview:
+        if c["status"] in ("crit", "warn"):
+            actions.append((2 if c["status"] == "crit" else 1, f"{c['label']}: {c['detail']}"))
+    crit = any(p == 2 for p, _ in actions)
+    actions_text = [t for _, t in sorted(actions, key=lambda a: -a[0])]
+
+    return {"overview": overview, "fleet": fleet, "checks": checks, "events": events,
+            "ai": ai, "capacity": capacity, "actions": actions_text,
+            "issues": len(actions_text), "crit": crit, "now": int(time.time())}
+
+def render_brief(theme="dark"):
+    """Return (html, summary, subject). `html` is a self-contained inline-styled
+    email body; `summary` is the compact text for chat channels; `subject` is the
+    email/notification title."""
+    P = _BRIEF_PALETTE["light"] if theme == "light" else _BRIEF_PALETTE["dark"]
+    d = _brief_assemble()
+    hub = _alert_host_label() or "homelab"
+    when = time.strftime("%a %d %b", time.localtime(d["now"]))
+    issues, crit = d["issues"], d["crit"]
+    fleet, checks, ai = d["fleet"], d["checks"], d["ai"]
+
+    if issues == 0:
+        head_emoji, head_text, head_col = "✅", "All systems healthy", P["ok"]
+        head_sub = "nothing needs you today"
+    else:
+        head_emoji = "🔴" if crit else "🟠"
+        head_text = f"{issues} thing{'s' if issues != 1 else ''} to look at"
+        head_col = P["crit"] if crit else P["warn"]
+        head_sub = "otherwise the lab is healthy"
+
+    cost_kpi = f"{ai['cost']}" if ai["cost"] is not None else "—"
+    cur = ai["currency"]
+    kpis = [(f"{fleet['up']}/{fleet['total']}", "Hosts up", P["ok"] if fleet["up"] == fleet["total"] else P["warn"]),
+            ((f"{checks['summary']['up']}/{checks['summary']['total']}" if checks["enabled"] else "—"),
+             "Checks up", P["ok"] if checks["enabled"] and not checks["downs"] else (P["warn"] if checks["downs"] else P["mut"])),
+            (str(issues), "To look at", head_col if issues else P["ok"]),
+            (cost_kpi, f"{cur} ydy", P["tx"])]
+
+    # ── HTML assembly (table layout, inline styles only) ──────────────────────
+    def head(t):
+        return (f'<tr><td style="padding:18px 24px 6px"><div style="font-size:12px;text-transform:uppercase;'
+                f'letter-spacing:.06em;color:{P["accent"]};font-weight:600">{t}</div></td></tr>')
+    def rows_table(lines):
+        body = "".join(f'<tr><td style="padding:6px 0;border-bottom:1px solid {P["sub"]};'
+                       f'font-size:14px;color:{P["tx"]}">{ln}</td></tr>' for ln in lines)
+        return (f'<tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" '
+                f'cellpadding="0" cellspacing="0">{body}</table></td></tr>')
+
+    parts = []
+    parts.append(f'<tr><td style="padding:20px 24px;border-bottom:1px solid {P["bd"]}">'
+                 f'<table role="presentation" width="100%"><tr>'
+                 f'<td style="font-size:18px;font-weight:700;color:{P["tx"]}">📰 Daily brief</td>'
+                 f'<td align="right" style="font-size:13px;color:{P["mut"]}">{when} · {_he(hub)}</td>'
+                 f'</tr></table></td></tr>')
+    # KPI strip
+    tiles = "".join(
+        f'<td width="25%" style="padding:11px 6px;text-align:center;background:{P["inset"]};'
+        f'border:1px solid {P["sub"]};border-radius:8px">'
+        f'<div style="font-size:20px;font-weight:700;color:{col}">{_he(val)}</div>'
+        f'<div style="font-size:10px;color:{P["mut"]};text-transform:uppercase;letter-spacing:.05em">{_he(lbl)}</div></td>'
+        for val, lbl, col in kpis)
+    parts.append(f'<tr><td style="padding:16px 24px 2px"><table role="presentation" width="100%" '
+                 f'cellpadding="0" cellspacing="6"><tr>{tiles}</tr></table></td></tr>')
+    # headline
+    parts.append(f'<tr><td style="padding:18px 24px"><table role="presentation" width="100%" '
+                 f'style="background:{head_col}1a;border:1px solid {head_col};border-radius:10px">'
+                 f'<tr><td style="padding:14px 16px;font-size:16px;color:{P["tx"]}">'
+                 f'<span style="font-size:20px">{head_emoji}</span> &nbsp;<b>{_he(head_text)}</b> '
+                 f'&nbsp;<span style="color:{P["mut"]}">· {head_sub}</span></td></tr></table></td></tr>')
+    # action needed
+    if d["actions"]:
+        parts.append(head("⚡ Action needed"))
+        parts.append(rows_table([_he(a) for a in d["actions"]]))
+    # fleet
+    parts.append(head("🖥️ Fleet"))
+    fleet_lines = []
+    for x in fleet["hosts"]:
+        dot = "🟢" if x["up"] else "🔴"
+        extra = f' <span style="color:{P["mut"]}">· {_he(x["detail"])}</span>' if x["detail"] else ""
+        tag = " (hub)" if x["hub"] else ""
+        fleet_lines.append(f'{dot} {_he(x["name"])}{tag}{extra}')
+    parts.append(rows_table(fleet_lines))
+    # checks
+    if checks["enabled"]:
+        parts.append(head("📡 Checks"))
+        sm = checks["summary"]
+        clines = [f'{"🟢" if not checks["downs"] else "🔴"} {sm["up"]}/{sm["total"]} checks responding']
+        for lbl in checks["downs"]:
+            clines.append(f'🔴 {_he(lbl)} is down')
+        for lbl, dd in checks["certs"]:
+            clines.append(f'🟠 cert {_he(lbl)} expires in {dd} day{"s" if dd != 1 else ""}')
+        parts.append(rows_table(clines))
+    # alerts (events) last 24h
+    if d["events"]:
+        parts.append(head("🔔 Alerts · last 24h"))
+        elines = []
+        for e in d["events"]:
+            t = time.strftime("%H:%M", time.localtime(e["ts"]))
+            who = e.get("service") or e.get("kind") or "event"
+            elines.append(f'{_he(t)} — {_he(who)}: {_he(e.get("detail") or e.get("kind") or "")}')
+        parts.append(rows_table(elines))
+    # ai & cost
+    parts.append(head("🤖 AI &amp; cost"))
+    ailines = []
+    if ai["available"]:
+        gname = ai["gpu_name"] or "GPU"
+        t = f' · {round(ai["temp"])}°C' if ai.get("temp") is not None else ""
+        ailines.append(f'{_he(gname)}{t} · {len(ai["models"])} model{"s" if len(ai["models"]) != 1 else ""} loaded')
+    else:
+        ailines.append("No GPU detected on the hub")
+    if ai["cost"] is not None:
+        ailines.append(f'Yesterday\'s energy: <b>{ai["cost"]} {_he(cur)}</b> · {ai["kwh"]} kWh')
+    if ai["models"]:
+        names = ", ".join(_he(m["model"]) for m in ai["models"][:4])
+        ailines.append(f'<span style="color:{P["mut"]}">models: {names}</span>')
+    parts.append(rows_table(ailines))
+    # capacity nudges
+    if d["capacity"]:
+        parts.append(head("📈 Capacity nudges"))
+        parts.append(rows_table([f'{ic} {_he(txt)}' for ic, txt in d["capacity"]]))
+    # footer — no CTA link: a brief has no absolute dashboard URL to point at, and
+    # a fragment-only href="#" is stripped/dead in Gmail/Outlook/Apple Mail. The
+    # footer line tells the reader where the brief is configured instead.
+    parts.append(f'<tr><td style="padding:14px 24px;border-top:1px solid {P["bd"]};font-size:12px;color:{P["mut"]}">'
+                 f'HomeLab Monitor v{VERSION} · daily brief from {_he(hub)} · configure in Settings → Alerts</td></tr>')
+
+    html = (f'<!DOCTYPE html><html><body style="margin:0;background:{P["bg"]};padding:24px 0;'
+            f'font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
+            f'<table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" '
+            f'style="width:600px;max-width:92%;margin:0 auto;background:{P["card"]};'
+            f'border:1px solid {P["bd"]};border-radius:12px;overflow:hidden">'
+            f'{"".join(parts)}</table></body></html>')
+
+    # ── compact text summary for chat channels ────────────────────────────────
+    slines = [f'{head_emoji} {head_text}']
+    if d["actions"]:
+        slines.append("")
+        slines.append("⚡ Action needed:")
+        slines += [f'• {a}' for a in d["actions"][:5]]
+    slines.append("")
+    stat = f'🖥️ {fleet["up"]}/{fleet["total"]} up'
+    if checks["enabled"]:
+        stat += f' · 📡 {checks["summary"]["up"]}/{checks["summary"]["total"]} checks'
+    if d["events"]:
+        stat += f' · 🔔 {len(d["events"])} in 24h'
+    if ai["cost"] is not None:
+        stat += f' · 🤖 {ai["cost"]} {cur}'
+    slines.append(stat)
+    summary = "\n".join(slines)
+
+    subject = f"[{hub}] Daily brief — {head_text}"
+    return html, summary, subject
+
+def _send_brief_email(s, subject, html, text):
+    """Send the brief as a multipart email: plain-text fallback + HTML body."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = s["email_from"]
+    msg["To"] = s["email_to"]
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
+    _smtp_send(msg, s["email_host"], s.get("email_port", "587") or 587,
+               s.get("email_use_tls", "1") == "1",
+               s.get("email_username"), s.get("email_password"))
+
+def send_brief(s, channel):
+    """Render and deliver the brief to one channel. Raises on delivery failure."""
+    html, summary, subject = render_brief(s.get("brief_theme", "dark"))
+    if channel == "email":
+        _send_brief_email(s, subject, html, summary)
+    elif channel == "discord":
+        send_discord(s.get("discord_webhook_url"), "info", subject, summary)
+    elif channel == "telegram":
+        _post_to_telegram(s.get("telegram_token"), s.get("telegram_chat_id"), "info", subject, summary)
+    elif channel == "ntfy":
+        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s.get("ntfy_topic"), "info", subject, summary)
+    elif channel == "slack":
+        send_slack(s.get("slack_webhook_url"), "info", subject, summary)
+    elif channel == "webhook":
+        send_webhook(s.get("webhook_url"), "info", subject, summary, _alert_host_label() or "")
+    else:
+        raise ValueError(f"unknown brief channel: {channel}")
+
+_BRIEF_LAST_SENT = {"date": None}
+
+def _brief_due(now=None):
+    """Return (settings, channel, date_str) when a brief should fire right now, else None.
+    Fires once per local day at the configured HH:MM, only if enabled and the chosen
+    channel is configured."""
+    s = get_settings()
+    if s.get("brief_enabled") != "1":
+        return None
+    ch = s.get("brief_channel") or ""
+    if not ch or not _brief_channel_ready(s, ch):
+        return None
+    lt = time.localtime(now or time.time())
+    if time.strftime("%H:%M", lt) != (s.get("brief_time") or "08:00"):
+        return None
+    today = time.strftime("%Y-%m-%d", lt)
+    if _BRIEF_LAST_SENT["date"] == today:
+        return None
+    return s, ch, today
+
+def _brief_run_once(now=None):
+    """One scheduler pass. Returns True if a brief was due (and attempted). The day
+    is claimed *before* the send so a transient failure can't trigger a same-minute
+    retry / duplicate delivery — a daily digest prefers a single best-effort send
+    over risking two."""
+    due = _brief_due(now)
+    if not due:
+        return False
+    s, ch, today = due
+    _BRIEF_LAST_SENT["date"] = today
+    try:
+        send_brief(s, ch)
+        print(f"daily brief sent to {ch}", flush=True)
+    except Exception as e:
+        print("brief send error:", e, flush=True)
+    return True
+
+def brief_worker():
+    """Dedicated daemon: every 30s, send the daily brief if it's due. Inert unless
+    the brief is enabled with a configured channel."""
+    while True:
+        try:
+            _brief_run_once()
+        except Exception as e:
+            print("brief_worker error:", e, flush=True)
+        time.sleep(30)
+
+@app.route("/api/brief/preview")
+def api_brief_preview():
+    """Render the current brief as HTML (the Preview button opens this in a tab)."""
+    theme = request.args.get("theme") or get_settings().get("brief_theme", "dark")
+    html, _, _ = render_brief("light" if theme == "light" else "dark")
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+@app.route("/api/brief/test", methods=["POST"])
+def api_brief_test():
+    """Render + deliver a brief now to the chosen channel (Send-test button)."""
+    s = get_settings()
+    body = request.get_json(silent=True) or {}
+    ch = (body.get("channel") or s.get("brief_channel") or "").strip()
+    if ch not in _BRIEF_CHANNELS:
+        return jsonify({"ok": False, "error": "Pick a channel for the daily brief first."}), 400
+    if not _brief_channel_ready(s, ch):
+        return jsonify({"ok": False, "error": f"The {ch} channel isn't configured yet — fill it in above under Alerts."}), 400
+    try:
+        send_brief(s, ch)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "channel": ch})
+
 threading.Thread(target=collector, daemon=True).start()
 threading.Thread(target=host_poller, daemon=True).start()
 threading.Thread(target=uptime_worker, daemon=True).start()
+threading.Thread(target=brief_worker, daemon=True).start()
+
+
+import os as _os
+
+# ── Public status page: monitors (uptime checks marked public) ────────────────
+# A check appears on the public page only when it is BOTH public=1 and enabled.
+# The index carries a sanitized summary; each service has a fuller read-only
+# detail (uptime windows, daily history, response series, incidents, cert). We
+# never surface the raw target with credentials — only the host (+ port for tcp).
+
+def _public_monitor_host(check):
+    """A display target safe for a public page: the host (and port for tcp),
+    never the path/query or any user:pass credentials."""
+    t = check.get("target") or ""
+    try:
+        if check.get("type") == "tcp":
+            host, port = _parse_host_port(t)
+            return f"{host}:{port}" if host else ""
+        u = urllib.parse.urlsplit(t)
+        host = u.hostname or ""
+        return f"{host}:{u.port}" if u.port else host
+    except Exception:
+        return ""
+
+def _public_monitor(check, now):
+    """One public component for the status page — a single 90-day query yields
+    everything the Statuspage-style row needs: current state, 24h/7d/90d uptime,
+    a day-by-day bar, the recent heartbeat, cert status, and recent incidents.
+    No raw target (host only)."""
+    cid = check["id"]
+    with LOCK:
+        rows = DB.execute(
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at "
+            "FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
+            (cid, now - 7776000)).fetchall()        # 90 days
+    def win(w):
+        sub = [r for r in rows if r[0] >= now - w]
+        return round(100.0 * sum(1 for r in sub if r[1]) / len(sub), 2) if sub else None
+    last = rows[-1] if rows else None
+    state = "unknown" if not last else ("up" if last[1] else "down")
+    cert_days = last[5] if (last and len(last) > 5) else None
+    cert_status = None
+    if cert_days is not None:
+        cert_status = "red" if cert_days <= 7 else "amber" if cert_days <= 21 else "ok"
+    return {
+        "id": cid, "label": check["label"], "type": check["type"],
+        "host": _public_monitor_host(check), "state": state,
+        "last_latency_ms": (last[2] if last else None),
+        "last_checked": (last[0] if last else None),
+        "uptime": win(86400), "uptime7": win(604800), "uptime90": win(7776000),
+        "up_since": _uptime_up_since(rows),
+        "daily": _uptime_daily(rows),
+        "strip": [{"up": bool(r[1]), "t": r[0]} for r in rows[-_UPTIME_STRIP_CELLS:]],
+        "incidents": _uptime_incidents(rows, cap=5),
+        "cert_days_remaining": cert_days, "cert_status": cert_status,
+    }
+
+def _public_monitors(now):
+    """Every public+enabled check as a status-page component, in display order."""
+    return [_public_monitor(c, now) for c in list_uptime_checks()
+            if c.get("public") and c.get("enabled")]
+
+def _public_monitors_summary(monitors):
+    return {"total": len(monitors),
+            "up": sum(1 for m in monitors if m["state"] == "up"),
+            "down": sum(1 for m in monitors if m["state"] == "down")}
+
+def _public_incident_feed(monitors, now, days=14, cap=25):
+    """Recent incidents across all public components, tagged with the service
+    name, most-recent first — drives the page's 'Past incidents' timeline."""
+    cutoff = now - days * 86400
+    feed = []
+    for m in monitors:
+        for inc in m.get("incidents", []):
+            if inc["start"] >= cutoff or (inc.get("end") and inc["end"] >= cutoff):
+                feed.append({"service": m["label"], **inc})
+    feed.sort(key=lambda i: i["start"], reverse=True)
+    return feed[:cap]
+
+def _uptime_window_pct(check_id, now, window):
+    with LOCK:
+        agg = DB.execute("SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
+                         (check_id, now - window)).fetchone()
+    tot = (agg[0] or 0) if agg else 0
+    return round(100.0 * (agg[1] or 0) / tot, 2) if tot else None
+
+def _uptime_up_since(rows):
+    """From ascending [(ts,up,…)] rows, the ts the current contiguous up-run began
+    (None if currently down/unknown or there's no data)."""
+    if not rows or not rows[-1][1]:
+        return None
+    since = rows[-1][0]
+    for r in reversed(rows):
+        if not r[1]:
+            break
+        since = r[0]
+    return since
+
+def _uptime_incidents(rows, cap=20):
+    """Reconstruct down-periods from ascending result rows. Each incident:
+    {start, end|None, duration_s|None, err}. Most-recent first, capped."""
+    incidents, cur = [], None
+    for r in rows:
+        ts, up, err = r[0], r[1], (r[4] if len(r) > 4 else None)
+        if not up and cur is None:
+            cur = {"start": ts, "end": None, "duration_s": None, "err": err or None}
+        elif up and cur is not None:
+            cur["end"] = ts; cur["duration_s"] = ts - cur["start"]
+            incidents.append(cur); cur = None
+    if cur is not None:                      # still down at the end of the window
+        incidents.append(cur)
+    incidents.reverse()
+    return incidents[:cap]
+
+def _uptime_response_series(rows, max_points=120):
+    """Downsample up-result latencies to ~max_points {t, ms} for a sparkline."""
+    pts = [(r[0], r[2]) for r in rows if r[1] and r[2] is not None]
+    if len(pts) > max_points:
+        step = len(pts) / max_points
+        pts = [pts[int(i * step)] for i in range(max_points)]
+    return [{"t": t, "ms": round(ms)} for t, ms in pts]
+
+def _uptime_daily(rows, days=90):
+    """Bucket ascending result rows into per-day {date, up_pct, state} cells
+    (oldest→newest), only for days that actually have samples (≤ days)."""
+    DAY = 86400
+    buckets = {}
+    for r in rows:
+        d = r[0] - (r[0] % DAY)
+        b = buckets.setdefault(d, [0, 0])
+        b[0] += 1; b[1] += 1 if r[1] else 0
+    out = []
+    for d in sorted(buckets)[-days:]:
+        tot, upn = buckets[d]
+        pct = round(100.0 * upn / tot, 2) if tot else None
+        state = "up" if pct == 100 else ("down" if (pct is not None and pct < 100) else "unknown")
+        out.append({"date": d, "up_pct": pct, "state": state})
+    return out
+
+def _public_status_detail(cid, now):
+    """Full read-only detail for one public service, or None if the check isn't
+    public+enabled. Windowed over the retained samples (up to 90 days)."""
+    check = next((c for c in list_uptime_checks() if c["id"] == cid), None)
+    if not check or not (check.get("public") and check.get("enabled")):
+        return None
+    s = _uptime_state(check["id"], now)
+    with LOCK:
+        rows90 = DB.execute(
+            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
+            (check["id"], now - 7776000)).fetchall()         # 90 days
+    rows24 = [r for r in rows90 if r[0] >= now - 86400]
+    return {
+        "id": check["id"], "label": check["label"], "type": check["type"],
+        "host": _public_monitor_host(check),
+        "state": s["state"], "last_latency_ms": s["last_latency_ms"],
+        "last_checked": s["last_checked"], "interval_sec": check["interval_sec"],
+        "up_since": _uptime_up_since(rows90),
+        "uptime": {
+            "24h": _uptime_window_pct(check["id"], now, 86400),
+            "7d":  _uptime_window_pct(check["id"], now, 604800),
+            "30d": _uptime_window_pct(check["id"], now, 2592000),
+            "90d": _uptime_window_pct(check["id"], now, 7776000),
+        },
+        "daily": _uptime_daily(rows90),
+        "response_series": _uptime_response_series(rows24),
+        "incidents": _uptime_incidents(rows90),
+        "cert_days_remaining": s["cert_days_remaining"],
+        "cert_expires_at": s["cert_expires_at"], "cert_status": s["cert_status"],
+    }
+
+def _public_overall_status(cards, monitors):
+    """ok only when every overview card is ok and no public monitor is down;
+    crit if a monitor is down; warn otherwise."""
+    if any(m["state"] == "down" for m in monitors):
+        return "crit"
+    return "ok" if all(c.get("status") == "ok" for c in cards) else "warn"
+
+@app.route("/api/public-status")
+def api_public_status():
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    cfg = get_settings()
+    gpu_avail = LATEST.get("gpu_avail")
+    now = {"gpu": {"util": LATEST.get("util"), "mem_used": LATEST.get("mem_used"),
+                   "mem_total": (LATEST.get("mem_total") or 24576) if gpu_avail else 0,
+                   "power": LATEST.get("power"), "temp": LATEST.get("temp"),
+                   "available": bool(gpu_avail),
+                   "gpus": LATEST.get("gpus") or [],
+                   "extra": LATEST.get("gpu_extra") or {}},
+           "host": LATEST.get("host") or {}}
+    docker  = HEALTH.get("docker")  or {"available": False, "reason": "warming up", "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
+    systemd = HEALTH.get("systemd") or {"available": False, "reason": "warming up", "services": [], "summary": {}}
+    cards = build_overview(now, docker, systemd)
+    safe_cards = [{k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")} for c in cards]
+    _now = int(time.time())
+    monitors = _public_monitors(_now)
+    return jsonify({
+        "lab_name": cfg.get("lab_name", "My HomeLab"),
+        "lab_emoji": cfg.get("lab_emoji", "🏠"),
+        "overview": safe_cards,
+        "monitors": monitors,
+        "monitors_summary": _public_monitors_summary(monitors),
+        "incidents": _public_incident_feed(monitors, _now),
+        "status": _public_overall_status(safe_cards, monitors),
+    })
+
+@app.route("/api/public-status/<cid>")
+def api_public_status_one(cid):
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    detail = _public_status_detail(cid, int(time.time()))
+    if detail is None:
+        abort(404)
+    return jsonify(detail)
+
+@app.route("/public")
+@app.route("/public/<cid>")
+def public_status(cid=None):
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    return send_from_directory("static", "public.html")
 
 if __name__ == "__main__":
     print(

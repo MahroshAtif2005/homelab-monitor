@@ -20,6 +20,7 @@ def _clean_db():
     with app.LOCK:
         app.DB.execute("DELETE FROM uptime_checks")
         app.DB.execute("DELETE FROM uptime_results")
+        app.DB.execute("DELETE FROM notification_rules")
         app.DB.commit()
     app._uptime_due.clear()
     app._uptime_down_since.clear()
@@ -408,6 +409,31 @@ class TestSmartAlerting(unittest.TestCase):
             app.notify_uptime(self.s)
         self.assertEqual(self.sent, [])
 
+    def test_down_routed_by_uptime_rules(self):
+        """Uptime DOWN alerts honour notification_rules with match_kind='uptime'."""
+        with app.LOCK:
+            app.DB.execute("DELETE FROM notification_rules")
+            app.DB.execute(
+                "INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) "
+                "VALUES (?, ?, ?, ?, ?)", ("uptime", "*", "ntfy", "warning", 1))
+            app.DB.commit()
+        cid, _ = app.create_uptime_check(
+            {"label": "x", "type": "tcp", "target": "h:1", "fail_threshold": 1})
+        now = int(time.time())
+        _insert_results(cid, [(now - 1, 0)])
+        s = {"alerts_enabled": "1", "discord_webhook_url": "https://hook",
+             "ntfy_topic": "mytopic", "alert_min_level": "warning"}
+        ntfy_calls, discord_calls = [], []
+        with patch("app.send_ntfy", side_effect=lambda server, topic, level, title, detail:
+                   ntfy_calls.append((level, title))) as mock_ntfy, \
+             patch("app.send_discord", side_effect=lambda webhook, level, title, detail:
+                   discord_calls.append(title)) as mock_discord:
+            app.notify_uptime(s)
+        self.assertEqual(len(ntfy_calls), 1, "rule should route uptime to ntfy")
+        self.assertEqual(ntfy_calls[0][0], "critical")
+        self.assertIn("DOWN", ntfy_calls[0][1])
+        self.assertEqual(discord_calls, [], "rule should suppress default discord channel")
+
     def test_insights_surface_down_and_redact(self):
         app.create_uptime_check(
             {"label": "Immich", "type": "http", "target": "https://user:pw@immich.lan"})
@@ -466,3 +492,114 @@ class TestApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestTlsCertExpiry(unittest.TestCase):
+    """Tests for _tls_cert_days and cert_status surfacing in _uptime_state."""
+
+    def test_cert_days_returns_days_and_expiry(self):
+        """_tls_cert_days parses a real-looking cert notAfter and returns correct days."""
+        import datetime, ssl
+        mock_cert = {"notAfter": "Dec 31 23:59:59 2099 GMT"}
+        mock_ssock = MagicMock()
+        mock_ssock.__enter__ = MagicMock(return_value=mock_ssock)
+        mock_ssock.__exit__ = MagicMock(return_value=False)
+        mock_ssock.getpeercert.return_value = mock_cert
+        mock_ctx_instance = MagicMock()
+        mock_ctx_instance.wrap_socket.return_value = mock_ssock
+        with patch("ssl.SSLContext", return_value=mock_ctx_instance),              patch("socket.create_connection", return_value=MagicMock()):
+            days, expires_at = app._tls_cert_days("example.com", 443, 5)
+        self.assertIsNotNone(days)
+        self.assertGreater(days, 365 * 70)  # far future cert
+        self.assertIsNotNone(expires_at)
+
+    def test_cert_days_returns_none_on_error(self):
+        """_tls_cert_days returns (None, None) on connection error."""
+        with patch("socket.create_connection", side_effect=OSError("refused")):
+            days, expires_at = app._tls_cert_days("bad.host", 443, 1)
+        self.assertIsNone(days)
+        self.assertIsNone(expires_at)
+
+    def test_cert_days_reads_expired_cert_unverified(self):
+        """_tls_cert_days must still return a date for an expired/self-signed cert.
+
+        A verifying SSLContext raises during the handshake on these certs,
+        before getpeercert() ever runs, which silently breaks the expiry
+        monitor at the exact moment it matters. This confirms the context
+        is built with check_hostname=False / verify_mode=CERT_NONE so the
+        unverified read succeeds and yields a negative days_remaining."""
+        import ssl
+        mock_cert = {"notAfter": "Jan 01 00:00:00 2000 GMT"}  # long-expired
+        mock_ssock = MagicMock()
+        mock_ssock.__enter__ = MagicMock(return_value=mock_ssock)
+        mock_ssock.__exit__ = MagicMock(return_value=False)
+        mock_ssock.getpeercert.return_value = mock_cert
+        mock_ctx_instance = MagicMock()
+        mock_ctx_instance.wrap_socket.return_value = mock_ssock
+        with patch("ssl.SSLContext", return_value=mock_ctx_instance) as mock_ctx_cls,              patch("socket.create_connection", return_value=MagicMock()):
+            days, expires_at = app._tls_cert_days("expired.example.com", 443, 5)
+        # The expiry read must succeed unconditionally — this is the exact
+        # case (expired cert) that a verifying context would have raised on.
+        self.assertIsNotNone(days)
+        self.assertIsNotNone(expires_at)
+        self.assertEqual(days, 0)  # max(0, negative_delta) per the function's floor
+        # Confirm the context is unverified, not the verifying default.
+        self.assertEqual(mock_ctx_instance.check_hostname, False)
+        self.assertEqual(mock_ctx_instance.verify_mode, ssl.CERT_NONE)
+
+    def test_cert_status_red_when_le_7_days(self):
+        """cert_status is 'red' when cert_days_remaining <= 7."""
+        _clean_db()
+        cid, _ = app.create_uptime_check(
+            {"label": "tls-test", "type": "http", "target": "https://expiring.example.com"})
+        ts = int(time.time())
+        with app.LOCK:
+            app.DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (cid, ts, 1, 10.0, 200, None, 5, ts + 5 * 86400))
+            app.DB.commit()
+        state = app._uptime_state(cid, ts + 1)
+        self.assertEqual(state["cert_status"], "red")
+        self.assertEqual(state["cert_days_remaining"], 5)
+
+    def test_cert_status_amber_when_le_21_days(self):
+        """cert_status is 'amber' when cert_days_remaining <= 21."""
+        _clean_db()
+        cid, _ = app.create_uptime_check(
+            {"label": "tls-amber", "type": "http", "target": "https://soon.example.com"})
+        ts = int(time.time())
+        with app.LOCK:
+            app.DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (cid, ts, 1, 10.0, 200, None, 15, ts + 15 * 86400))
+            app.DB.commit()
+        state = app._uptime_state(cid, ts + 1)
+        self.assertEqual(state["cert_status"], "amber")
+
+    def test_cert_status_ok_when_gt_21_days(self):
+        """cert_status is 'ok' when cert_days_remaining > 21."""
+        _clean_db()
+        cid, _ = app.create_uptime_check(
+            {"label": "tls-ok", "type": "http", "target": "https://healthy.example.com"})
+        ts = int(time.time())
+        with app.LOCK:
+            app.DB.execute(
+                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (cid, ts, 1, 10.0, 200, None, 60, ts + 60 * 86400))
+            app.DB.commit()
+        state = app._uptime_state(cid, ts + 1)
+        self.assertEqual(state["cert_status"], "ok")
+
+    def test_cert_status_none_for_tcp_check(self):
+        """cert_status is None when no cert data exists (TCP check or no results yet)."""
+        _clean_db()
+        cid, _ = app.create_uptime_check(
+            {"label": "tcp-check", "type": "tcp", "target": "host:443"})
+        ts = int(time.time())
+        _insert_results(cid, [(ts, 1)])
+        state = app._uptime_state(cid, ts + 1)
+        self.assertIsNone(state["cert_status"])
+        self.assertIsNone(state["cert_days_remaining"])
+
