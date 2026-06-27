@@ -10,6 +10,7 @@ release notes.
 **Added**
 - Alerts now support **email (SMTP)**, **Slack incoming webhooks**, and a **generic webhook** target alongside Discord, ntfy and Telegram. All three channels configure from the Alerts settings panel and honour the existing minimum severity + disk threshold rules.
 - **Brand logos for famous services** on the Containers and Services tables. The monitor now shows the recognisable icon (Immich, Plex, Pi-hole, Home Assistant, Postgres, Grafana, n8n, Ollama, and ~60 more) in front of the name, matched from the container image or unit name — faster visual scanning of a busy host. Logos are embedded Simple Icons (MIT), so there are **no runtime external requests**; near-black brands fall back to the theme text colour so they stay visible in dark mode, and unrecognised entries are unchanged.
+- **Installed-models registry on the AI Models tab.** A new panel lists every model **pulled to disk** on this host's local LLM (ollama) — name, on-disk size, params · quantization, a **Loaded** badge (with live VRAM) for models resident right now, and last-modified — with an *N models · X GB on disk · M loaded* header. Read-only (`GET /api/models` → ollama `/api/tags`+`/api/ps`, cached ~45s, always-200 graceful-degrade when ollama is off, no secret leak). Loads on tab view + manual refresh.
 
 **Changed**
 - Wired the new Alerts form labels to the locale files so translated dashboards automatically pick up the email/Slack/webhook copy.
