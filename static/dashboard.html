@@ -5493,11 +5493,17 @@ function mcPaintTri($){
   const pg=$('mc-pct-gpu');
   if(gpu && gpu.available){
     const util=Math.round(gpu.util||0), mt=gpu.mem_total||0, mu=gpu.mem_used||0, tp=Math.round(gpu.temp||0), pw=Math.round(gpu.power||0);
+    const vramPct=mt?Math.round(mu/mt*100):0;
+    // The GPU is "maxed" if EITHER compute (util) OR memory (VRAM) is saturated.
+    // A VRAM-pinned-but-idle card (models loaded, no inference) reads as low util
+    // yet is effectively full — show the binding constraint so the hero matches the
+    // crit VRAM tile + GPU tab instead of contradicting them with a calm util %.
+    const sat=Math.max(util, vramPct);
     if(pg) pg.style.visibility='visible';
-    mcCountUp($('mc-g-gpu'), util, 900, 0);
-    mcSetTriArc('mc-arc-gpu', util, mcTriColor(util,'var(--accent)'));
-    // VRAM (+ temp) on line one; live power draw on its own line below it.
-    $('mc-sub-gpu').innerHTML = esc((mt?(fmtMB(mu)+' / '+fmtMB(mt)):'GPU') + (tp?(' · '+tp+'°C'):''))
+    mcCountUp($('mc-g-gpu'), sat, 900, 0);
+    mcSetTriArc('mc-arc-gpu', sat, mcTriColor(sat,'var(--accent)'));
+    // VRAM + util (+ temp) on line one; live power draw on its own line below it.
+    $('mc-sub-gpu').innerHTML = esc((mt?(fmtMB(mu)+' / '+fmtMB(mt)):'GPU') + ' · '+util+'% util' + (tp?(' · '+tp+'°C'):''))
       + (pw?`<span class="mc-tg-pwr">${pw} W</span>`:'');
   } else {
     $('mc-g-gpu').textContent='—'; if(pg) pg.style.visibility='hidden';

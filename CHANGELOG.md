@@ -7,6 +7,12 @@ release notes.
 
 ## [Unreleased]
 
+## [0.22.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.22.1) — 2026-06-27 · **Hero engine GPU gauge tells the truth about a full card**
+*A small fix so the Overview's "Lab's Engine" GPU gauge stops reading calm when the card is actually maxed.*
+
+**Fixed**
+- **Overview engine GPU gauge now reflects VRAM saturation, not just compute util.** A GPU with models loaded but no inference running (low util, ~full VRAM) was showing a calm low number on the hero engine gauge while the GPU tab and the Overview status tile both correctly flagged it **crit** at ~94% VRAM. The gauge now reads the *binding constraint* — `max(util%, VRAM%)` — so a memory-pinned card lights up to match the rest of the UI, with both VRAM and `% util` shown in the line beneath.
+
 ## [0.22.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.22.0) — 2026-06-27 · **A real status page — public lab health, plus a page per service**
 *The throwaway `/public` page is reborn in the app's own skin: overall lab health, a live list of the services you watch, and a dedicated status page for each one — uptime over 24h/7d/30d/90d, incident history and response times. Alerts also gain email, Slack and generic-webhook channels, services get brand logos, and the AI Models tab now lists every model pulled to disk.*
 
