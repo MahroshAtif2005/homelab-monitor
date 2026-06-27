@@ -638,6 +638,7 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .badge.warn{color:var(--warn);background:var(--warnbg);border-color:transparent}
 .badge.ok{color:var(--ok);background:var(--okbg);border-color:transparent}
 .badge.info{color:var(--mut);background:var(--inset);border-color:var(--bd)}
+.badge.maint{color:#58a6ff;background:#0d1117;border-color:#58a6ff55}
 .sdot{border-radius:2px}.dot{border-radius:2px}
 .rb.on{box-shadow:none}
 /* AI Models — expandable rows + per-model VRAM timeline */
@@ -3835,9 +3836,12 @@ function upCard(c){
     : '';
   const tgt=c.type==='http'?c.target:(I18N.t('uptime.tcp_prefix','TCP')+' '+c.target);
   const dotcls=st==='up'?'mc-on':st==='down'?'mc-offdot':'';
-  const pill=st==='up'?`<span class="mc-pill mc-pill-ok">${esc(upStateLabel(st))}</span>`
-           :st==='down'?`<span class="mc-pill mc-pill-crit">${esc(upStateLabel(st))}</span>`
-           :`<span class="mc-pill" style="color:var(--mut);border-color:var(--bd)">${esc(upStateLabel(st))}</span>`;
+  const maintPill=c.in_maintenance?`<span class="badge maint" style="margin-left:6px">${esc(I18N.t('uptime.in_maintenance','🔧 maintenance'))}</span>`:'';
+  const pill=c.in_maintenance
+    ? `<span class="mc-pill" style="color:#58a6ff;border-color:#58a6ff55">${esc(I18N.t('uptime.maintenance','In maintenance'))}</span>`
+    : st==='up'?`<span class="mc-pill mc-pill-ok">${esc(upStateLabel(st))}</span>`
+    : st==='down'?`<span class="mc-pill mc-pill-crit">${esc(upStateLabel(st))}</span>`
+    : `<span class="mc-pill" style="color:var(--mut);border-color:var(--bd)">${esc(upStateLabel(st))}</span>`;
   let err='';
   if(st==='down' && c.last_err) err=`<div class="uperr">${esc(c.last_err)}</div>`;
   // alert line: bell state + (if down) how long it's been down (from the heartbeat)

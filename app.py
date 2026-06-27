@@ -157,6 +157,14 @@ CREATE INDEX IF NOT EXISTS idx_runs_started   ON runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_runmetrics_rid ON run_metrics(run_id, key, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_runs_ext ON runs(source, ext_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_event ON events(ts, service, kind);
+-- Maintenance windows: silence alerts for selected checks/services during planned work.
+-- kind matches the alert key prefix (container, systemd, uptime, disk, gpu, host).
+-- pattern is fnmatch-style (* = all). recurrence: null=one-off, 'daily', 'weekly'.
+CREATE TABLE IF NOT EXISTS maintenance_windows(
+  id TEXT PRIMARY KEY, label TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT '*', pattern TEXT NOT NULL DEFAULT '*',
+  start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
+  recurrence TEXT, note TEXT, created_at INTEGER NOT NULL);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
@@ -4254,7 +4262,11 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
 def uptime_overview(window=86400):
     """All checks + their current state. The user-facing private payload."""
     now = int(time.time())
-    out = [{**c, **_uptime_state(c["id"], now, window)} for c in list_uptime_checks()]
+    out = []
+    for c in list_uptime_checks():
+        state = _uptime_state(c["id"], now, window)
+        in_maint = _in_maintenance("uptime", c["id"]) or _in_maintenance("uptime", c.get("label", ""))
+        out.append({**c, **state, "in_maintenance": in_maint})
     return {"checks": out, "now": now, "window": window,
             "min_interval": _UPTIME_MIN_INTERVAL, "max_timeout": _UPTIME_MAX_TIMEOUT}
 
@@ -4547,6 +4559,11 @@ def _emit(s, key, level, title, detail, rules=None):
     """Fire an alert once per edge. Skips below the configured min level."""
     if LEVELS.get(level, 0) < LEVELS.get(s.get("alert_min_level", "warning"), 1):
         return
+    # Suppress alerts during active maintenance windows.
+    # key format: "kind:name" or "kind:subkind:name"
+    _parts = key.split(":", 1)
+    if len(_parts) == 2 and _in_maintenance(_parts[0], _parts[1]):
+        return
     with _NOTIFIER_LOCK:
         if _NOTIFIED.get(key):
             return
@@ -4562,6 +4579,62 @@ def _emit(s, key, level, title, detail, rules=None):
 def _clear(key):
     with _NOTIFIER_LOCK:
         _NOTIFIED.pop(key, None)
+
+def _in_maintenance(kind, name):
+    """Return True if kind:name is currently covered by an active maintenance window."""
+    now = int(time.time())
+    with LOCK:
+        rows = DB.execute(
+            "SELECT kind, pattern, start_ts, end_ts, recurrence FROM maintenance_windows"
+        ).fetchall()
+    for row_kind, pattern, start_ts, end_ts, recurrence in rows:
+        # kind must match or be wildcard
+        if row_kind != "*" and row_kind != kind:
+            continue
+        # pattern must match name
+        if not fnmatch.fnmatch(name, pattern):
+            continue
+        if recurrence is None:
+            if start_ts <= now <= end_ts:
+                return True
+        elif recurrence == "daily":
+            window_len = end_ts - start_ts
+            elapsed = (now - start_ts) % 86400
+            if 0 <= elapsed <= window_len:
+                return True
+        elif recurrence == "weekly":
+            window_len = end_ts - start_ts
+            elapsed = (now - start_ts) % (86400 * 7)
+            if 0 <= elapsed <= window_len:
+                return True
+    return False
+
+def list_maintenance_windows():
+    with LOCK:
+        rows = DB.execute(
+            "SELECT id, label, kind, pattern, start_ts, end_ts, recurrence, note, created_at "
+            "FROM maintenance_windows ORDER BY start_ts"
+        ).fetchall()
+    return [{"id": r[0], "label": r[1], "kind": r[2], "pattern": r[3],
+             "start_ts": r[4], "end_ts": r[5], "recurrence": r[6],
+             "note": r[7], "created_at": r[8]} for r in rows]
+
+def create_maintenance_window(label, kind, pattern, start_ts, end_ts, recurrence=None, note=None):
+    wid = uuid.uuid4().hex
+    with LOCK:
+        DB.execute(
+            "INSERT INTO maintenance_windows(id,label,kind,pattern,start_ts,end_ts,recurrence,note,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (wid, label, kind or "*", pattern or "*", int(start_ts), int(end_ts),
+             recurrence or None, note or None, int(time.time()))
+        )
+        DB.commit()
+    return wid
+
+def delete_maintenance_window(wid):
+    with LOCK:
+        DB.execute("DELETE FROM maintenance_windows WHERE id=?", (wid,))
+        DB.commit()
 
 def notify_scan():
     s = get_settings()
@@ -4725,6 +4798,11 @@ def notify_uptime(s):
         down_key, slow_key, rec_key = f"uptime:down:{cid}", f"uptime:slow:{cid}", f"uptime:rec:{cid}"
         if not c["enabled"] or not c["alerts_enabled"]:
             _clear(down_key); _clear(slow_key); _uptime_down_since.pop(cid, None)
+            continue
+        # Skip alerting entirely while this check is in a maintenance window.
+        if _in_maintenance("uptime", cid) or _in_maintenance("uptime", c.get("label", "")):
+            _clear(down_key); _clear(slow_key); _clear(cert_key if "cert_key" in dir() else f"uptime:cert:{cid}")
+            _uptime_down_since.pop(cid, None)
             continue
         thr = max(1, int(c.get("fail_threshold") or 2))
         st = _uptime_state(cid, now)
@@ -6918,6 +6996,41 @@ def api_uptime_one(cid):
     if ok:
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": err}), (404 if err == "not found" else 400)
+
+@app.route("/api/maintenance", methods=["GET", "POST"])
+def api_maintenance():
+    """List maintenance windows (GET) or create one (POST)."""
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        label = (body.get("label") or "").strip()
+        if not label:
+            return jsonify({"ok": False, "error": "label is required"}), 400
+        start_ts = body.get("start_ts")
+        end_ts   = body.get("end_ts")
+        if not start_ts or not end_ts:
+            return jsonify({"ok": False, "error": "start_ts and end_ts are required"}), 400
+        if int(end_ts) <= int(start_ts):
+            return jsonify({"ok": False, "error": "end_ts must be after start_ts"}), 400
+        recurrence = body.get("recurrence") or None
+        if recurrence and recurrence not in ("daily", "weekly"):
+            return jsonify({"ok": False, "error": "recurrence must be daily, weekly, or null"}), 400
+        wid = create_maintenance_window(
+            label=label,
+            kind=body.get("kind") or "*",
+            pattern=body.get("pattern") or "*",
+            start_ts=start_ts,
+            end_ts=end_ts,
+            recurrence=recurrence,
+            note=body.get("note"),
+        )
+        return jsonify({"ok": True, "id": wid}), 201
+    return jsonify(list_maintenance_windows())
+
+@app.route("/api/maintenance/<wid>", methods=["DELETE"])
+def api_maintenance_one(wid):
+    """Delete a maintenance window."""
+    delete_maintenance_window(wid)
+    return jsonify({"ok": True})
 
 @app.route("/api/update/app", methods=["POST"])
 def api_update_app():
