@@ -7625,28 +7625,60 @@ def _public_monitor_host(check):
     except Exception:
         return ""
 
+def _public_monitor(check, now):
+    """One public component for the status page — a single 90-day query yields
+    everything the Statuspage-style row needs: current state, 24h/7d/90d uptime,
+    a day-by-day bar, the recent heartbeat, cert status, and recent incidents.
+    No raw target (host only)."""
+    cid = check["id"]
+    with LOCK:
+        rows = DB.execute(
+            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at "
+            "FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
+            (cid, now - 7776000)).fetchall()        # 90 days
+    def win(w):
+        sub = [r for r in rows if r[0] >= now - w]
+        return round(100.0 * sum(1 for r in sub if r[1]) / len(sub), 2) if sub else None
+    last = rows[-1] if rows else None
+    state = "unknown" if not last else ("up" if last[1] else "down")
+    cert_days = last[5] if (last and len(last) > 5) else None
+    cert_status = None
+    if cert_days is not None:
+        cert_status = "red" if cert_days <= 7 else "amber" if cert_days <= 21 else "ok"
+    return {
+        "id": cid, "label": check["label"], "type": check["type"],
+        "host": _public_monitor_host(check), "state": state,
+        "last_latency_ms": (last[2] if last else None),
+        "last_checked": (last[0] if last else None),
+        "uptime": win(86400), "uptime7": win(604800), "uptime90": win(7776000),
+        "up_since": _uptime_up_since(rows),
+        "daily": _uptime_daily(rows),
+        "strip": [{"up": bool(r[1]), "t": r[0]} for r in rows[-_UPTIME_STRIP_CELLS:]],
+        "incidents": _uptime_incidents(rows, cap=5),
+        "cert_days_remaining": cert_days, "cert_status": cert_status,
+    }
+
 def _public_monitors(now):
-    """Index summary of every public+enabled check: label, host, state, 24h/7d
-    uptime, last latency, heartbeat strip, cert status. No raw target."""
-    out = []
-    for c in list_uptime_checks():
-        if not (c.get("public") and c.get("enabled")):
-            continue
-        s = _uptime_state(c["id"], now)
-        out.append({
-            "id": c["id"], "label": c["label"], "type": c["type"],
-            "host": _public_monitor_host(c),
-            "state": s["state"], "uptime": s["uptime"], "uptime7": s["uptime7"],
-            "last_latency_ms": s["last_latency_ms"], "last_checked": s["last_checked"],
-            "strip": s["strip"],
-            "cert_days_remaining": s["cert_days_remaining"], "cert_status": s["cert_status"],
-        })
-    return out
+    """Every public+enabled check as a status-page component, in display order."""
+    return [_public_monitor(c, now) for c in list_uptime_checks()
+            if c.get("public") and c.get("enabled")]
 
 def _public_monitors_summary(monitors):
     return {"total": len(monitors),
             "up": sum(1 for m in monitors if m["state"] == "up"),
             "down": sum(1 for m in monitors if m["state"] == "down")}
+
+def _public_incident_feed(monitors, now, days=14, cap=25):
+    """Recent incidents across all public components, tagged with the service
+    name, most-recent first — drives the page's 'Past incidents' timeline."""
+    cutoff = now - days * 86400
+    feed = []
+    for m in monitors:
+        for inc in m.get("incidents", []):
+            if inc["start"] >= cutoff or (inc.get("end") and inc["end"] >= cutoff):
+                feed.append({"service": m["label"], **inc})
+    feed.sort(key=lambda i: i["start"], reverse=True)
+    return feed[:cap]
 
 def _uptime_window_pct(check_id, now, window):
     with LOCK:
@@ -7763,13 +7795,15 @@ def api_public_status():
     systemd = HEALTH.get("systemd") or {"available": False, "reason": "warming up", "services": [], "summary": {}}
     cards = build_overview(now, docker, systemd)
     safe_cards = [{k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")} for c in cards]
-    monitors = _public_monitors(int(time.time()))
+    _now = int(time.time())
+    monitors = _public_monitors(_now)
     return jsonify({
         "lab_name": cfg.get("lab_name", "My HomeLab"),
         "lab_emoji": cfg.get("lab_emoji", "🏠"),
         "overview": safe_cards,
         "monitors": monitors,
         "monitors_summary": _public_monitors_summary(monitors),
+        "incidents": _public_incident_feed(monitors, _now),
         "status": _public_overall_status(safe_cards, monitors),
     })
 
