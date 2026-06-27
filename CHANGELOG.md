@@ -7,6 +7,9 @@ release notes.
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.22.0) — 2026-06-27 · **A real status page — public lab health, plus a page per service**
+*The throwaway `/public` page is reborn in the app's own skin: overall lab health, a live list of the services you watch, and a dedicated status page for each one — uptime over 24h/7d/30d/90d, incident history and response times. Alerts also gain email, Slack and generic-webhook channels, services get brand logos, and the AI Models tab now lists every model pulled to disk.*
+
 **Added**
 - **A proper status page — overview + a page per monitored service.** The public page (`/public`) is rebuilt in the app's own design system (it was a bare throwaway before): the lab's system health *plus* a list of the services you monitor on the Uptime tab, each with a live heartbeat, 24h uptime and latency. Click any service for its **own status page** (`/public/<id>`) — current state and how long it's held, uptime over **24h / 7d / 30d / 90d**, a day-by-day history bar, a response-time chart, and a reconstructed list of past incidents (when it went down, for how long, and why), plus TLS-cert days-remaining. Each Uptime check has a new **"public" toggle** (off by default) so you choose exactly what's listed; the whole page stays gated behind `PUBLIC_STATUS`, and only the service name + host are ever exposed — never the raw target or credentials. New read-only endpoints: `GET /api/public-status` (now includes the monitors) and `GET /api/public-status/<id>`.
 - Alerts now support **email (SMTP)**, **Slack incoming webhooks**, and a **generic webhook** target alongside Discord, ntfy and Telegram. All three channels configure from the Alerts settings panel and honour the existing minimum severity + disk threshold rules.
