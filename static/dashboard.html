@@ -1409,10 +1409,12 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 .mc-tg-ring svg{ width:100%; height:100%; display:block; overflow:visible }
 .mc-tg-track{ stroke:var(--bd) }
 .mc-tg-arc{ transition:stroke-dashoffset 1.1s cubic-bezier(.2,.8,.2,1), stroke .35s }
-.mc-tg-center{ position:absolute; inset:0; display:flex; align-items:baseline; justify-content:center }
+/* The number+% sit as one tight pair, centred inside the ring. */
+.mc-tg-center{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center }
 .mc-tg-num{ font-family:var(--mono); font-size:30px; font-weight:700; color:var(--tx); line-height:1; font-variant-numeric:tabular-nums }
-/* % rides on the number's baseline, right after it — reads as "42%", not a detached superscript */
-.mc-tg-pct{ font-family:var(--mono); font-size:16px; font-weight:600; color:var(--mut); margin-left:1px }
+/* % sits inline right after the number (reads as "42%"), vertically centred with
+   it — not a detached superscript, and the whole pair stays centred in the circle. */
+.mc-tg-pct{ font-family:var(--mono); font-size:16px; font-weight:600; color:var(--mut); margin-left:2px }
 .mc-tg-label{ font-size:11px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:var(--tx) }
 .mc-tg-sub{ font-size:10px; color:var(--mut); font-family:var(--mono); text-align:center; line-height:1.35; min-height:14px }
 /* GPU power draw — its own line under the VRAM sub, accent-tinted so the watts read at a glance */
