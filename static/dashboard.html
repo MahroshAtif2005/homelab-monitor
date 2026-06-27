@@ -2367,6 +2367,11 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
           </div>
         </div>
 
+        <label class="upalert-row" style="display:flex;align-items:center;gap:9px;margin-top:12px">
+          <input type="checkbox" id="up_public">
+          <span data-i18n-html="uptime.f_public"><b>Show on the public status page</b> — adds this service to <code>/public</code> (off by default; the page itself stays gated by <code>PUBLIC_STATUS</code>).</span>
+        </label>
+
         <div id="up_form_err" class="ins critical" style="display:none"></div>
         <div class="upform-actions">
           <button type="button" class="rb on" id="up_add_btn" data-i18n="uptime.add_btn">Add check</button>
@@ -4068,6 +4073,7 @@ function upCard(c){
     <div class="uphead">
       <span class="mc-sdot ${dotcls}"></span>
       <div class="uplabel">${esc(c.label)}${c.enabled?'':' <span class="cap">('+esc(I18N.t('uptime.disabled','paused'))+')</span>'}</div>
+      ${c.public?`<span class="mc-pill" style="color:var(--info);border-color:var(--info)" title="${esc(I18N.t('uptime.public_t','Listed on the public status page'))}">${esc(I18N.t('uptime.public','public'))}</span>`:''}
       ${pill}
     </div>
     <div class="uptarget">${esc(tgt)}</div>
@@ -4083,6 +4089,7 @@ function upCard(c){
     ${bell}
     <div class="upactions">
       <button type="button" class="btn-mini" data-act="toggle" data-id="${esc(c.id)}" data-en="${c.enabled?1:0}">${esc(c.enabled?I18N.t('uptime.pause','Pause'):I18N.t('uptime.resume','Resume'))}</button>
+      <button type="button" class="btn-mini" data-act="public" data-id="${esc(c.id)}" data-pub="${c.public?1:0}">${esc(c.public?I18N.t('uptime.make_private','Make private'):I18N.t('uptime.make_public','Make public'))}</button>
       <button type="button" class="btn-mini" data-act="edit" data-id="${esc(c.id)}">${esc(I18N.t('uptime.edit','Edit'))}</button>
       <button type="button" class="btn-mini danger" data-act="del" data-id="${esc(c.id)}" data-label="${esc(c.label)}">${esc(I18N.t('uptime.delete','Delete'))}</button>
     </div>
@@ -4101,6 +4108,7 @@ async function loadUptime(){
       const id=b.dataset.id, act=b.dataset.act;
       if(act==='del'){ if(!confirm(I18N.tf('uptime.confirm_del','Delete check "{n}"?',{n:b.dataset.label}))) return; upDelete(id); }
       else if(act==='edit'){ upBeginEdit(id); }
+      else if(act==='public'){ upSetPublic(id, b.dataset.pub!=='1'); }
       else { upToggle(id, b.dataset.en!=='1'); }
     };
   });
@@ -4109,6 +4117,7 @@ async function loadUptime(){
 }
 async function upDelete(id){ try{ await fetch('/api/uptime/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){} loadUptime(); }
 async function upToggle(id, enabled){ try{ await fetch('/api/uptime/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})}); }catch(e){} loadUptime(); }
+async function upSetPublic(id, pub){ try{ await fetch('/api/uptime/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({public:pub})}); }catch(e){} loadUptime(); }
 function upSyncTypeUI(){
   const t=document.getElementById('up_type').value;
   const tl=document.getElementById('up_target_label'), inp=document.getElementById('up_target'), exp=document.getElementById('up_expected_wrap');
@@ -4128,6 +4137,7 @@ function upResetForm(){
   document.getElementById('up_interval').value=60; document.getElementById('up_timeout').value=10;
   document.getElementById('up_threshold').value=2;
   document.getElementById('up_alerts').checked=true; document.getElementById('up_latency_on').checked=false;
+  document.getElementById('up_public').checked=false;
   document.getElementById('up_add_btn').textContent=I18N.t('uptime.add_btn','Add check');
   document.getElementById('up_edit_hint').style.display='none';
   document.getElementById('up_form_err').style.display='none';
@@ -4148,6 +4158,7 @@ function upBeginEdit(id){
   document.getElementById('up_expected').value=c.expected_status||'';
   document.getElementById('up_threshold').value=c.fail_threshold||2;
   document.getElementById('up_alerts').checked=!!c.alerts_enabled;
+  document.getElementById('up_public').checked=!!c.public;
   document.getElementById('up_latency_on').checked=c.latency_warn_ms!=null;
   document.getElementById('up_latency').value=c.latency_warn_ms||'';
   document.getElementById('up_add_btn').textContent=I18N.t('uptime.save_btn','Save changes');
@@ -4165,6 +4176,7 @@ function upFormBody(){
     timeout_sec:document.getElementById('up_timeout').value,
     alerts_enabled:document.getElementById('up_alerts').checked,
     fail_threshold:document.getElementById('up_threshold').value,
+    public:document.getElementById('up_public').checked,
   };
   const ev=document.getElementById('up_expected').value;
   if(body.type==='http' && ev) body.expected_status=ev;

@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.21.1"
+VERSION      = "0.22.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -166,6 +166,8 @@ _HOST_MIGRATIONS = ("poll_timeout INTEGER", "poll_fails INTEGER DEFAULT 0", "pol
 # Which API key pushed a run (for per-key attribution); added to the runs table.
 _RUNS_MIGRATIONS = ("key_id TEXT",)
 _UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
+# Per-check opt-in to the public status page (off by default).
+_UPTIME_CHECK_MIGRATIONS = ("public INTEGER NOT NULL DEFAULT 0",)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -203,6 +205,11 @@ def _apply_schema_migrations(conn):
     for col in _UPTIME_MIGRATIONS:
         try:
             conn.execute(f"ALTER TABLE uptime_results ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in _UPTIME_CHECK_MIGRATIONS:
+        try:
+            conn.execute(f"ALTER TABLE uptime_checks ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     # Migrate a legacy single instance-wide api_key (the previous design) into the
@@ -3884,10 +3891,11 @@ _uptime_down_since = {}        # check_id -> wall-clock ts the current DOWN stre
 def _uptime_row_to_dict(r):
     cols = ("id", "label", "type", "target", "interval_sec", "timeout_sec",
             "expected_status", "alerts_enabled", "fail_threshold", "latency_warn_ms",
-            "enabled", "created_at")
+            "enabled", "created_at", "public")
     d = dict(zip(cols, r))
     d["enabled"] = bool(d["enabled"])
     d["alerts_enabled"] = bool(d["alerts_enabled"])
+    d["public"] = bool(d.get("public"))
     return d
 
 _CRED_RE = re.compile(r"(://)[^/\s:@]+:[^/\s@]+@")
@@ -3902,7 +3910,7 @@ def list_uptime_checks():
     with LOCK:
         rows = DB.execute(
             "SELECT id,label,type,target,interval_sec,timeout_sec,expected_status,"
-            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at "
+            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public "
             "FROM uptime_checks ORDER BY created_at").fetchall()
     return [_uptime_row_to_dict(r) for r in rows]
 
@@ -4010,7 +4018,8 @@ def _validate_uptime_check(body):
             "expected_status": expected,
             "alerts_enabled": 1 if body.get("alerts_enabled", True) else 0,
             "fail_threshold": fail_threshold, "latency_warn_ms": latency_warn,
-            "enabled": 1 if body.get("enabled", True) else 0}, None
+            "enabled": 1 if body.get("enabled", True) else 0,
+            "public": 1 if body.get("public") else 0}, None
 
 def create_uptime_check(body):
     clean, err = _validate_uptime_check(body)
@@ -4020,11 +4029,12 @@ def create_uptime_check(body):
     with LOCK:
         DB.execute(
             "INSERT INTO uptime_checks(id,label,type,target,interval_sec,timeout_sec,"
-            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
              clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time())))
+             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
+             clean["public"]))
         DB.commit()
     _uptime_due.pop(cid, None)   # probe promptly on next scheduler pass
     return cid, None
@@ -4036,11 +4046,16 @@ def update_uptime_check(cid, body):
         return False, "not found"
     if not body:
         return False, "empty update"
-    # Quick enable/disable toggle without full revalidation.
-    if "enabled" in body and set(body.keys()) <= {"enabled"}:
+    # Quick toggles without full revalidation: enabled (pause/resume) and/or public
+    # (show on the public status page). Accepts either alone or both together.
+    if body and set(body.keys()) <= {"enabled", "public"}:
+        sets, vals = [], []
+        if "enabled" in body:
+            sets.append("enabled=?"); vals.append(1 if body.get("enabled") else 0)
+        if "public" in body:
+            sets.append("public=?"); vals.append(1 if body.get("public") else 0)
         with LOCK:
-            DB.execute("UPDATE uptime_checks SET enabled=? WHERE id=?",
-                       (1 if body.get("enabled") else 0, cid))
+            DB.execute(f"UPDATE uptime_checks SET {','.join(sets)} WHERE id=?", (*vals, cid))
             DB.commit()
         return True, None
     clean, err = _validate_uptime_check(body)
@@ -4049,10 +4064,10 @@ def update_uptime_check(cid, body):
     with LOCK:
         DB.execute(
             "UPDATE uptime_checks SET label=?,type=?,target=?,interval_sec=?,timeout_sec=?,"
-            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=? WHERE id=?",
+            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=?,public=? WHERE id=?",
             (clean["label"], clean["type"], clean["target"], clean["interval_sec"],
              clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], cid))
+             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"], cid))
         DB.commit()
     _uptime_due.pop(cid, None)   # re-probe with new config promptly
     return True, None
@@ -7590,6 +7605,147 @@ threading.Thread(target=brief_worker, daemon=True).start()
 
 import os as _os
 
+# ── Public status page: monitors (uptime checks marked public) ────────────────
+# A check appears on the public page only when it is BOTH public=1 and enabled.
+# The index carries a sanitized summary; each service has a fuller read-only
+# detail (uptime windows, daily history, response series, incidents, cert). We
+# never surface the raw target with credentials — only the host (+ port for tcp).
+
+def _public_monitor_host(check):
+    """A display target safe for a public page: the host (and port for tcp),
+    never the path/query or any user:pass credentials."""
+    t = check.get("target") or ""
+    try:
+        if check.get("type") == "tcp":
+            host, port = _parse_host_port(t)
+            return f"{host}:{port}" if host else ""
+        u = urllib.parse.urlsplit(t)
+        host = u.hostname or ""
+        return f"{host}:{u.port}" if u.port else host
+    except Exception:
+        return ""
+
+def _public_monitors(now):
+    """Index summary of every public+enabled check: label, host, state, 24h/7d
+    uptime, last latency, heartbeat strip, cert status. No raw target."""
+    out = []
+    for c in list_uptime_checks():
+        if not (c.get("public") and c.get("enabled")):
+            continue
+        s = _uptime_state(c["id"], now)
+        out.append({
+            "id": c["id"], "label": c["label"], "type": c["type"],
+            "host": _public_monitor_host(c),
+            "state": s["state"], "uptime": s["uptime"], "uptime7": s["uptime7"],
+            "last_latency_ms": s["last_latency_ms"], "last_checked": s["last_checked"],
+            "strip": s["strip"],
+            "cert_days_remaining": s["cert_days_remaining"], "cert_status": s["cert_status"],
+        })
+    return out
+
+def _public_monitors_summary(monitors):
+    return {"total": len(monitors),
+            "up": sum(1 for m in monitors if m["state"] == "up"),
+            "down": sum(1 for m in monitors if m["state"] == "down")}
+
+def _uptime_window_pct(check_id, now, window):
+    with LOCK:
+        agg = DB.execute("SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
+                         (check_id, now - window)).fetchone()
+    tot = (agg[0] or 0) if agg else 0
+    return round(100.0 * (agg[1] or 0) / tot, 2) if tot else None
+
+def _uptime_up_since(rows):
+    """From ascending [(ts,up,…)] rows, the ts the current contiguous up-run began
+    (None if currently down/unknown or there's no data)."""
+    if not rows or not rows[-1][1]:
+        return None
+    since = rows[-1][0]
+    for r in reversed(rows):
+        if not r[1]:
+            break
+        since = r[0]
+    return since
+
+def _uptime_incidents(rows, cap=20):
+    """Reconstruct down-periods from ascending result rows. Each incident:
+    {start, end|None, duration_s|None, err}. Most-recent first, capped."""
+    incidents, cur = [], None
+    for r in rows:
+        ts, up, err = r[0], r[1], (r[4] if len(r) > 4 else None)
+        if not up and cur is None:
+            cur = {"start": ts, "end": None, "duration_s": None, "err": err or None}
+        elif up and cur is not None:
+            cur["end"] = ts; cur["duration_s"] = ts - cur["start"]
+            incidents.append(cur); cur = None
+    if cur is not None:                      # still down at the end of the window
+        incidents.append(cur)
+    incidents.reverse()
+    return incidents[:cap]
+
+def _uptime_response_series(rows, max_points=120):
+    """Downsample up-result latencies to ~max_points {t, ms} for a sparkline."""
+    pts = [(r[0], r[2]) for r in rows if r[1] and r[2] is not None]
+    if len(pts) > max_points:
+        step = len(pts) / max_points
+        pts = [pts[int(i * step)] for i in range(max_points)]
+    return [{"t": t, "ms": round(ms)} for t, ms in pts]
+
+def _uptime_daily(rows, days=90):
+    """Bucket ascending result rows into per-day {date, up_pct, state} cells
+    (oldest→newest), only for days that actually have samples (≤ days)."""
+    DAY = 86400
+    buckets = {}
+    for r in rows:
+        d = r[0] - (r[0] % DAY)
+        b = buckets.setdefault(d, [0, 0])
+        b[0] += 1; b[1] += 1 if r[1] else 0
+    out = []
+    for d in sorted(buckets)[-days:]:
+        tot, upn = buckets[d]
+        pct = round(100.0 * upn / tot, 2) if tot else None
+        state = "up" if pct == 100 else ("down" if (pct is not None and pct < 100) else "unknown")
+        out.append({"date": d, "up_pct": pct, "state": state})
+    return out
+
+def _public_status_detail(cid, now):
+    """Full read-only detail for one public service, or None if the check isn't
+    public+enabled. Windowed over the retained samples (up to 90 days)."""
+    check = next((c for c in list_uptime_checks() if c["id"] == cid), None)
+    if not check or not (check.get("public") and check.get("enabled")):
+        return None
+    s = _uptime_state(check["id"], now)
+    with LOCK:
+        rows90 = DB.execute(
+            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
+            (check["id"], now - 7776000)).fetchall()         # 90 days
+    rows24 = [r for r in rows90 if r[0] >= now - 86400]
+    return {
+        "id": check["id"], "label": check["label"], "type": check["type"],
+        "host": _public_monitor_host(check),
+        "state": s["state"], "last_latency_ms": s["last_latency_ms"],
+        "last_checked": s["last_checked"], "interval_sec": check["interval_sec"],
+        "up_since": _uptime_up_since(rows90),
+        "uptime": {
+            "24h": _uptime_window_pct(check["id"], now, 86400),
+            "7d":  _uptime_window_pct(check["id"], now, 604800),
+            "30d": _uptime_window_pct(check["id"], now, 2592000),
+            "90d": _uptime_window_pct(check["id"], now, 7776000),
+        },
+        "daily": _uptime_daily(rows90),
+        "response_series": _uptime_response_series(rows24),
+        "incidents": _uptime_incidents(rows90),
+        "cert_days_remaining": s["cert_days_remaining"],
+        "cert_expires_at": s["cert_expires_at"], "cert_status": s["cert_status"],
+    }
+
+def _public_overall_status(cards, monitors):
+    """ok only when every overview card is ok and no public monitor is down;
+    crit if a monitor is down; warn otherwise."""
+    if any(m["state"] == "down" for m in monitors):
+        return "crit"
+    return "ok" if all(c.get("status") == "ok" for c in cards) else "warn"
+
 @app.route("/api/public-status")
 def api_public_status():
     if not _os.environ.get("PUBLIC_STATUS"):
@@ -7607,15 +7763,28 @@ def api_public_status():
     systemd = HEALTH.get("systemd") or {"available": False, "reason": "warming up", "services": [], "summary": {}}
     cards = build_overview(now, docker, systemd)
     safe_cards = [{k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")} for c in cards]
+    monitors = _public_monitors(int(time.time()))
     return jsonify({
         "lab_name": cfg.get("lab_name", "My HomeLab"),
         "lab_emoji": cfg.get("lab_emoji", "🏠"),
         "overview": safe_cards,
-        "status": "ok" if all(c.get("status") == "ok" for c in safe_cards) else "warn"
+        "monitors": monitors,
+        "monitors_summary": _public_monitors_summary(monitors),
+        "status": _public_overall_status(safe_cards, monitors),
     })
 
+@app.route("/api/public-status/<cid>")
+def api_public_status_one(cid):
+    if not _os.environ.get("PUBLIC_STATUS"):
+        abort(404)
+    detail = _public_status_detail(cid, int(time.time()))
+    if detail is None:
+        abort(404)
+    return jsonify(detail)
+
 @app.route("/public")
-def public_status():
+@app.route("/public/<cid>")
+def public_status(cid=None):
     if not _os.environ.get("PUBLIC_STATUS"):
         abort(404)
     return send_from_directory("static", "public.html")
