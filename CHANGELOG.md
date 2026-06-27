@@ -9,9 +9,11 @@ release notes.
 
 **Added**
 - Alerts now support **email (SMTP)**, **Slack incoming webhooks**, and a **generic webhook** target alongside Discord, ntfy and Telegram. All three channels configure from the Alerts settings panel and honour the existing minimum severity + disk threshold rules.
+- **Brand logos for famous services** on the Containers and Services tables. The monitor now shows the recognisable icon (Immich, Plex, Pi-hole, Home Assistant, Postgres, Grafana, n8n, Ollama, and ~60 more) in front of the name, matched from the container image or unit name — faster visual scanning of a busy host. Logos are embedded Simple Icons (MIT), so there are **no runtime external requests**; near-black brands fall back to the theme text colour so they stay visible in dark mode, and unrecognised entries are unchanged.
 
 **Changed**
 - Wired the new Alerts form labels to the locale files so translated dashboards automatically pick up the email/Slack/webhook copy.
+- **Overview engine gauges**: the `%` now rides inline on the number's baseline (reads as `67%`) instead of as a detached superscript, and the **GPU gauge shows live power draw (W)** on its own line beneath the VRAM.
 
 **Fixed**
 - **GPU went undetected on hosts where nvidia isn't Docker's default runtime** (stock Ubuntu/Debian/Mint, where GPU containers normally opt in per-container with `--gpus all`). The monitor exposed the card only through the `NVIDIA_*` env vars, which the toolkit honours only for the default runtime — so the card worked everywhere else but the dashboard reported "no GPU detected" (#203). Added a **`docker-compose.gpu.yml` override** that requests the nvidia runtime for just this container (no global-default change, still starts on GPU-less hosts), and corrected the Setup-tab remedy + compose comments to include the **`--force-recreate`** step a plain restart was silently skipping.
