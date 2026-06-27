@@ -4,69 +4,234 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Status</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
-  :root{--bg:#0f1117;--card:#1a1d27;--bd:#2a2d3a;--tx:#e2e8f0;--tx2:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--crit:#ef4444;--ok-bg:#052e16;--warn-bg:#451a03;--crit-bg:#450a0a;--r:12px}
-  @media(prefers-color-scheme:light){:root{--bg:#f1f5f9;--card:#fff;--bd:#e2e8f0;--tx:#0f172a;--tx2:#64748b;--ok-bg:#f0fdf4;--warn-bg:#fffbeb;--crit-bg:#fef2f2}}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;padding:1.5rem}
-  header{display:flex;align-items:center;gap:.75rem;margin-bottom:2rem;flex-wrap:wrap}
-  header h1{font-size:1.4rem;font-weight:700}
-  .banner{flex:1 1 100%;display:flex;align-items:center;gap:.6rem;padding:.75rem 1rem;border-radius:var(--r);border:1px solid var(--bd);font-weight:600;font-size:.95rem}
-  .banner.ok{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
-  .banner.warn{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
-  .banner.crit{background:var(--crit-bg);border-color:var(--crit);color:var(--crit)}
-  .dot{width:10px;height:10px;border-radius:50%;background:currentColor;flex-shrink:0}
-  .dot.pulse{animation:pulse 2s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem}
-  .ov-card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);padding:1.25rem 1rem;display:flex;flex-direction:column;gap:.35rem}
-  .ov-card .ov-top{display:flex;align-items:center;gap:.5rem;font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--tx2)}
-  .ov-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-  .ov-dot.ok{background:var(--ok)} .ov-dot.warn{background:var(--warn)} .ov-dot.crit{background:var(--crit)}
-  .ov-metric{font-size:1.6rem;font-weight:700;line-height:1.1}
-  .ov-detail{font-size:.8rem;color:var(--tx2)}
-  .skel{background:var(--bd);border-radius:4px;animation:skel 1.5s infinite}
-  @keyframes skel{0%,100%{opacity:.5}50%{opacity:1}}
-  footer{margin-top:2.5rem;text-align:center;font-size:.75rem;color:var(--tx2)}
+/* Same design tokens as the dashboard — this public page is part of the product. */
+:root,[data-theme="dark"]{--bg:#0d1117;--card:#161b22;--bd:#30363d;--tx:#e6edf3;--mut:#8b949e;--accent:#d29922;--free:#21262d;
+--crit:#f85149;--warn:#d29922;--ok:#3fb950;--info:#58a6ff;--canvas:#0a0e14;--inset:#0d1117;--hover:#1c2230;
+--okbg:#3fb95018;--warnbg:#d2992218;--critbg:#f8514918;
+--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
+[data-theme="light"]{--bg:#ffffff;--card:#ffffff;--bd:#d0d7de;--tx:#1f2328;--mut:#636c76;--accent:#9a6700;--free:#eaeef2;
+--crit:#cf222e;--warn:#9a6700;--ok:#1a7f37;--info:#0969da;--canvas:#f6f8fa;--inset:#f6f8fa;--hover:#eef1f4;
+--okbg:#1a7f3714;--warnbg:#9a670014;--critbg:#cf222e14}
+@media(prefers-color-scheme:light){:root:not([data-theme]){--bg:#ffffff;--card:#ffffff;--bd:#d0d7de;--tx:#1f2328;--mut:#636c76;--accent:#9a6700;--free:#eaeef2;
+--crit:#cf222e;--warn:#9a6700;--ok:#1a7f37;--info:#0969da;--canvas:#f6f8fa;--inset:#f6f8fa;--hover:#eef1f4;
+--okbg:#1a7f3714;--warnbg:#9a670014;--critbg:#cf222e14}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);min-height:100vh;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:920px;margin:0 auto;padding:26px 18px 60px}
+a{color:inherit;text-decoration:none}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* header */
+.top{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:9px;font-size:18px;font-weight:700}
+.brand .em{font-size:20px;line-height:1}
+.brand .sub{color:var(--mut);font-weight:500;font-size:13px;letter-spacing:.02em}
+.spring{flex:1}
+.tbtn{background:var(--card);border:1px solid var(--bd);color:var(--mut);border-radius:7px;
+  width:32px;height:32px;cursor:pointer;font-size:15px;display:grid;place-items:center;transition:border-color .15s,color .15s}
+.tbtn:hover{border-color:var(--accent);color:var(--tx)}
+
+/* overall banner */
+.banner{display:flex;align-items:center;gap:11px;padding:13px 16px;border-radius:11px;
+  border:1px solid var(--bd);font-weight:600;font-size:15px;margin-bottom:22px;background:var(--card)}
+.banner.ok{background:var(--okbg);border-color:var(--ok);color:var(--ok)}
+.banner.warn{background:var(--warnbg);border-color:var(--warn);color:var(--warn)}
+.banner.crit{background:var(--critbg);border-color:var(--crit);color:var(--crit)}
+.dot{width:10px;height:10px;border-radius:50%;background:currentColor;flex:none}
+.dot.pulse{animation:pulse 2.2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+/* section heads */
+.sect{font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--mut);
+  margin:0 2px 10px;display:flex;align-items:center;gap:8px}
+.sect .cnt{margin-left:auto;letter-spacing:.04em;font-weight:600;text-transform:none}
+
+/* system cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:26px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:15px 16px;display:flex;flex-direction:column;gap:5px}
+.card .ch{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--mut)}
+.card .sd{width:8px;height:8px;border-radius:50%;flex:none}
+.card .metric{font-size:24px;font-weight:700;line-height:1.15;font-family:var(--mono)}
+.card .detail{font-size:12px;color:var(--mut)}
+.sd.ok{background:var(--ok)}.sd.warn{background:var(--warn)}.sd.crit{background:var(--crit)}.sd.unknown,.sd.info{background:var(--mut)}
+
+/* monitor rows */
+.mons{display:flex;flex-direction:column;border:1px solid var(--bd);border-radius:12px;overflow:hidden;background:var(--card)}
+.mon{display:grid;grid-template-columns:auto 1fr auto auto auto auto;align-items:center;gap:14px;
+  padding:13px 16px;border-bottom:1px solid var(--bd);transition:background .12s}
+.mon:last-child{border-bottom:0}
+a.mon:hover{background:var(--hover)}
+.mon .nm{min-width:0}
+.mon .nm b{font-weight:600;font-size:14px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mon .nm span{color:var(--mut);font-size:12px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.mon .up{font-family:var(--mono);font-size:13px;text-align:right;color:var(--mut)}
+.mon .up b{color:var(--tx);font-weight:600}
+.mon .lat{font-family:var(--mono);font-size:13px;color:var(--mut);text-align:right;min-width:54px}
+.mon .arr{color:var(--mut);font-size:16px}
+a.mon:hover .arr{color:var(--accent)}
+
+/* heartbeat */
+.hb{display:flex;gap:2px;align-items:flex-end;height:22px}
+.hb .c{width:4px;height:100%;border-radius:1px;background:var(--mut);opacity:.35}
+.hb .c.ok{background:var(--ok);opacity:1}
+.hb .c.down{background:var(--crit);opacity:1}
+.hb.lg{height:34px;gap:2px;flex-wrap:nowrap}
+.hb.lg .c{width:100%;min-width:3px;border-radius:2px}
+
+/* pills */
+.pill{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  padding:3px 9px;border-radius:999px;border:1px solid var(--bd);color:var(--mut);white-space:nowrap}
+.pill.ok{color:var(--ok);border-color:var(--ok);background:var(--okbg)}
+.pill.crit{color:var(--crit);border-color:var(--crit);background:var(--critbg)}
+.pill.big{font-size:13px;padding:5px 13px}
+
+/* detail */
+.back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-bottom:16px}
+.back:hover{color:var(--accent)}
+.dhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.dhead h1{font-size:22px;font-weight:700}
+.dsub{color:var(--mut);font-size:13px;font-family:var(--mono);margin-bottom:20px}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.tile{background:var(--card);border:1px solid var(--bd);border-radius:11px;padding:13px 14px;text-align:center}
+.tile .k{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+.tile .v{font-size:21px;font-weight:700;font-family:var(--mono);margin-top:4px}
+.panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+.panel h3{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);
+  margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.panel h3 .meta{margin-left:auto;font-family:var(--mono);font-weight:600;letter-spacing:0;text-transform:none}
+.axis{display:flex;justify-content:space-between;font-size:11px;color:var(--mut);margin-top:7px;font-family:var(--mono)}
+.spark{width:100%;height:64px;display:block}
+.inc{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bd);font-size:13px;align-items:baseline}
+.inc:last-child{border-bottom:0}
+.inc .when{font-family:var(--mono);color:var(--tx);white-space:nowrap}
+.inc .dur{font-family:var(--mono);color:var(--crit);white-space:nowrap}
+.inc .why{color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{color:var(--mut);font-size:13px;padding:6px 2px}
+.cert-ok{color:var(--ok)}.cert-amber{color:var(--warn)}.cert-red{color:var(--crit)}
+
+.foot{margin-top:26px;text-align:center;font-size:12px;color:var(--mut)}
+.foot a{color:var(--mut)}.foot a:hover{color:var(--accent)}
+@media(max-width:560px){.tiles{grid-template-columns:repeat(2,1fr)}.mon{grid-template-columns:auto 1fr auto auto;gap:10px}.mon .hb,.mon .lat{display:none}}
 </style>
 </head>
 <body>
-<header>
-  <h1 id="lab-title">…</h1>
-  <div class="banner" id="banner"><span class="dot pulse" id="banner-dot"></span><span id="banner-text">Loading…</span></div>
-</header>
-<div class="grid" id="grid">
-  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
-  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
-  <div class="ov-card"><div class="ov-top"><div class="ov-dot skel"></div><div class="skel" style="width:60px;height:12px"></div></div><div class="ov-metric skel" style="width:80px;height:28px;margin-top:.2rem"></div><div class="ov-detail skel" style="width:100px;height:11px"></div></div>
+<div class="wrap">
+  <div class="top">
+    <a href="/public" class="brand"><span class="em" id="lab-em">🏠</span><span id="lab-nm">HomeLab</span><span class="sub">· status</span></a>
+    <span class="spring"></span>
+    <button class="tbtn" id="themebtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </div>
+  <div id="view"></div>
+  <div class="foot">
+    <span id="foot-upd"></span> · <a href="https://github.com/SikamikanikoBG/homelab-monitor" target="_blank" rel="noopener">HomeLab Monitor</a>
+  </div>
 </div>
-<footer id="footer"></footer>
 <script>
-async function load(){
-  try{
-    const r=await fetch('/api/public-status');
-    if(!r.ok){document.body.innerHTML='<p style="padding:2rem;color:var(--crit)">Status page not enabled.</p>';return;}
-    const d=await r.json();
-    document.title=(d.lab_emoji||'')+" "+(d.lab_name||'Status');
-    document.getElementById('lab-title').textContent=(d.lab_emoji||'')+" "+(d.lab_name||'HomeLab Status');
-    const b=document.getElementById('banner');
-    const ok=d.status==='ok';
-    b.className='banner '+(ok?'ok':'warn');
-    document.getElementById('banner-dot').className='dot'+(ok?' pulse':'');
-    document.getElementById('banner-text').textContent=ok?'All systems normal':'Some systems need attention';
-    const grid=document.getElementById('grid');
-    grid.innerHTML='';
-    for(const c of (d.overview||[])){
-      const el=document.createElement('div');
-      el.className='ov-card';
-      el.innerHTML=`<div class="ov-top"><div class="ov-dot ${c.status||'ok'}"></div>${c.label||c.key}</div><div class="ov-metric">${c.metric||'—'}</div><div class="ov-detail">${c.detail||''}</div>`;
-      grid.appendChild(el);
-    }
-    document.getElementById('footer').textContent='Last updated '+new Date().toLocaleTimeString();
-  }catch(e){console.error(e);}
+const $=id=>document.getElementById(id);
+const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function pct(v){ return v==null?'—':(Math.round(v*100)/100)+'%'; }
+function ms(v){ return v==null?'—':Math.round(v)+' ms'; }
+function clock(){ return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+function fmtDur(s){ s=Math.max(0,Math.round(s)); const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d) return d+'d '+h+'h'; if(h) return h+'h '+m+'m'; if(m) return m+'m'; return s+'s'; }
+function relTime(ts){ if(!ts) return '—'; const s=Date.now()/1000-ts;
+  if(s<60) return Math.max(1,Math.round(s))+'s ago'; if(s<3600) return Math.round(s/60)+'m ago';
+  if(s<86400) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
+function tsDate(ts){ return new Date(ts*1000).toLocaleDateString([], {month:'short',day:'numeric'}); }
+function tsTime(ts){ return new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+
+// theme: cycle auto -> dark -> light
+function applyTheme(t){ if(t==='auto'){document.documentElement.removeAttribute('data-theme');} else {document.documentElement.setAttribute('data-theme',t);} $('themebtn').textContent=t==='light'?'☀':t==='dark'?'☾':'◐'; }
+let THEME=localStorage.getItem('pub_theme')||'auto'; applyTheme(THEME);
+$('themebtn').onclick=()=>{ THEME=THEME==='auto'?'dark':THEME==='dark'?'light':'auto'; localStorage.setItem('pub_theme',THEME); applyTheme(THEME); };
+
+function setBrand(d){ if(d.lab_emoji)$('lab-em').textContent=d.lab_emoji; if(d.lab_name){$('lab-nm').textContent=d.lab_name; document.title=(d.lab_emoji||'')+' '+d.lab_name+' · status';} }
+function notEnabled(){ $('view').innerHTML='<div class="empty" style="padding:40px 0;text-align:center">This status page isn\'t enabled.</div>'; }
+
+function hb(strip, cls){ if(!strip||!strip.length) return '<div class="hb '+(cls||'')+'"></div>';
+  return '<div class="hb '+(cls||'')+'">'+strip.map(c=>{ const st=(typeof c.up==='boolean')?(c.up?'ok':'down'):(c.state||'unknown');
+    const t=c.date?(tsDate(c.date)+' · '+pct(c.up_pct)):(c.t?tsTime(c.t):''); return '<div class="c '+st+'" title="'+esc(t)+'"></div>'; }).join('')+'</div>'; }
+
+function monRow(m){
+  const st=m.state||'unknown';
+  const pill=st==='up'?'<span class="pill ok">Up</span>':st==='down'?'<span class="pill crit">Down</span>':'<span class="pill">—</span>';
+  return `<a class="mon" href="/public/${encodeURIComponent(m.id)}">
+    <span class="sd ${st==='up'?'ok':st==='down'?'crit':'unknown'}"></span>
+    <span class="nm"><b>${esc(m.label)}</b><span>${esc(m.host||'')}</span></span>
+    ${hb(m.strip)}
+    <span class="up"><b>${pct(m.uptime)}</b></span>
+    <span class="lat">${ms(m.last_latency_ms)}</span>
+    ${pill}<span class="arr">›</span></a>`;
 }
-load();
-setInterval(load,30000);
+
+async function renderIndex(){
+  let d; try{ const r=await fetch('/api/public-status'); if(!r.ok) return notEnabled(); d=await r.json(); }catch(e){ return; }
+  setBrand(d);
+  const ok=d.status==='ok', crit=d.status==='crit';
+  const bcls=crit?'crit':ok?'ok':'warn';
+  const btxt=crit?'Some services are down':ok?'All systems operational':'Some systems need attention';
+  const cards=(d.overview||[]).map(c=>`<div class="card"><div class="ch"><span class="sd ${c.status||'unknown'}"></span>${esc(c.label||c.key)}</div>
+    <div class="metric">${esc(c.metric||'—')}</div><div class="detail">${esc(c.detail||'')}</div></div>`).join('');
+  const mons=d.monitors||[], su=d.monitors_summary||{};
+  const monBlock = mons.length
+    ? `<div class="sect">Monitored services<span class="cnt">${su.up||0} up · ${su.down||0} down</span></div><div class="mons">${mons.map(monRow).join('')}</div>`
+    : '';
+  $('view').innerHTML=`<div class="banner ${bcls}"><span class="dot ${ok?'pulse':''}"></span>${btxt}</div>
+    ${cards?`<div class="sect">System</div><div class="cards">${cards}</div>`:''}
+    ${monBlock}`;
+  $('foot-upd').textContent='Updated '+clock();
+}
+
+function spark(series){
+  if(!series||series.length<2) return '<div class="empty">Not enough samples yet.</div>';
+  const xs=series.map(p=>p.t), ys=series.map(p=>p.ms);
+  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  const W=600,H=64,pad=4, sx=t=>x1===x0?0:(t-x0)/(x1-x0)*W, sy=v=>y1===y0?H/2:H-pad-(v-y0)/(y1-y0)*(H-2*pad);
+  const pts=series.map(p=>sx(p.t).toFixed(1)+','+sy(p.ms).toFixed(1)).join(' ');
+  const area=`${sx(x0).toFixed(1)},${H} ${pts} ${sx(x1).toFixed(1)},${H}`;
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <polygon points="${area}" fill="var(--accent)" opacity="0.10"></polygon>
+    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline></svg>`;
+}
+
+async function renderDetail(id){
+  let d; try{ const r=await fetch('/api/public-status/'+encodeURIComponent(id)); if(r.status===404){ location.href='/public'; return; } d=await r.json(); }catch(e){ return; }
+  try{ const s=await (await fetch('/api/public-status')).json(); setBrand(s); }catch(e){}
+  const st=d.state||'unknown';
+  const pill=st==='up'?'<span class="pill ok big">Operational</span>':st==='down'?'<span class="pill crit big">Down</span>':'<span class="pill big">Unknown</span>';
+  const since=d.up_since?('up for '+fmtDur(Date.now()/1000-d.up_since)):(st==='down'?'currently down':'');
+  const u=d.uptime||{};
+  const tiles=[['24h',u['24h']],['7 days',u['7d']],['30 days',u['30d']],['90 days',u['90d']]]
+    .map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${pct(v)}</div></div>`).join('');
+  const ys=(d.response_series||[]).map(p=>p.ms);
+  const meta=ys.length?`avg ${Math.round(ys.reduce((a,b)=>a+b,0)/ys.length)} · max ${Math.max(...ys)} ms`:'';
+  const inc=(d.incidents||[]);
+  const incHtml=inc.length?inc.map(i=>{
+    const end=i.end?tsTime(i.end):'now';
+    const dur=i.duration_s!=null?('down '+fmtDur(i.duration_s)):'ongoing';
+    return `<div class="inc"><span class="when">${tsDate(i.start)} ${tsTime(i.start)} → ${end}</span><span class="dur">${dur}</span><span class="why">${esc(i.err||'no error message')}</span></div>`;
+  }).join(''):'<div class="empty">No incidents in the retained history. 🎉</div>';
+  let cert='';
+  if(d.cert_days_remaining!=null) cert=`<span class="cert-${esc(d.cert_status||'ok')}">🔒 TLS valid · ${d.cert_days_remaining}d left</span> · `;
+  $('view').innerHTML=`<a class="back" href="/public">‹ back to status</a>
+    <div class="dhead"><span class="sd ${st==='up'?'ok':st==='down'?'crit':'unknown'}" style="width:11px;height:11px"></span><h1>${esc(d.label)}</h1>${pill}</div>
+    <div class="dsub">${esc(d.host||'')}${since?' · '+since:''}</div>
+    <div class="tiles">${tiles}</div>
+    <div class="panel"><h3>Uptime · last 90 days<span class="meta">${(d.daily||[]).length} days tracked</span></h3>
+      ${hb(d.daily,'lg')}<div class="axis"><span>90d ago</span><span>today</span></div></div>
+    <div class="panel"><h3>Response time<span class="meta">${meta}</span></h3>${spark(d.response_series)}</div>
+    <div class="panel"><h3>Past incidents</h3>${incHtml}</div>
+    <div class="dsub" style="margin:0">${cert}checked ${relTime(d.last_checked)}</div>`;
+  $('foot-upd').textContent='Updated '+clock();
+}
+
+function route(){ const m=location.pathname.match(/\/public\/([^/]+)\/?$/); if(m) renderDetail(decodeURIComponent(m[1])); else renderIndex(); }
+route();
+setInterval(route, 30000);
 </script>
 </body>
 </html>
