@@ -5498,7 +5498,7 @@ function mcPaintTri($){
     // A VRAM-pinned-but-idle card (models loaded, no inference) reads as low util
     // yet is effectively full — show the binding constraint so the hero matches the
     // crit VRAM tile + GPU tab instead of contradicting them with a calm util %.
-    const sat=Math.max(util, vramPct);
+    const sat=Math.min(100, Math.max(util, vramPct));
     if(pg) pg.style.visibility='visible';
     mcCountUp($('mc-g-gpu'), sat, 900, 0);
     mcSetTriArc('mc-arc-gpu', sat, mcTriColor(sat,'var(--accent)'));
