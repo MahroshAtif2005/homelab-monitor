@@ -3227,10 +3227,10 @@ function renderDiskIo() {
   const d = HH.disk_io;
   const el = document.getElementById('diskio-body');
   if(!d.available || !d.items || d.items.length === 0) {
-    el.innerHTML = '<div class="empty">No Disk I/O activity detected.</div>';
+    el.innerHTML = `<div class="empty">${I18N.t('msg.no_disk_io', 'No Disk I/O activity detected.')}</div>`;
     return;
   }
-  let html = `<table class="tbl"><thead><tr><th>Device</th><th class="ar">Read (MB/s)</th><th class="ar">Write (MB/s)</th></tr></thead><tbody>`;
+  let html = `<table class="ntbl"><thead><tr><th>${I18N.t('col.device', 'Device')}</th><th class="ar">${I18N.t('col.read_mb_s', 'Read (MB/s)')}</th><th class="ar">${I18N.t('col.write_mb_s', 'Write (MB/s)')}</th></tr></thead><tbody>`;
   d.items.forEach(i => {
     html += `<tr><td><span class="mono">${esc(i.device)}</span></td><td class="ar">${i.read_mb_s}</td><td class="ar">${i.write_mb_s}</td></tr>`;
   });
@@ -6612,6 +6612,7 @@ setInterval(()=>{
   if(TAB==='host')     renderHostTab();
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
+  if(TAB==='diskio')   renderDiskIo();
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{
