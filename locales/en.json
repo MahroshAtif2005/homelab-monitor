@@ -205,6 +205,7 @@
   "host.local": "Local",
   "fleet.loading": "Loading fleet…",
   "toast.settings_saved": "Settings saved.",
+  "toast.autosaved": "Saved",
   "toast.sending_test": "Sending test alert…",
   "toast.preparing_backup": "Preparing backup…",
   "toast.download_started": "Download started — check your browser downloads.",
