@@ -2005,13 +2005,13 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
             </select>
           </div>
         </div>
-        <p class="cap" id="al_brief_chan_cap" style="margin-top:6px" data-i18n="brief.chan_cap" data-i18n-def="Only channels you've configured above appear here. Save the channel first if it isn't listed.">Only channels you've configured above appear here. Save the channel first if it isn't listed.</p>
+        <p class="cap" id="al_brief_chan_cap" style="margin-top:6px" data-i18n="brief.chan_cap" data-i18n-def="Only channels you've configured above appear here — configure one and it shows up automatically.">Only channels you've configured above appear here — configure one and it shows up automatically.</p>
 
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
           <button class="rb" id="al_brief_preview" data-i18n="brief.preview" data-i18n-def="Preview">Preview</button>
           <button class="rb" id="al_brief_test" data-i18n="brief.test" data-i18n-def="Send test brief">Send test brief</button>
         </div>
-        <p class="cap" style="margin-top:6px" data-i18n="brief.note" data-i18n-def="Preview and Send test use your last saved settings — click Save above first if you just changed the channel.">Preview and Send test use your last saved settings — click Save above first if you just changed the channel.</p>
+        <p class="cap" style="margin-top:6px" data-i18n="brief.note" data-i18n-def="Settings here save automatically when you leave a field. Preview and Send test use your saved settings.">Settings here save automatically when you leave a field. Preview and Send test use your saved settings.</p>
       </div>
     </div>
     </div><!-- /set-pane-alerts -->
@@ -4354,7 +4354,7 @@ function toast(level,text){
 function showAlertStatus(level,text){
   toast(level,text);
 }
-async function saveAlerts(){
+function collectSettingsBody(){
   const body={
     alerts_enabled:   document.getElementById('al_enabled').checked ? '1' : '0',
     ntfy_topic:       document.getElementById('al_ntfy_topic').value.trim(),
@@ -4406,8 +4406,14 @@ async function saveAlerts(){
   const wv = document.getElementById('al_webhook').value;
   if(wv === 'CLEAR'){ body.webhook_url=''; }
   else if(wv && wv.trim()){ body.webhook_url = wv.trim(); }
+  return body;
+}
+
+async function saveAlerts(){
+  const body=collectSettingsBody();
   let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)})).json(); }catch(e){ showAlertStatus('critical','Could not save settings: '+e); return; }
+  if(j && j.ok===false){ showAlertStatus('critical', j.error||'Could not save settings.'); return; }
   document.getElementById('al_discord').value='';
   document.getElementById('al_telegram_token').value='';
   document.getElementById('al_email_pass').value='';
@@ -4416,6 +4422,41 @@ async function saveAlerts(){
   const mtok=document.getElementById('al_mlflow_token'); if(mtok) mtok.value='';
   await loadAlerts();
   showAlertStatus('ok',I18N.t('toast.settings_saved','Settings saved.'));
+}
+
+// ── Autosave (#brief-save-UX) ─────────────────────────────────────────────────
+// Persist on field change (focus-out) so nobody has to hunt for a Save button
+// that sits far above the section they just edited. Deliberately lightweight: it
+// POSTs the current form and shows a small "Saved" confirmation, but does NOT
+// reload or clear the form — so a half-typed secret isn't blanked while you tab
+// to the next field. The explicit Save buttons keep doing the full save + mask +
+// reload. Debounced so tabbing through several fields coalesces into one write.
+let _autosaveTimer=null, _autosaveBusy=false;
+function scheduleAutoSave(){ clearTimeout(_autosaveTimer); _autosaveTimer=setTimeout(autoSaveSettings, 500); }
+async function autoSaveSettings(){
+  if(_autosaveBusy){ scheduleAutoSave(); return; }     // a save is in flight — retry after it
+  _autosaveBusy=true;
+  try{
+    const body=collectSettingsBody();
+    let j; try{ j=await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)})).json(); }
+    catch(e){ showAlertStatus('critical','Could not save: '+e); return; }
+    if(j && j.ok===false){ showAlertStatus('warning', j.error||'Not saved — check that value.'); return; }
+    showAlertStatus('ok', I18N.t('toast.autosaved','Saved'));
+    // A channel configured just now should become selectable in the brief dropdown.
+    try{ const r=await(await fetch('/api/settings')).json(); if(r&&r.settings) fillBrief(r.settings); }catch(_){}
+  } finally { _autosaveBusy=false; }
+}
+// change fires on blur for text/number/time inputs, immediately for checkboxes/selects.
+const AUTOSAVE_IDS=['al_enabled','al_ntfy_topic','al_ntfy_server','al_telegram_chat_id',
+  'al_telegram_token','al_email_host','al_email_port','al_email_tls','al_email_from','al_email_to',
+  'al_email_user','al_email_pass','al_discord','al_slack','al_webhook','al_minlevel','al_disk',
+  'al_kwh','al_currency','al_kwh_night','al_night_start','al_night_end','al_idle_w','al_mlflow_uri',
+  'al_mlflow_token','al_country','al_brief_enabled','al_brief_time','al_brief_channel','al_brief_theme'];
+function wireAutoSave(){
+  AUTOSAVE_IDS.forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', scheduleAutoSave); });
+  // Tariff mode is toggled by buttons (no change event) — autosave on those too.
+  ['al_mode_single','al_mode_dual'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('click', scheduleAutoSave); });
 }
 async function testAlerts(){
   showAlertStatus('info',I18N.t('toast.sending_test','Sending test alert…'));
@@ -7161,6 +7202,7 @@ document.getElementById('al_brief_test').onclick = briefTest;
 wireUptime();
 const al_save_costs = document.getElementById('al_save_costs');
 if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
+wireAutoSave();   // settings also persist on field focus-out (no Save-button hunt)
 document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
 document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);
 document.getElementById('al_country').onchange    = applyCountryPrefill;
