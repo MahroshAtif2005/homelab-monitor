@@ -7,6 +7,9 @@ release notes.
 
 ## [Unreleased]
 
+**Fixed**
+- **Daily Brief on chat channels was a starved, misleading blob — rebuilt.** The brief only ever sent its rich card to **email**; Discord/Telegram/Slack/ntfy got a stripped text summary that (a) showed the headline twice, (b) was always coloured info-blue regardless of severity, (c) said "Services: 1 failed" without naming the service, and — worst — (d) **counted an offline host as up** (`5/5` while one machine was down), because it read each host's stale stored *Test* result instead of the live online flag the dashboard uses. Now: the fleet tally comes from the same `_host_is_online()` source as `/api/fleet` (offline hosts are correctly counted and show their last error); chat messages are coloured by real severity; action lines **name** the failing container/unit (e.g. `immich_ml — Exited (137) 2 hours ago`); the headline isn't repeated; and **Discord posts the full HTML brief as an attachment** alongside the clean summary. All "infant-icon" emoji are gone — status is shown with colour (CSS dots, the embed stripe) and quiet uppercase labels. (#170)
+
 ## [0.22.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.22.1) — 2026-06-27 · **Hero engine GPU gauge tells the truth about a full card**
 *A small fix so the Overview's "Lab's Engine" GPU gauge stops reading calm when the card is actually maxed.*
 
