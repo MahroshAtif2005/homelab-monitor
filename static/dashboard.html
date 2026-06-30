@@ -2114,9 +2114,9 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <!--  Disk I/O Throughput  -->
 <section data-tab="diskio" hidden>
   <div class="card" style="max-width:800px; margin:0 auto">
-    <div class="card-head">Disk I/O Throughput</div>
-    <div class="card-body" id="diskio-body">
-      <div class="empty">No Disk I/O activity detected.</div>
+    <h2 data-i18n="diskio.title">💾 Disk I/O Throughput</h2>
+    <div id="diskio-body">
+      <div class="empty" data-i18n="msg.no_disk_io">No Disk I/O activity detected.</div>
     </div>
   </div>
 </section>
@@ -2470,7 +2470,7 @@ const TABS = [
   {id:'services',   label:'Services',   charts:false, zone:'monitoring'},
   {id:'host',       label:'System',     charts:true,  zone:'monitoring'},
   {id:'disks',      label:'Disks',      charts:false, zone:'monitoring'},
-  {id:'diskio',     label:'Disk I/O',   charts:false, zone:'monitoring', icon:'server'},
+  {id:'diskio',     label:'Disk I/O',   charts:false, zone:'monitoring'},
   {id:'network',    label:'Network',    charts:false, zone:'monitoring'},
   {id:'security',   label:'Security',   charts:false, zone:'monitoring'},
   {id:'uptime',     label:'Uptime',     charts:false, zone:'monitoring'},
@@ -2719,6 +2719,7 @@ function showTab(id){
   if(id==='costs') renderCosts(true);
   if(id==='host')     renderHostTab();
   if(id==='disks')    renderDisksTab();
+  if(id==='diskio')   renderDiskIo();
   if(id==='network')  renderNetwork();
   if(id==='security') renderSecurity();
   if(id==='services') renderServicesTab();
@@ -3230,9 +3231,13 @@ function renderDiskIo() {
     el.innerHTML = `<div class="empty">${I18N.t('msg.no_disk_io', 'No Disk I/O activity detected.')}</div>`;
     return;
   }
-  let html = `<table class="ntbl"><thead><tr><th>${I18N.t('col.device', 'Device')}</th><th class="ar">${I18N.t('col.read_mb_s', 'Read (MB/s)')}</th><th class="ar">${I18N.t('col.write_mb_s', 'Write (MB/s)')}</th></tr></thead><tbody>`;
+  let html = `<table><thead><tr>
+    <th data-i18n="col.device">${I18N.t('col.device', 'Device')}</th>
+    <th style="text-align:right" data-i18n="col.read_mb_s">${I18N.t('col.read_mb_s', 'Read (MB/s)')}</th>
+    <th style="text-align:right" data-i18n="col.write_mb_s">${I18N.t('col.write_mb_s', 'Write (MB/s)')}</th>
+  </tr></thead><tbody>`;
   d.items.forEach(i => {
-    html += `<tr><td><span class="mono">${esc(i.device)}</span></td><td class="ar">${i.read_mb_s}</td><td class="ar">${i.write_mb_s}</td></tr>`;
+    html += `<tr><td><span class="mono">${esc(i.device)}</span></td><td style="text-align:right">${i.read_mb_s}</td><td style="text-align:right">${i.write_mb_s}</td></tr>`;
   });
   html += `</tbody></table>`;
   el.innerHTML = html;

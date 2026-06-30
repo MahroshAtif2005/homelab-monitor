@@ -6245,9 +6245,13 @@ def api_health():
     # Set here (not baked into the cached collect_update payload) so toggling the
     # env flag takes effect on restart without waiting for the update cache.
     update["self_update_enabled"] = ALLOW_SELF_UPDATE
+    disk_io = HEALTH.get("disk_io") or {"available": False, "warming_up": True,
+                                         "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
+                                         "items": []}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "processes": HEALTH["processes"],
+                    "disk_io": disk_io,
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
                     "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
