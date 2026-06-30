@@ -4367,12 +4367,50 @@ def _post_text(url, text, headers=None, timeout=5):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
 
+def _post_multipart(url, payload_json, filename, file_bytes,
+                    file_ctype="text/html; charset=utf-8", timeout=10):
+    """POST multipart/form-data: one JSON `payload_json` part + one file part. Stdlib
+    only (no `requests`) so the daily brief can attach its HTML to a Discord webhook
+    upload. Returns (status, body)."""
+    boundary = "----homelab-" + os.urandom(8).hex()
+    head = (f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="payload_json"\r\n'
+            "Content-Type: application/json\r\n\r\n"
+            f"{payload_json}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+            f"Content-Type: {file_ctype}\r\n\r\n").encode("utf-8")
+    body = head + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": NOTIFY_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
 def send_discord(webhook, level, title, detail):
     payload = {"embeds": [{"title": title, "description": detail,
                            "color": _COLORS.get(level, _COLORS["info"]),
                            "footer": {"text": f"HomeLab Monitor · {level}"},
                            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}]}
     return _post_json(webhook, payload)
+
+def send_discord_brief(webhook, level, title, description, html, filename):
+    """Daily brief → Discord: a clean, severity-coloured embed (no emoji) carrying the
+    summary, plus the full HTML brief attached as a downloadable file. Discord shows
+    the attachment as a file card the reader opens in a browser (it does not render
+    HTML inline). If the multipart upload is rejected (size/permission/network), fall
+    back to a plain embed so the brief still arrives — just without the attachment."""
+    embed = {"title": (title or "")[:256], "description": (description or "")[:4000],
+             "color": _COLORS.get(level, _COLORS["info"]),
+             "footer": {"text": f"HomeLab Monitor v{VERSION}"},
+             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
+    payload = json.dumps({"embeds": [embed],
+                          "attachments": [{"id": 0, "filename": filename}]})
+    try:
+        return _post_multipart(webhook, payload, filename, html.encode("utf-8"))
+    except Exception as e:
+        print("brief discord attachment failed, sending summary only:", e, flush=True)
+        return send_discord(webhook, level, title, description)
 
 def send_ntfy(server, topic, level, title, detail):
     server = (server or "https://ntfy.sh").rstrip("/")
@@ -7247,21 +7285,31 @@ def _brief_yesterday_cost():
     return round(cost, 2), round(kwh, 2), cur
 
 def _brief_fleet():
-    """Hub + registered hosts with an up/down flag. The hub is always up (we're the
-    one rendering). A registered host counts as up if its last check exists and its
-    summary didn't fail."""
+    """Hub + registered hosts with a LIVE up/down flag. The hub is always up (we're
+    the one rendering). A registered host's online flag comes from the SAME source the
+    dashboard fleet table uses — _host_is_online() over the live HOST_DATA poll cache —
+    NOT the stored manual-Test result. The old code read last_check.overall, a snapshot
+    that never goes stale when a host later drops, so an offline host kept counting as
+    up (the "5/5 while one is offline" bug). CPU/RAM detail comes from the live poll;
+    a down host shows its last poll error instead."""
+    def _cpu_ram(h):
+        cpu = round(h.get("cpu", 0) or 0)
+        ram_pct = round(h["ram_used"] / h["ram_total"] * 100) if h.get("ram_total") else 0
+        return f"{cpu}% CPU · {ram_pct}% RAM"
     out = []
     host = LATEST.get("host") or {}
-    cpu = round(host.get("cpu", 0) or 0)
-    ram_pct = round(host["ram_used"] / host["ram_total"] * 100) if host.get("ram_total") else 0
     out.append({"name": host.get("hostname") or "this host", "up": True, "hub": True,
-                "detail": f"{cpu}% CPU · {ram_pct}% RAM"})
-    for h in list_hosts():
-        chk = h.get("last_check") or {}
-        overall = ((chk.get("summary") or {}).get("overall"))
-        up = bool(chk) and overall != "fail"
-        out.append({"name": h.get("name", "?"), "up": up, "hub": False,
-                    "detail": "" if up else "not reachable at last check"})
+                "detail": _cpu_ram(host)})
+    with HOST_DATA_LOCK:
+        for h in list_hosts():
+            entry = HOST_DATA.get(h["name"]) or {}
+            up = _host_is_online(entry)
+            if up:
+                detail = _cpu_ram((entry.get("data") or {}).get("host") or {})
+            else:
+                err = (entry.get("error") or "").strip().splitlines()
+                detail = (err[0][:80] if err else "offline — no recent poll")
+            out.append({"name": h.get("name", "?"), "up": up, "hub": False, "detail": detail})
     return {"hosts": out, "up": sum(1 for x in out if x["up"]), "total": len(out)}
 
 def _brief_checks():
@@ -7344,7 +7392,23 @@ def _brief_assemble():
         actions.append((2, f"Check “{lbl}” is down"))
     for lbl, d in checks["certs"]:
         actions.append((1 if d > 7 else 2, f"TLS cert {lbl} expires in {d} day{'s' if d != 1 else ''}"))
+    # Name the actual problem containers / units instead of a bare "N failed" — the
+    # whole point of an action line is to say which thing needs you.
+    for ct in (docker.get("containers") or []):
+        if ct.get("status") in ("crit", "warn"):
+            st = (ct.get("status_text") or ct.get("label") or "unhealthy").strip()
+            actions.append((2 if ct["status"] == "crit" else 1,
+                            f"Container {ct.get('name', '?')} — {st}"))
+    for sv in (systemd.get("services") or []):
+        if sv.get("status") == "crit":
+            ex = sv.get("exit_status")
+            tail = f" (exit {ex})" if isinstance(ex, int) else ""
+            actions.append((2, f"systemd unit {sv.get('name', '?')} failed{tail}"))
+    # Remaining overview cards (GPU/host/…) — containers & services are already
+    # itemised by name above, so skip their roll-up cards to avoid "1 failed" dupes.
     for c in overview:
+        if c.get("key") in ("containers", "services"):
+            continue
         if c["status"] in ("crit", "warn"):
             actions.append((2 if c["status"] == "crit" else 1, f"{c['label']}: {c['detail']}"))
     crit = any(p == 2 for p, _ in actions)
@@ -7355,22 +7419,25 @@ def _brief_assemble():
             "issues": len(actions_text), "crit": crit, "now": int(time.time())}
 
 def render_brief(theme="dark"):
-    """Return (html, summary, subject). `html` is a self-contained inline-styled
-    email body; `summary` is the compact text for chat channels; `subject` is the
-    email/notification title."""
+    """Return (html, summary, subject, level). `html` is a self-contained inline-styled
+    body used for BOTH the email and the Discord HTML attachment; `summary` is the
+    compact, emoji-free text for chat channels; `subject` is the title; `level` is the
+    severity ("critical"/"warning"/"info") so chat channels colour the message by how
+    bad it is instead of always showing info-blue. No emoji anywhere: status is carried
+    by colour (CSS dots, the embed stripe) and quiet uppercase labels."""
     P = _BRIEF_PALETTE["light"] if theme == "light" else _BRIEF_PALETTE["dark"]
     d = _brief_assemble()
     hub = _alert_host_label() or "homelab"
     when = time.strftime("%a %d %b", time.localtime(d["now"]))
     issues, crit = d["issues"], d["crit"]
     fleet, checks, ai = d["fleet"], d["checks"], d["ai"]
+    level = "critical" if crit else ("warning" if issues else "info")
 
     if issues == 0:
-        head_emoji, head_text, head_col = "✅", "All systems healthy", P["ok"]
+        head_text, head_col = "All systems healthy", P["ok"]
         head_sub = "nothing needs you today"
     else:
-        head_emoji = "🔴" if crit else "🟠"
-        head_text = f"{issues} thing{'s' if issues != 1 else ''} to look at"
+        head_text = f"{issues} thing{'' if issues == 1 else 's'} {'needs' if issues == 1 else 'need'} you"
         head_col = P["crit"] if crit else P["warn"]
         head_sub = "otherwise the lab is healthy"
 
@@ -7391,11 +7458,14 @@ def render_brief(theme="dark"):
                        f'font-size:14px;color:{P["tx"]}">{ln}</td></tr>' for ln in lines)
         return (f'<tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" '
                 f'cellpadding="0" cellspacing="0">{body}</table></td></tr>')
+    def dot(col):
+        """A small coloured status bullet — the no-emoji replacement for 🟢/🔴/🟠."""
+        return f'<span style="color:{col};font-size:11px;vertical-align:middle">&#9679;</span>'
 
     parts = []
     parts.append(f'<tr><td style="padding:20px 24px;border-bottom:1px solid {P["bd"]}">'
                  f'<table role="presentation" width="100%"><tr>'
-                 f'<td style="font-size:18px;font-weight:700;color:{P["tx"]}">📰 Daily brief</td>'
+                 f'<td style="font-size:18px;font-weight:700;color:{P["tx"]}">Daily brief</td>'
                  f'<td align="right" style="font-size:13px;color:{P["mut"]}">{when} · {_he(hub)}</td>'
                  f'</tr></table></td></tr>')
     # KPI strip
@@ -7407,38 +7477,38 @@ def render_brief(theme="dark"):
         for val, lbl, col in kpis)
     parts.append(f'<tr><td style="padding:16px 24px 2px"><table role="presentation" width="100%" '
                  f'cellpadding="0" cellspacing="6"><tr>{tiles}</tr></table></td></tr>')
-    # headline
+    # headline — severity shown by the coloured left border + tint, not an emoji
     parts.append(f'<tr><td style="padding:18px 24px"><table role="presentation" width="100%" '
-                 f'style="background:{head_col}1a;border:1px solid {head_col};border-radius:10px">'
+                 f'style="background:{head_col}1a;border:1px solid {head_col};'
+                 f'border-left:4px solid {head_col};border-radius:10px">'
                  f'<tr><td style="padding:14px 16px;font-size:16px;color:{P["tx"]}">'
-                 f'<span style="font-size:20px">{head_emoji}</span> &nbsp;<b>{_he(head_text)}</b> '
+                 f'<b>{_he(head_text)}</b> '
                  f'&nbsp;<span style="color:{P["mut"]}">· {head_sub}</span></td></tr></table></td></tr>')
     # action needed
     if d["actions"]:
-        parts.append(head("⚡ Action needed"))
+        parts.append(head("Action needed"))
         parts.append(rows_table([_he(a) for a in d["actions"]]))
     # fleet
-    parts.append(head("🖥️ Fleet"))
+    parts.append(head("Fleet"))
     fleet_lines = []
     for x in fleet["hosts"]:
-        dot = "🟢" if x["up"] else "🔴"
         extra = f' <span style="color:{P["mut"]}">· {_he(x["detail"])}</span>' if x["detail"] else ""
         tag = " (hub)" if x["hub"] else ""
-        fleet_lines.append(f'{dot} {_he(x["name"])}{tag}{extra}')
+        fleet_lines.append(f'{dot(P["ok"] if x["up"] else P["crit"])} {_he(x["name"])}{tag}{extra}')
     parts.append(rows_table(fleet_lines))
     # checks
     if checks["enabled"]:
-        parts.append(head("📡 Checks"))
+        parts.append(head("Checks"))
         sm = checks["summary"]
-        clines = [f'{"🟢" if not checks["downs"] else "🔴"} {sm["up"]}/{sm["total"]} checks responding']
+        clines = [f'{dot(P["ok"] if not checks["downs"] else P["crit"])} {sm["up"]}/{sm["total"]} checks responding']
         for lbl in checks["downs"]:
-            clines.append(f'🔴 {_he(lbl)} is down')
+            clines.append(f'{dot(P["crit"])} {_he(lbl)} is down')
         for lbl, dd in checks["certs"]:
-            clines.append(f'🟠 cert {_he(lbl)} expires in {dd} day{"s" if dd != 1 else ""}')
+            clines.append(f'{dot(P["warn"])} cert {_he(lbl)} expires in {dd} day{"s" if dd != 1 else ""}')
         parts.append(rows_table(clines))
     # alerts (events) last 24h
     if d["events"]:
-        parts.append(head("🔔 Alerts · last 24h"))
+        parts.append(head("Alerts · last 24h"))
         elines = []
         for e in d["events"]:
             t = time.strftime("%H:%M", time.localtime(e["ts"]))
@@ -7446,7 +7516,7 @@ def render_brief(theme="dark"):
             elines.append(f'{_he(t)} — {_he(who)}: {_he(e.get("detail") or e.get("kind") or "")}')
         parts.append(rows_table(elines))
     # ai & cost
-    parts.append(head("🤖 AI &amp; cost"))
+    parts.append(head("AI &amp; cost"))
     ailines = []
     if ai["available"]:
         gname = ai["gpu_name"] or "GPU"
@@ -7462,8 +7532,8 @@ def render_brief(theme="dark"):
     parts.append(rows_table(ailines))
     # capacity nudges
     if d["capacity"]:
-        parts.append(head("📈 Capacity nudges"))
-        parts.append(rows_table([f'{ic} {_he(txt)}' for ic, txt in d["capacity"]]))
+        parts.append(head("Capacity nudges"))
+        parts.append(rows_table([_he(txt) for _ic, txt in d["capacity"]]))
     # footer — no CTA link: a brief has no absolute dashboard URL to point at, and
     # a fragment-only href="#" is stripped/dead in Gmail/Outlook/Apple Mail. The
     # footer line tells the reader where the brief is configured instead.
@@ -7477,25 +7547,25 @@ def render_brief(theme="dark"):
             f'border:1px solid {P["bd"]};border-radius:12px;overflow:hidden">'
             f'{"".join(parts)}</table></body></html>')
 
-    # ── compact text summary for chat channels ────────────────────────────────
-    slines = [f'{head_emoji} {head_text}']
+    # ── compact, emoji-free text summary for chat channels ────────────────────
+    # Does NOT repeat the headline: the channel title (subject) already carries it,
+    # so the body leads with the sub-line, then the named actions, then a stat strip.
+    slines = [head_sub]
     if d["actions"]:
-        slines.append("")
-        slines.append("⚡ Action needed:")
-        slines += [f'• {a}' for a in d["actions"][:5]]
-    slines.append("")
-    stat = f'🖥️ {fleet["up"]}/{fleet["total"]} up'
+        slines += ["", "ACTION NEEDED"]
+        slines += [f'• {a}' for a in d["actions"][:6]]
+    stat = f'Hosts {fleet["up"]}/{fleet["total"]}'
     if checks["enabled"]:
-        stat += f' · 📡 {checks["summary"]["up"]}/{checks["summary"]["total"]} checks'
+        stat += f' · Checks {checks["summary"]["up"]}/{checks["summary"]["total"]}'
     if d["events"]:
-        stat += f' · 🔔 {len(d["events"])} in 24h'
+        stat += f' · {len(d["events"])} event{"s" if len(d["events"]) != 1 else ""}/24h'
     if ai["cost"] is not None:
-        stat += f' · 🤖 {ai["cost"]} {cur}'
-    slines.append(stat)
+        stat += f' · {ai["cost"]} {cur} ydy'
+    slines += ["", stat]
     summary = "\n".join(slines)
 
     subject = f"[{hub}] Daily brief — {head_text}"
-    return html, summary, subject
+    return html, summary, subject, level
 
 def _send_brief_email(s, subject, html, text):
     """Send the brief as a multipart email: plain-text fallback + HTML body."""
@@ -7510,20 +7580,23 @@ def _send_brief_email(s, subject, html, text):
                s.get("email_username"), s.get("email_password"))
 
 def send_brief(s, channel):
-    """Render and deliver the brief to one channel. Raises on delivery failure."""
-    html, summary, subject = render_brief(s.get("brief_theme", "dark"))
+    """Render and deliver the brief to one channel. Raises on delivery failure.
+    The severity `level` (not a hardcoded "info") drives each channel's colour/priority,
+    and Discord gets the full HTML attached, not just the text summary."""
+    html, summary, subject, level = render_brief(s.get("brief_theme", "dark"))
+    fname = f"brief-{time.strftime('%Y-%m-%d')}.html"
     if channel == "email":
         _send_brief_email(s, subject, html, summary)
     elif channel == "discord":
-        send_discord(s.get("discord_webhook_url"), "info", subject, summary)
+        send_discord_brief(s.get("discord_webhook_url"), level, subject, summary, html, fname)
     elif channel == "telegram":
-        _post_to_telegram(s.get("telegram_token"), s.get("telegram_chat_id"), "info", subject, summary)
+        _post_to_telegram(s.get("telegram_token"), s.get("telegram_chat_id"), level, subject, summary)
     elif channel == "ntfy":
-        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s.get("ntfy_topic"), "info", subject, summary)
+        send_ntfy(s.get("ntfy_server") or "https://ntfy.sh", s.get("ntfy_topic"), level, subject, summary)
     elif channel == "slack":
-        send_slack(s.get("slack_webhook_url"), "info", subject, summary)
+        send_slack(s.get("slack_webhook_url"), level, subject, summary)
     elif channel == "webhook":
-        send_webhook(s.get("webhook_url"), "info", subject, summary, _alert_host_label() or "")
+        send_webhook(s.get("webhook_url"), level, subject, summary, _alert_host_label() or "")
     else:
         raise ValueError(f"unknown brief channel: {channel}")
 
@@ -7578,7 +7651,7 @@ def brief_worker():
 def api_brief_preview():
     """Render the current brief as HTML (the Preview button opens this in a tab)."""
     theme = request.args.get("theme") or get_settings().get("brief_theme", "dark")
-    html, _, _ = render_brief("light" if theme == "light" else "dark")
+    html, _, _, _ = render_brief("light" if theme == "light" else "dark")
     return Response(html, mimetype="text/html; charset=utf-8")
 
 @app.route("/api/brief/test", methods=["POST"])
