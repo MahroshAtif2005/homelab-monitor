@@ -741,6 +741,48 @@ def read_disks():
             pass
     return sorted(out, key=lambda d: -d["pct"])[:6]
 
+_disk_prev = {}
+
+def collect_disk_io():
+    """Read /proc/diskstats for host block devices and compute MB/s throughput."""
+    path = os.path.join(HOST_ROOT, "proc/diskstats") if os.path.exists(os.path.join(HOST_ROOT, "proc/diskstats")) else "/proc/diskstats"
+    now = time.time()
+    out = []
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 13: continue
+                dev = parts[2]
+                if dev.startswith("loop") or dev.startswith("ram") or dev.startswith("sr"): continue
+                try:
+                    s_read, s_write = int(parts[5]), int(parts[9])
+                except ValueError:
+                    continue
+                prev = _disk_prev.get(dev)
+                if prev:
+                    dt = now - prev[2]
+                    if dt > 0:
+                        rmb = ((s_read - prev[0]) * 512) / 1048576.0 / dt
+                        wmb = ((s_write - prev[1]) * 512) / 1048576.0 / dt
+                        out.append({
+                            "device": dev,
+                            "read_mb_s": round(rmb, 1),
+                            "write_mb_s": round(wmb, 1)
+                        })
+                _disk_prev[dev] = (s_read, s_write, now)
+    except Exception:
+        pass
+    out.sort(key=lambda x: -(x["read_mb_s"] + x["write_mb_s"]))
+    return {
+        "available": bool(out),
+        "summary": {
+            "total_read_mb_s": round(sum(x["read_mb_s"] for x in out), 1),
+            "total_write_mb_s": round(sum(x["write_mb_s"] for x in out), 1)
+        },
+        "items": out
+    }
+
 # hwmon drivers / thermal-zone types that expose the real CPU die/core sensors.
 _CPU_HWMON = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal")
 _CPU_ZONE  = ("x86_pkg_temp", "cpu_thermal", "cpu-thermal")
@@ -2785,6 +2827,7 @@ def health_scan():
     HEALTH["docker"]  = collect_docker()
     HEALTH["systemd"] = collect_systemd()
     HEALTH["update"]  = collect_update()
+    HEALTH["disk_io"] = collect_disk_io()
     # Top-processes is refreshed by sample_once (10s cadence) and cached on
     # HEALTH["processes"] — calling it here too would double-step the _PROC_PREV
     # jiffy deltas across two cadences and corrupt both. Reuse the cached value.
@@ -6715,9 +6758,13 @@ def api_health():
     # Set here (not baked into the cached collect_update payload) so toggling the
     # env flag takes effect on restart without waiting for the update cache.
     update["self_update_enabled"] = ALLOW_SELF_UPDATE
+    disk_io = HEALTH.get("disk_io") or {"available": False, "warming_up": True,
+                                         "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
+                                         "items": []}
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "processes": HEALTH["processes"],
+                    "disk_io": disk_io,
                     "os_updates": os_updates_summary(),
                     "diagnostics": local_diagnostics(),
                     "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
