@@ -3446,6 +3446,17 @@ def _detect_os(user, host, port):
     info["label"] = pretty if family == "windows" else (f"{pretty}" + (f" · {init}" if init else ""))
     return info
 
+def _remedy_docker_windows_daemon():
+    """Docker CLI is present on a Windows host but the daemon didn't answer
+    cleanly — usually Docker Desktop's engine needs a restart (e.g. after an
+    auto-update bumps the CLI's API version ahead of the running engine)."""
+    return {"where": "on the remote (Windows)",
+            "cmd": "# Docker Desktop's engine isn't answering API calls cleanly.\n"
+                   "# Restart it from the system tray (Docker Desktop icon > Restart),\n"
+                   "# or from an elevated PowerShell:\n"
+                   "Restart-Service com.docker.service -Force\n"
+                   "# Then confirm `docker ps` works locally before you re-test here."}
+
 def _remedy_docker_group(user, os_info):
     """Per-OS instructions for joining the docker group / fixing socket perms."""
     fam = (os_info.get("family") or "linux")
@@ -3662,16 +3673,34 @@ def probe_host(name):
         else:
             checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "warn",
                            "detail": (err or "no reply from PowerShell")[:160]})
-        # Docker on Windows: only if the CLI is on PATH (Docker Desktop, or a WSL
-        # engine exposed to Windows). Honest "info" otherwise.
+        # Docker on Windows: first check the CLI is even on PATH — only THEN run
+        # it. Previously we ran `docker version` straight away and treated any
+        # failure (missing CLI *or* a daemon-side error) as "not installed".
+        # But Docker Desktop's client/engine API-version handshake can itself
+        # fail with a message like "request returned 500 Internal Server Error
+        # ... check if the server supports the requested API version" — that
+        # text contains the word "error", so it used to get misclassified as
+        # "CLI not on PATH" even though Docker is very much installed, just
+        # unhealthy. Split "CLI absent" (info) from "CLI present but the
+        # daemon didn't respond cleanly" (warn) like the Linux path already
+        # does for permission-denied vs. not-installed.
         _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-            b"try{(docker version --format '{{.Server.Version}}')}catch{''}", timeout=12)
-        dv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
-        if dv and "." in dv and "error" not in dv.lower() and "cannot" not in dv.lower():
-            checks.append({"id": "docker", "label": "Docker", "status": "ok", "detail": f"server v{dv}"})
+            b"if(-not (Get-Command docker -EA SilentlyContinue)){Write-Output 'DOCKER_ABSENT'}else{"
+            b"$v=(docker version --format '{{.Server.Version}}' 2>&1);"
+            b"if($LASTEXITCODE -eq 0){Write-Output \"DOCKER_OK:$v\"}else{Write-Output \"DOCKER_ERR:$v\"}}",
+            timeout=12)
+        line = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+        if line.startswith("DOCKER_OK:") and "." in line:
+            checks.append({"id": "docker", "label": "Docker", "status": "ok",
+                           "detail": f"server v{line.split(':', 1)[1].strip()}"})
+        elif line.startswith("DOCKER_ERR:"):
+            checks.append({"id": "docker", "label": "Docker", "status": "warn",
+                           "detail": f"Docker is installed on {name} but the daemon didn't respond cleanly: "
+                                     f"{line.split(':', 1)[1].strip()[:160]}",
+                           "remedy": _remedy_docker_windows_daemon()})
         else:
             checks.append({"id": "docker", "label": "Docker", "status": "info",
-                           "detail": "Docker CLI not on PATH — container panel hidden for this host"})
+                           "detail": "Docker CLI not found on PATH — container panel hidden for this host"})
         # systemd D-Bus analogue: Windows services are always queryable.
         checks.append({"id": "dbus", "label": "Windows services", "status": "ok",
                        "detail": "Get-Service available"})
