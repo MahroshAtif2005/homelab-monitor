@@ -7009,11 +7009,20 @@ def api_maintenance():
         end_ts   = body.get("end_ts")
         if not start_ts or not end_ts:
             return jsonify({"ok": False, "error": "start_ts and end_ts are required"}), 400
-        if int(end_ts) <= int(start_ts):
+        try:
+            start_ts = int(start_ts)
+            end_ts = int(end_ts)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "start_ts and end_ts must be numeric"}), 400
+        if end_ts <= start_ts:
             return jsonify({"ok": False, "error": "end_ts must be after start_ts"}), 400
         recurrence = body.get("recurrence") or None
         if recurrence and recurrence not in ("daily", "weekly"):
             return jsonify({"ok": False, "error": "recurrence must be daily, weekly, or null"}), 400
+        if recurrence == "daily" and (end_ts - start_ts) > 86400:
+            return jsonify({"ok": False, "error": "daily recurrence window cannot exceed 24h"}), 400
+        if recurrence == "weekly" and (end_ts - start_ts) > 604800:
+            return jsonify({"ok": False, "error": "weekly recurrence window cannot exceed 7d"}), 400
         wid = create_maintenance_window(
             label=label,
             kind=body.get("kind") or "*",
