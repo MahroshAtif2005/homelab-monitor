@@ -155,6 +155,45 @@ def _clear_diskio():
         app.DB.commit()
 
 
+class TestRetention(unittest.TestCase):
+    """Exercises the EXACT retention statements sample_once() runs (same table,
+    same _DISK_IO_RETENTION/_PROC_IO_RETENTION constants), so a constant that
+    drifts from the claimed 7d/72h windows fails here, not silently in prod."""
+    def tearDown(self):
+        with app.LOCK:
+            app.DB.execute("DELETE FROM disk_io_samples")
+            app.DB.execute("DELETE FROM proc_io_samples")
+            app.DB.commit()
+
+    def test_disk_io_samples_pruned_past_retention(self):
+        now = int(time.time())
+        old = now - app._DISK_IO_RETENTION - 3600      # 1h past the 7d window
+        fresh = now - app._DISK_IO_RETENTION + 3600     # 1h inside the 7d window
+        with app.LOCK:
+            app.DB.execute("INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) "
+                           "VALUES(?,?,?,?,?)", (old, "sda", 1.0, 1.0, 1.0))
+            app.DB.execute("INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) "
+                           "VALUES(?,?,?,?,?)", (fresh, "sda", 2.0, 2.0, 2.0))
+            app.DB.execute("DELETE FROM disk_io_samples WHERE ts<?", (now - app._DISK_IO_RETENTION,))
+            app.DB.commit()
+            rows = app.DB.execute("SELECT ts FROM disk_io_samples").fetchall()
+        self.assertEqual([r[0] for r in rows], [fresh])
+
+    def test_proc_io_samples_pruned_past_retention(self):
+        now = int(time.time())
+        old = now - app._PROC_IO_RETENTION - 3600       # 1h past the 72h window
+        fresh = now - app._PROC_IO_RETENTION + 3600      # 1h inside the 72h window
+        with app.LOCK:
+            app.DB.execute("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
+                           "VALUES(?,?,?,?,?)", (old, 1, "stale", 0, 1))
+            app.DB.execute("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
+                           "VALUES(?,?,?,?,?)", (fresh, 2, "recent", 0, 1))
+            app.DB.execute("DELETE FROM proc_io_samples WHERE ts<?", (now - app._PROC_IO_RETENTION,))
+            app.DB.commit()
+            comms = {r[0] for r in app.DB.execute("SELECT comm FROM proc_io_samples")}
+        self.assertEqual(comms, {"recent"})
+
+
 class TestApiDataDiskIoSeries(unittest.TestCase):
     """The per-device trend series folded into /api/data (no separate endpoint —
     it rides the same bucketing/labels/range as every other chart on the tab)."""
