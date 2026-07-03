@@ -664,6 +664,15 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .mdet .kv .vv{font-family:var(--mono);font-size:14px;margin-top:2px}
 .mspark{width:100%;height:48px;display:block;background:var(--card);border:1px solid var(--bd);border-radius:6px;margin-top:4px}
 .mspark-cap{color:var(--mut);font-size:11px;margin-top:5px}
+/* Disk I/O device cards — same building blocks as everywhere else in the app
+   (.card/.kpi/.dbar/.pill/.badge/.mspark), just arranged per-device. */
+.dio-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.dio-card{border:1px solid var(--bd);border-radius:9px;background:var(--inset);padding:12px 14px}
+.dio-hd{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.dio-dev{font-weight:700;font-family:var(--mono);font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dio-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 14px;margin:10px 0}
+.dio-stats .kpi{padding:0;border:0;background:none;box-shadow:none}
+.dio-attr{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .vbars{min-width:120px}
 .vbar{height:6px;border-radius:3px;background:var(--free);overflow:hidden;margin:2px 0}
 .vbar i{display:block;height:100%}
@@ -2289,9 +2298,11 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 
 <!--  Disk I/O Throughput  -->
 <section data-tab="diskio" hidden>
-  <div class="card" style="max-width:800px; margin:0 auto">
+  <div class="card">
     <h2 data-i18n="diskio.title">💾 Disk I/O Throughput</h2>
-    <div id="diskio-body">
+    <p class="cap" data-i18n="diskio.cap">Live per-device throughput, utilisation and average op-latency, with a 6h trend sparkline per device. Read-only — nothing here touches your disks.</p>
+    <div class="grid" id="diskio-kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
+    <div id="diskio-body" style="margin-top:12px">
       <div class="empty" data-i18n="msg.no_disk_io">No Disk I/O activity detected.</div>
     </div>
   </div>
@@ -3635,24 +3646,89 @@ function modelSpark(service,tot){
 }
 
 // ── Renderers (status tabs: Overview cards, Containers, Services) ──────────────
-function renderDiskIo() {
-  if(!HH || !HH.disk_io) return;
-  const d = HH.disk_io;
-  const el = document.getElementById('diskio-body');
-  if(!d.available || !d.items || d.items.length === 0) {
-    el.innerHTML = `<div class="empty">${I18N.t('msg.no_disk_io', 'No Disk I/O activity detected.')}</div>`;
+// Disk I/O: live per-device throughput/utilisation/latency from HH.disk_io (the
+// /api/health snapshot), a 6h read/write trend sparkline per device from
+// D.disk_io (rides the same /api/data range everything else on the dashboard
+// already fetches — no separate endpoint/cache), and an anomaly badge from
+// HH.disk_io.anomalies (server-side z-score, edge-triggered into the Insight
+// Feed too). Reuses the app's own building blocks throughout: .kpi tiles,
+// .dbar + sev() for the utilisation bar (same as the Disks tab), .mspark for
+// the sparkline (same pattern as the AI Models VRAM timeline), .pill for
+// per-process attribution and .badge for the anomaly state.
+function _dioSpark(labels, rd, wr){
+  const all=[].concat(rd||[], wr||[]).filter(v=>v!=null);
+  if(all.length<2) return '<div class="mspark-cap muted">'+I18N.t('diskio.no_hist','Collecting history…')+'</div>';
+  const max=Math.max(1,...all), n=labels.length, den=(n-1)||1;
+  const line=arr=>(arr||[]).map((v,i)=>`${(i/den*100).toFixed(1)},${(100-((v||0)/max*100)).toFixed(1)}`).join(' ');
+  return `<svg class="mspark" viewBox="0 0 100 100" preserveAspectRatio="none">`
+    + `<polyline fill="none" stroke="var(--info)" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${line(rd)}"/>`
+    + `<polyline fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" points="${line(wr)}"/>`
+    + `</svg><div class="mspark-cap">`+I18N.tf('diskio.spark_cap','Read (solid) / write (dashed) — peak {v} MB/s',{v:max.toFixed(1)})+`</div>`;
+}
+function renderDiskIo(){
+  const kpi=document.getElementById('diskio-kpis'), body=document.getElementById('diskio-body');
+  if(!kpi || !body) return;
+  const dio=(HH && HH.disk_io) || {};
+  if(!dio.available){
+    kpi.innerHTML='';
+    const msg = dio.warming_up
+      ? I18N.t('diskio.warming','Warming up — per-device throughput appears after the next poll.')
+      : I18N.t('diskio.unavailable','Disk I/O stats are not available on this host.');
+    body.innerHTML='<div class="empty">'+esc(msg)+'</div>';
     return;
   }
-  let html = `<table><thead><tr>
-    <th data-i18n="col.device">${I18N.t('col.device', 'Device')}</th>
-    <th style="text-align:right" data-i18n="col.read_mb_s">${I18N.t('col.read_mb_s', 'Read (MB/s)')}</th>
-    <th style="text-align:right" data-i18n="col.write_mb_s">${I18N.t('col.write_mb_s', 'Write (MB/s)')}</th>
-  </tr></thead><tbody>`;
-  d.items.forEach(i => {
-    html += `<tr><td><span class="mono">${esc(i.device)}</span></td><td style="text-align:right">${i.read_mb_s}</td><td style="text-align:right">${i.write_mb_s}</td></tr>`;
-  });
-  html += `</tbody></table>`;
-  el.innerHTML = html;
+  const items=dio.items||[], s=dio.summary||{};
+  // Only numeric-util devices are eligible: a probe can emit util_pct:null, and
+  // null>-1 is truthy in JS, so a null-util device could wrongly "win" here.
+  const busiest=items.reduce((m,it)=>(Number.isFinite(it.util_pct)&&it.util_pct>(m?m.util_pct:-1)?it:m), null);
+  const K=[
+    {v:(s.total_read_mb_s||0).toFixed(1),  l:I18N.t('diskio.k_read','Total read'),  s:'MB/s'},
+    {v:(s.total_write_mb_s||0).toFixed(1), l:I18N.t('diskio.k_write','Total write'), s:'MB/s'},
+    {v:items.length,                       l:I18N.t('diskio.k_devs','Devices')},
+    {v:busiest?busiest.util_pct.toFixed(0)+'%':'—', l:I18N.t('diskio.k_busiest','Busiest util'), s:busiest?esc(busiest.device):''},
+  ];
+  kpi.innerHTML=K.map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+
+  let attrHtml='';
+  const at=dio.attribution;
+  if(at && at.available && (at.top_writer || at.top_reader)){
+    const chip=(p,label,bps)=>{
+      if(!p) return '';
+      const rate=fmtRate(bps);
+      return `<span class="pill" title="${esc(label+': '+p.name+' — '+rate)}">${esc(label)}: <b>${esc(p.name)}</b> ${esc(rate)}</span>`;
+    };
+    attrHtml='<div class="dio-attr">'
+      + chip(at.top_writer, I18N.t('diskio.top_writer','Top writer'), (at.top_writer||{}).write_b_s||0)
+      + chip(at.top_reader, I18N.t('diskio.top_reader','Top reader'), (at.top_reader||{}).read_b_s||0)
+      + `<span class="muted" style="font-size:11px">${I18N.t('diskio.attr_cap','per-process, from /proc')}</span></div>`;
+  }
+
+  const dLabels=(D && D.labels)||[], dHist=(D && D.disk_io)||{}, anoms=dio.anomalies||{};
+  const fmtLat=v=>(v==null?'—':v.toFixed(2)+' ms');
+  const cards=items.map(it=>{
+    const a=anoms[it.device];
+    const hasUtil=Number.isFinite(it.util_pct);
+    const util=Math.max(0,Math.min(100,it.util_pct||0));
+    const h=dHist[it.device]||{};
+    const chip=a
+      ? `<span class="badge ${Math.abs(a.z)>=4?'crit':'warn'}" title="${esc(a.value+' MB/s now vs ~'+a.baseline+' MB/s baseline ('+a.z+'σ)')}">${a.direction==='spike'?'▲':'▼'} ${esc(a.direction)} ${(a.z>0?'+':'')+a.z}σ</span>`
+      : `<span class="badge ok">${I18N.t('diskio.normal','normal')}</span>`;
+    return `<div class="dio-card">
+      <div class="dio-hd"><span class="dio-dev">${esc(it.device)}</span>${chip}</div>
+      <div style="display:flex;justify-content:space-between;font-size:12px">
+        <span class="muted">${I18N.t('diskio.col_util','Utilisation')}</span><span>${hasUtil?util.toFixed(1)+'%':'—'}</span></div>
+      <div class="dbar"><div style="width:${hasUtil?util:0}%;background:${sev(hasUtil?util:0)}"></div></div>
+      <div class="dio-stats">
+        <div class="kpi"><div class="v">${(it.read_mb_s||0).toFixed(1)}</div><div class="l">${I18N.t('diskio.s_read','Read MB/s')}</div></div>
+        <div class="kpi"><div class="v">${(it.write_mb_s||0).toFixed(1)}</div><div class="l">${I18N.t('diskio.s_write','Write MB/s')}</div></div>
+        <div class="kpi"><div class="v">${fmtLat(it.read_lat_ms)}</div><div class="l">${I18N.t('diskio.col_rlat','Read latency')}</div></div>
+        <div class="kpi"><div class="v">${fmtLat(it.write_lat_ms)}</div><div class="l">${I18N.t('diskio.col_wlat','Write latency')}</div></div>
+      </div>
+      ${_dioSpark(dLabels, h.read_mb_s, h.write_mb_s)}
+    </div>`;
+  }).join('');
+  body.innerHTML = attrHtml + `<div class="dio-grid">${cards}</div>`
+    + `<p class="cap" style="margin-top:12px">${I18N.t('diskio.footnote','Spikes are z-scored against each device’s own recent baseline and appear in the Insight Feed.')}</p>`;
 }
 
 function renderHealth(){
