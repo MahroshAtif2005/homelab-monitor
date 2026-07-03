@@ -249,6 +249,26 @@ def get_ai_models(range="6h"):
     }
 
 
+def get_installed_models():
+    """The Installed-models registry (#219): every AI model available on the hub —
+    not just what's loaded — grouped by provider (ollama, vllm, llama.cpp, …).
+
+    Ollama entries carry full on-disk detail (size, quant, param size, last
+    modified); other providers carry name/loaded/vram only (most catalogue APIs
+    don't expose on-disk size). `totals` is count/loaded/disk-GB across all
+    providers; `providers` lists which ones were detected. Answers "what can I
+    run, and where — without SSHing in".
+    """
+    data = _get("/api/models")
+    return {
+        "enabled": data.get("enabled"),
+        "ollama_reachable": data.get("ollama_reachable"),
+        "providers": data.get("providers") or [],
+        "models": data.get("models") or [],
+        "totals": data.get("totals") or {},
+    }
+
+
 def get_events(range="6h"):
     """Recent edge-triggered events (OOM kills, threshold crossings) + insights.
 
