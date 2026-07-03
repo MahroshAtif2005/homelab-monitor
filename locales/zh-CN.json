@@ -388,6 +388,8 @@
   "exp.no_metrics": "此运行未记录任何指标。",
   "exp.chart_util": "利用率 (%)",
   "exp.run_cost_cap": "本次运行在其窗口内消耗 {kwh} kWh，GPU 能耗费用 {cost} · 峰值利用率 {util}% · 平均 {avg} W。",
+  "exp.run_tok_cap": "吞吐量平均为 {avg} tok/s（峰值 {peak}）{eff}。",
+  "exp.run_tok_eff": " · 每 kWh {n} 个 token",
   "exp.train_empty": "未在本机检测到训练或微调进程。启动一个（<code>torchrun</code>、<code>accelerate</code>、<code>deepspeed</code>，或 <code>train.py</code> / SFT / LoRA 脚本…），它将自动显示在此处 — 任务内无需任何代理。",
   "exp.on_gpu": "已在 GPU 上",
   "exp.no_gpu_yet": "尚未使用 GPU",

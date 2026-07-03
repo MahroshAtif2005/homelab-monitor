@@ -134,7 +134,7 @@ RUNS = {
          "started_at": 1000, "ended_at": 4600, "duration": 3600, "host": "ardi",
          "params": {"lr": 0.0002, "epochs": 3}, "tags": ["sft"], "notes": "",
          "key_id": 1, "key_name": "laptop",
-         "metrics_latest": {"loss": 0.42, "accuracy": 0.91},
+         "metrics_latest": {"loss": 0.42, "accuracy": 0.91, "tokens_per_sec": 1834.2},
          "energy_kwh": 1.8, "cost": 0.46, "avg_w": 180, "peak_util": 99},
         {"id": "r2", "name": "eval-sweep", "source": "mlflow", "status": "running",
          "started_at": 4000, "ended_at": None, "duration": 600, "host": "ardi",
@@ -148,7 +148,8 @@ RUN_ONE = {
     "id": "r1", "name": "qwen-sft", "source": "sdk", "status": "finished",
     "started_at": 1000, "ended_at": 4600, "duration": 3600, "host": "ardi",
     "params": {"lr": 0.0002, "epochs": 3}, "tags": ["sft"], "notes": "",
-    "metrics": {"loss": {"steps": [0, 1, 2], "ts": [1000, 2800, 4600], "values": [1.2, 0.7, 0.42]}},
+    "metrics": {"loss": {"steps": [0, 1, 2], "ts": [1000, 2800, 4600], "values": [1.2, 0.7, 0.42]},
+                "tokens_per_sec": {"steps": [0, 1, 2], "ts": [1000, 2800, 4600], "values": [1700, 1850, 1900]}},
     "resource": {"labels": [1000, 4600], "power_w": [170, 190], "util_pct": [98, 99], "bucket_sec": 600},
     "energy_kwh": 1.8, "cost": 0.46, "avg_w": 180, "peak_util": 99,
     "currency": "BGN", "tariff_mode": "dual",
@@ -373,12 +374,14 @@ def run():
         r = hc.get_experiments("7d")
         check(r["count"] == 2, "counts runs")
         check(r["runs"][0]["metrics_latest"]["loss"] == 0.42, "latest metrics surfaced")
+        check(r["runs"][0]["metrics_latest"]["tokens_per_sec"] == 1834.2, "tokens/sec surfaced in metrics_latest")
         check(r["runs"][0]["cost"] == 0.46, "run priced by GPU energy")
 
         print("get_experiment")
         r = hc.get_experiment("r1")
         check(r["id"] == "r1" and r["status"] == "finished", "single run detail")
         check(r["metrics"]["loss"]["values"][-1] == 0.42, "loss-curve series")
+        check(r["metrics"]["tokens_per_sec"]["values"] == [1700, 1850, 1900], "tokens/sec curve surfaced")
         check(r["resource"]["util_pct"] == [98, 99], "gpu series over the run")
         try:
             hc.get_experiment("nope")

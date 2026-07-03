@@ -2142,7 +2142,8 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 homelab.configure(url="http://THIS-HOST:9800", key="hlm_…")
 with homelab.run("my-finetune", params={"lr":2e-4}) as r:
     for step, loss in enumerate(train()):
-        r.log_metric("loss", loss, step=step)</pre>
+        r.log_metric("loss", loss, step=step)
+        r.log_metric("tokens_per_sec", batch_tokens / step_seconds, step=step)</pre>
       <div class="cap" data-i18n-html="intg.colab_cap">Colab/Kaggle run in the cloud — point <code>url</code> at a Tailscale/ngrok address that reaches this hub.</div>
 
       <div class="card-sub" style="font-weight:600;margin-top:16px" data-i18n="intg.mlflow">🟢 MLflow (pull)</div>
@@ -5216,6 +5217,9 @@ function paintAiBand(g,x,loaded,serving){
 // ── Runs (pushed from notebooks / MLflow) — the primary Experiments view ──────
 // Source → colour dot (srcDot) and status → stroke icon+colour (stIcon) live in the
 // icon section; emoji maps replaced by the SVG status-icon family.
+// Aliases a training script might reasonably use when logging throughput via
+// r.log_metric(...) — no dedicated column/schema, just recognised by name.
+const TOK_METRIC_KEYS=['tokens_per_sec','tok_per_sec','tokens_sec','tok_s'];
 async function renderRuns(){
   const card=document.getElementById('runs-card'); if(!card) return;
   const status=(document.getElementById('runs-status')||{}).value||'';
@@ -5228,7 +5232,16 @@ async function renderRuns(){
   empty.hidden=true; if(tbl) tbl.style.display='';
   const fmtTs=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
   tb.innerHTML=runs.map(r=>{
-    const mets=Object.entries(r.metrics_latest||{}).slice(0,3).map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`).join(' · ');
+    // Throughput (tokens/sec) is logged like any other metric — no schema change —
+    // but it's worth a glance, so it's pulled to the front and chipped, not buried
+    // alphabetically among loss/accuracy in the generic 3-metric preview.
+    const entries=Object.entries(r.metrics_latest||{});
+    const tokEntry=entries.find(([k])=>TOK_METRIC_KEYS.includes(k));
+    const rest=entries.filter(([k])=>!TOK_METRIC_KEYS.includes(k)).slice(0, tokEntry?2:3);
+    const metParts=[];
+    if(tokEntry) metParts.push(`<span class="mchip" title="${esc(tokEntry[0])}">${(+tokEntry[1]).toFixed(0)} tok/s</span>`);
+    metParts.push(...rest.map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`));
+    const mets=metParts.join(' · ');
     return `<tr data-id="${esc(r.id)}" style="cursor:pointer">
       <td><b>${esc(r.name)}</b></td>
       <td><span class="mchip">${srcDot(r.source)}${esc(r.source)}</span></td>
@@ -5266,7 +5279,10 @@ async function openRun(id){
   const params=j.params?(' · params '+esc(JSON.stringify(j.params))):'';
   document.getElementById('run-detail-meta').innerHTML=`${srcDot(j.source)}${esc(j.source)} · <span class="st-${esc(j.status)}">${stIcon(j.status)} ${esc(j.status)}</span> · ${esc(j.host||'')} · ${fmtDur(j.duration)}${params}`;
   const host=document.getElementById('run-metric-charts'); host.innerHTML='';
-  const keys=Object.keys(j.metrics||{});
+  // Tokens/sec (however the script named it) leads the chart list — it's the
+  // metric most worth a glance for an LLM training/fine-tune run.
+  const keys=Object.keys(j.metrics||{})
+    .sort((a,b)=>(TOK_METRIC_KEYS.includes(b)?1:0)-(TOK_METRIC_KEYS.includes(a)?1:0));
   keys.forEach((k,i)=>{
     const id2='runmetric'+i, m=j.metrics[k];
     host.insertAdjacentHTML('beforeend',`<div style="margin-top:8px"><div class="cap" style="margin-bottom:2px">${esc(k)}</div><div class="chartbox short"><canvas id="${id2}"></canvas></div></div>`);
@@ -5283,7 +5299,22 @@ async function openRun(id){
         y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
         y1:{position:'right',min:0,max:100,grid:{display:false},ticks:{color:cv('--mut'),callback:v=>v+'%'}}},
       plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}}});
-  document.getElementById('run-cost-cap').textContent=I18N.tf('exp.run_cost_cap','This run used {kwh} kWh and cost {cost} in GPU energy over its window · peak util {util}% · avg {avg} W.',{kwh:(j.energy_kwh||0).toFixed(3),cost:cur+(j.cost||0).toFixed(2),util:j.peak_util,avg:j.avg_w});
+  let costCap=I18N.tf('exp.run_cost_cap','This run used {kwh} kWh and cost {cost} in GPU energy over its window · peak util {util}% · avg {avg} W.',{kwh:(j.energy_kwh||0).toFixed(3),cost:cur+(j.cost||0).toFixed(2),util:j.peak_util,avg:j.avg_w});
+  const tokKey=keys.find(k=>TOK_METRIC_KEYS.includes(k));
+  if(tokKey){
+    const vals=(j.metrics[tokKey].values||[]).filter(v=>v!=null);
+    if(vals.length){
+      const avgTok=vals.reduce((s,v)=>s+v,0)/vals.length, peakTok=Math.max(...vals);
+      // avg tok/s * run seconds ≈ total tokens generated; ÷ kWh = tokens per kWh —
+      // the training-throughput analogue of the AI Models tab's "Tokens / Joule".
+      const tokPerKwh=(j.energy_kwh && j.duration) ? avgTok*j.duration/j.energy_kwh : 0;
+      const eff=tokPerKwh
+        ? I18N.tf('exp.run_tok_eff',' · {n} tokens/kWh',{n:tokPerKwh>=1e6?(tokPerKwh/1e6).toFixed(1)+'M':tokPerKwh>=1000?(tokPerKwh/1000).toFixed(0)+'K':Math.round(tokPerKwh)}) : '';
+      costCap+=' '+I18N.tf('exp.run_tok_cap','Throughput averaged {avg} tok/s (peak {peak}){eff}.',
+        {avg:avgTok.toFixed(0), peak:peakTok.toFixed(0), eff});
+    }
+  }
+  document.getElementById('run-cost-cap').textContent=costCap;
   document.getElementById('run-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -7317,7 +7348,7 @@ async function loadIntegrations(){
     tb.querySelectorAll('button[data-del]').forEach(b=>b.onclick=()=>deleteKey(b.dataset.del));
   }
   const snip=document.getElementById('intg_snippet');
-  if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)`;
+  if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)\n        r.log_metric("tokens_per_sec", batch_tokens / step_seconds, step=step)`;
 }
 async function deleteKey(id){
   if(!confirm(I18N.t('confirm.revoke_key','Revoke this API key? Any client still using it will stop working immediately.'))) return;
