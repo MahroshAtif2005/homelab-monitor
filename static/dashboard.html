@@ -585,6 +585,9 @@ body{background:var(--canvas)}
 .nrow{display:flex;align-items:center;gap:9px;width:100%;border:0;background:none;color:var(--mut);font:inherit;font-size:13px;text-align:left;padding:8px 10px;border-radius:6px;cursor:pointer}
 .nrow:hover{background:var(--hover);color:var(--tx)}
 .nrow.on{background:var(--sel);color:var(--tx);font-weight:600}
+.nrow .hic{width:16px;height:16px;opacity:.75}
+.nrow:hover .hic,.nrow.on .hic{opacity:1}
+.nrow.on .hic{color:var(--accent)}
 .nrow .tdot{width:7px;height:7px;border-radius:2px;margin-left:auto}
 .foot{border-top:1px solid var(--bd);padding:10px;display:flex;flex-direction:column;gap:9px}
 .foot .ghstar{align-self:flex-start}
@@ -647,6 +650,7 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .badge.warn{color:var(--warn);background:var(--warnbg);border-color:transparent}
 .badge.ok{color:var(--ok);background:var(--okbg);border-color:transparent}
 .badge.info{color:var(--mut);background:var(--inset);border-color:var(--bd)}
+.badge.maint{color:#58a6ff;background:#0d1117;border-color:#58a6ff55}
 .sdot{border-radius:2px}.dot{border-radius:2px}
 .rb.on{box-shadow:none}
 /* AI Models — expandable rows + per-model VRAM timeline */
@@ -661,6 +665,15 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .mdet .kv .vv{font-family:var(--mono);font-size:14px;margin-top:2px}
 .mspark{width:100%;height:48px;display:block;background:var(--card);border:1px solid var(--bd);border-radius:6px;margin-top:4px}
 .mspark-cap{color:var(--mut);font-size:11px;margin-top:5px}
+/* Disk I/O device cards — same building blocks as everywhere else in the app
+   (.card/.kpi/.dbar/.pill/.badge/.mspark), just arranged per-device. */
+.dio-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.dio-card{border:1px solid var(--bd);border-radius:9px;background:var(--inset);padding:12px 14px}
+.dio-hd{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.dio-dev{font-weight:700;font-family:var(--mono);font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dio-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 14px;margin:10px 0}
+.dio-stats .kpi{padding:0;border:0;background:none;box-shadow:none}
+.dio-attr{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .vbars{min-width:120px}
 .vbar{height:6px;border-radius:3px;background:var(--free);overflow:hidden;margin:2px 0}
 .vbar i{display:block;height:100%}
@@ -767,6 +780,14 @@ a{color:var(--info)}
 .copybtn .sic{width:13px;height:13px}
 .infocard h3 .copybtn{opacity:.5;padding:1px}
 .infocard h3 .copybtn:hover{opacity:1}
+/* copyable() — the same quiet-until-hover affordance, generalised to any table
+   cell / list item / detail panel (#220). Reveals on hovering the wrapper
+   itself OR the enclosing table row, so it works in dense tables too. */
+.copywrap{display:inline-flex;align-items:center;gap:3px;max-width:100%}
+.copywrap .copyval{overflow:hidden;text-overflow:ellipsis}
+.copywrap:hover .copybtn,tr:hover .copywrap .copybtn{opacity:.6}
+.copybtn.mini{padding:1px}
+.copybtn.mini .sic{width:11px;height:11px}
 .kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .kpirow .kpi{flex:1;min-width:120px}
 /* Security check rows reuse the app's .badge + .sdot + table styling; the only
@@ -1727,11 +1748,14 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <h2 data-i18n="registry.title">📦 Installed models</h2>
       <span class="ch-meta" id="registry-summary"></span>
       <span class="ch-space"></span>
+      <input type="text" id="registry-filter" class="field" autocomplete="off" spellcheck="false"
+             style="width:180px;font-size:12px;padding:5px 8px"
+             placeholder="Filter by model or provider…">
       <button class="btn" id="registry-refresh" type="button"
               data-i18n="registry.refresh" title="Refresh registry">↻ Refresh</button>
     </div>
     <div id="registry-body"></div>
-    <p class="cap" data-i18n="registry.cap">Every model pulled to this host's local LLM (ollama) — the on-disk inventory, a superset of what's loaded right now. Sizes are on disk; a <b>Loaded</b> badge marks models resident in VRAM this moment. Read-only.</p>
+    <p class="cap" data-i18n="registry.cap">Every model this host's recognised AI servers report — ollama's on-disk inventory (size, params, quant) plus what every other server (vLLM, llama.cpp, …) is currently serving, grouped by provider. A <b>Loaded</b> badge marks models resident in VRAM this moment. Read-only.</p>
   </div>
   <div id="modelsbody"></div>
   <p class="cap" data-i18n-html="models.section_cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
@@ -2128,7 +2152,8 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 homelab.configure(url="http://THIS-HOST:9800", key="hlm_…")
 with homelab.run("my-finetune", params={"lr":2e-4}) as r:
     for step, loss in enumerate(train()):
-        r.log_metric("loss", loss, step=step)</pre>
+        r.log_metric("loss", loss, step=step)
+        r.log_metric("tokens_per_sec", batch_tokens / step_seconds, step=step)</pre>
       <div class="cap" data-i18n-html="intg.colab_cap">Colab/Kaggle run in the cloud — point <code>url</code> at a Tailscale/ngrok address that reaches this hub.</div>
 
       <div class="card-sub" style="font-weight:600;margin-top:16px" data-i18n="intg.mlflow">🟢 MLflow (pull)</div>
@@ -2270,6 +2295,18 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
 <!-- ───────── Disks (WizTree-style usage treemaps) ───────── -->
 <section data-tab="disks" hidden>
   <div id="disksbody"></div>
+</section>
+
+<!--  Disk I/O Throughput  -->
+<section data-tab="diskio" hidden>
+  <div class="card">
+    <h2 data-i18n="diskio.title">💾 Disk I/O Throughput</h2>
+    <p class="cap" data-i18n="diskio.cap">Live per-device throughput, utilisation and average op-latency, with a 6h trend sparkline per device. Read-only — nothing here touches your disks.</p>
+    <div class="grid" id="diskio-kpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
+    <div id="diskio-body" style="margin-top:12px">
+      <div class="empty" data-i18n="msg.no_disk_io">No Disk I/O activity detected.</div>
+    </div>
+  </div>
 </section>
 
 <!-- ───────── Network ───────── -->
@@ -2626,6 +2663,7 @@ const TABS = [
   {id:'services',   label:'Services',   charts:false, zone:'monitoring'},
   {id:'host',       label:'System',     charts:true,  zone:'monitoring'},
   {id:'disks',      label:'Disks',      charts:false, zone:'monitoring'},
+  {id:'diskio',     label:'Disk I/O',   charts:false, zone:'monitoring'},
   {id:'network',    label:'Network',    charts:false, zone:'monitoring'},
   {id:'security',   label:'Security',   charts:false, zone:'monitoring'},
   {id:'uptime',     label:'Uptime',     charts:false, zone:'monitoring'},
@@ -2871,7 +2909,29 @@ function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86
 // ── Tab navigation ────────────────────────────────────────────────────────────
 // rev6: nav rows live in a grouped sidebar (Monitoring / AI / Settings), always
 // visible — no gear drawer. tdot = per-section attention square (set in renderHealth).
-const tabBtn = t => `<button class="nrow" data-t="${t.id}"><span>${I18N.t('nav.'+t.id, t.label)}</span><span class="tdot" id="ndot-${t.id}" style="display:none"></span></button>`;
+// Nav icons reuse the exact SVG each tab already draws in its own page header
+// (ICONS, keyed by the emoji that used to prefix it) so the sidebar row visually
+// matches what you land on. The four tabs with no existing header icon get a
+// small dedicated glyph in the same stroke family.
+const NAV_ICON = {
+  overview:    '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  gpu:         ICONS['🎮'],
+  costs:       ICONS['💰'],
+  containers:  ICONS['📦'],
+  services:    ICONS['🧩'],
+  host:        ICONS['🖥'],
+  disks:       '<line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/>',
+  diskio:      '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  network:     ICONS['📶'],
+  security:    ICONS['🛡'],
+  uptime:      ICONS['🛰'],
+  models:      ICONS['🧠'],
+  experiments: ICONS['🧪'],
+  hosts:       ICONS['🌐'],
+  alerts:      '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  backup:      ICONS['💾'],
+};
+const tabBtn = t => `<button class="nrow" data-t="${t.id}">${svgIc(NAV_ICON[t.id]||'')}<span>${I18N.t('nav.'+t.id, t.label)}</span><span class="tdot" id="ndot-${t.id}" style="display:none"></span></button>`;
 const isSettingsTab = id => !!(TABS.find(t=>t.id===id)||{}).settings;
 function buildNav(){
   const nl = document.getElementById('navlist'); if(!nl) return;
@@ -2993,6 +3053,7 @@ function showTab(id){
   if(id==='costs') renderCosts(true);
   if(id==='host')     renderHostTab();
   if(id==='disks')    renderDisksTab();
+  if(id==='diskio')   renderDiskIo();
   if(id==='network')  renderNetwork();
   if(id==='security') renderSecurity();
   if(id==='services') renderServicesTab();
@@ -3407,43 +3468,58 @@ function _registryDate(s){
     return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
   }catch(e){ return '—'; }
 }
+let REGISTRY_LAST=null;   // last /api/models payload — re-filtered client-side, no refetch
 function renderRegistry(j){
   const card=document.getElementById('registry-card'); if(!card) return;
-  // Registry is local-ollama only — hide entirely on remote hosts.
+  // Registry is local-host only — hide entirely on remote hosts (#219 fleet-wide
+  // merge is a follow-up; ollama disk detail + the per-container catalog both
+  // only reflect the hub itself today).
   if(CURRENT_HOST!=='local'){ card.hidden=true; return; }
   card.hidden=false;
+  if(j) REGISTRY_LAST=j;
   const body=document.getElementById('registry-body');
   const sum=document.getElementById('registry-summary');
-  const models=(j&&j.models)||[];
-  if(!j || !j.enabled || !j.ollama_reachable){
+  const all=(REGISTRY_LAST&&REGISTRY_LAST.models)||[];
+  if(!REGISTRY_LAST || !REGISTRY_LAST.enabled){
     if(sum) sum.textContent='';
     body.innerHTML='<div class="ins info" style="margin:2px 0"><div class="ic">🌙</div><div>'
-      +'<div class="t">'+I18N.t('registry.offline','Local LLM not reachable')+'</div>'
-      +'<div class="d">'+I18N.t('registry.offline_d','Start ollama on this host to list the models pulled to disk. Read-only — the monitor never pulls, loads or removes models.')+'</div></div></div>';
+      +'<div class="t">'+I18N.t('registry.offline','No AI model server reachable')+'</div>'
+      +'<div class="d">'+I18N.t('registry.offline_d','Start ollama or another recognised server (vLLM, llama.cpp, …) on this host and it will appear here. Read-only — the monitor never pulls, loads or removes models.')+'</div></div></div>';
     return;
   }
-  if(!models.length){
+  if(!all.length){
     if(sum) sum.textContent='';
-    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.empty','No models pulled to disk yet. Run "ollama pull <model>" on this host and it will appear here.')+'</div>';
+    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.empty','No models detected yet. Pull one to ollama, or start another recognised server, and it will appear here.')+'</div>';
     return;
   }
-  const t=j.totals||{};
+  const t=REGISTRY_LAST.totals||{};
   if(sum) sum.textContent=I18N.tf('registry.summary','{n} models · {gb} GB on disk · {loaded} loaded',
-    {n:t.count!=null?t.count:models.length, gb:fmtBytes(t.total_bytes).replace(' GB',''), loaded:t.loaded!=null?t.loaded:0});
+    {n:t.count!=null?t.count:all.length, gb:fmtBytes(t.total_bytes).replace(' GB',''), loaded:t.loaded!=null?t.loaded:0});
+  const q=(document.getElementById('registry-filter')||{}).value||'';
+  const needle=q.trim().toLowerCase();
+  const models=needle
+    ? all.filter(m=>(m.name||'').toLowerCase().includes(needle) || (m.provider||'').toLowerCase().includes(needle))
+    : all;
+  if(!models.length){
+    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.no_match','No models match your filter.')+'</div>';
+    return;
+  }
   const rows=models.map(m=>{
     const meta=[m.param_size,m.quant].filter(Boolean).map(esc).join(' · ')
       || (m.family?esc(m.family):'<span class="muted">—</span>');
     const loaded=m.loaded
       ? '<span class="badge ok">'+I18N.t('registry.loaded','Loaded')+(m.vram_mb!=null?' · '+esc(fmtMB(m.vram_mb)):'')+'</span>'
       : '<span class="badge info">'+I18N.t('registry.ondisk','On disk')+'</span>';
-    return '<tr><td>'+esc(m.name)+'</td>'
-      +'<td>'+esc(fmtBytes(m.size_bytes))+'</td>'
+    return '<tr><td>'+copyable(m.name)+'</td>'
+      +'<td><span class="pill" style="text-transform:none">'+esc(m.provider||'—')+'</span></td>'
+      +'<td>'+(m.size_bytes!=null?esc(fmtBytes(m.size_bytes)):'<span class="muted">—</span>')+'</td>'
       +'<td>'+meta+'</td>'
       +'<td>'+loaded+'</td>'
       +'<td><span class="muted">'+esc(_registryDate(m.modified))+'</span></td></tr>';
   }).join('');
   body.innerHTML='<table style="margin-top:4px"><thead><tr>'
     +'<th>'+I18N.t('registry.col_model','Model')+'</th>'
+    +'<th>'+I18N.t('registry.col_provider','Provider')+'</th>'
     +'<th>'+I18N.t('registry.col_size','Size')+'</th>'
     +'<th>'+I18N.t('registry.col_meta','Params · Quant')+'</th>'
     +'<th>'+I18N.t('registry.col_status','Status')+'</th>'
@@ -3460,12 +3536,14 @@ async function loadRegistry(){
   REGISTRY_BUSY=false;
   renderRegistry(j);
 }
-// Wire the registry refresh button once (element is in static markup from load).
+// Wire the registry refresh button + filter box once (elements are in static markup from load).
 let REGISTRY_WIRED=false;
 function _wireRegistry(){
   if(REGISTRY_WIRED) return; REGISTRY_WIRED=true;
   const rgb=document.getElementById('registry-refresh');
   if(rgb) rgb.onclick=()=>loadRegistry();
+  const flt=document.getElementById('registry-filter');
+  if(flt) flt.addEventListener('input',()=>renderRegistry(null));
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
@@ -3494,7 +3572,7 @@ function renderModels(){
     const models=bySvc[svc].slice().sort((a,b)=>(b.peak||0)-(a.peak||0));
     const rows=models.map(m=>{
       const pW=m.peak!=null?Math.max(2,m.peak/maxV*100):0, aW=m.avg!=null?Math.max(2,m.avg/maxV*100):0;
-      return `<tr><td><span class="dot" style="background:${c}"></span>${esc(m.model)}${modelMetaChips(m.model)}</td>
+      return `<tr><td><span class="dot" style="background:${c}"></span>${copyable(m.model)}${modelMetaChips(m.model)}</td>
         <td>${m.vram!=null?'<span class="badge ok">'+I18N.t('models.loaded','Loaded')+'</span>':'<span class="badge info">'+I18N.t('models.idle','Idle')+'</span>'}</td>
         <td>${m.vram!=null?fmtMB(m.vram):'—'}</td>
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
@@ -3569,6 +3647,91 @@ function modelSpark(service,tot){
 }
 
 // ── Renderers (status tabs: Overview cards, Containers, Services) ──────────────
+// Disk I/O: live per-device throughput/utilisation/latency from HH.disk_io (the
+// /api/health snapshot), a 6h read/write trend sparkline per device from
+// D.disk_io (rides the same /api/data range everything else on the dashboard
+// already fetches — no separate endpoint/cache), and an anomaly badge from
+// HH.disk_io.anomalies (server-side z-score, edge-triggered into the Insight
+// Feed too). Reuses the app's own building blocks throughout: .kpi tiles,
+// .dbar + sev() for the utilisation bar (same as the Disks tab), .mspark for
+// the sparkline (same pattern as the AI Models VRAM timeline), .pill for
+// per-process attribution and .badge for the anomaly state.
+function _dioSpark(labels, rd, wr){
+  const all=[].concat(rd||[], wr||[]).filter(v=>v!=null);
+  if(all.length<2) return '<div class="mspark-cap muted">'+I18N.t('diskio.no_hist','Collecting history…')+'</div>';
+  const max=Math.max(1,...all), n=labels.length, den=(n-1)||1;
+  const line=arr=>(arr||[]).map((v,i)=>`${(i/den*100).toFixed(1)},${(100-((v||0)/max*100)).toFixed(1)}`).join(' ');
+  return `<svg class="mspark" viewBox="0 0 100 100" preserveAspectRatio="none">`
+    + `<polyline fill="none" stroke="var(--info)" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${line(rd)}"/>`
+    + `<polyline fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" points="${line(wr)}"/>`
+    + `</svg><div class="mspark-cap">`+I18N.tf('diskio.spark_cap','Read (solid) / write (dashed) — peak {v} MB/s',{v:max.toFixed(1)})+`</div>`;
+}
+function renderDiskIo(){
+  const kpi=document.getElementById('diskio-kpis'), body=document.getElementById('diskio-body');
+  if(!kpi || !body) return;
+  const dio=(HH && HH.disk_io) || {};
+  if(!dio.available){
+    kpi.innerHTML='';
+    const msg = dio.warming_up
+      ? I18N.t('diskio.warming','Warming up — per-device throughput appears after the next poll.')
+      : I18N.t('diskio.unavailable','Disk I/O stats are not available on this host.');
+    body.innerHTML='<div class="empty">'+esc(msg)+'</div>';
+    return;
+  }
+  const items=dio.items||[], s=dio.summary||{};
+  // Only numeric-util devices are eligible: a probe can emit util_pct:null, and
+  // null>-1 is truthy in JS, so a null-util device could wrongly "win" here.
+  const busiest=items.reduce((m,it)=>(Number.isFinite(it.util_pct)&&it.util_pct>(m?m.util_pct:-1)?it:m), null);
+  const K=[
+    {v:(s.total_read_mb_s||0).toFixed(1),  l:I18N.t('diskio.k_read','Total read'),  s:'MB/s'},
+    {v:(s.total_write_mb_s||0).toFixed(1), l:I18N.t('diskio.k_write','Total write'), s:'MB/s'},
+    {v:items.length,                       l:I18N.t('diskio.k_devs','Devices')},
+    {v:busiest?busiest.util_pct.toFixed(0)+'%':'—', l:I18N.t('diskio.k_busiest','Busiest util'), s:busiest?esc(busiest.device):''},
+  ];
+  kpi.innerHTML=K.map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+
+  let attrHtml='';
+  const at=dio.attribution;
+  if(at && at.available && (at.top_writer || at.top_reader)){
+    const chip=(p,label,bps)=>{
+      if(!p) return '';
+      const rate=fmtRate(bps);
+      return `<span class="pill" title="${esc(label+': '+p.name+' — '+rate)}">${esc(label)}: <b>${esc(p.name)}</b> ${esc(rate)}</span>`;
+    };
+    attrHtml='<div class="dio-attr">'
+      + chip(at.top_writer, I18N.t('diskio.top_writer','Top writer'), (at.top_writer||{}).write_b_s||0)
+      + chip(at.top_reader, I18N.t('diskio.top_reader','Top reader'), (at.top_reader||{}).read_b_s||0)
+      + `<span class="muted" style="font-size:11px">${I18N.t('diskio.attr_cap','per-process, from /proc')}</span></div>`;
+  }
+
+  const dLabels=(D && D.labels)||[], dHist=(D && D.disk_io)||{}, anoms=dio.anomalies||{};
+  const fmtLat=v=>(v==null?'—':v.toFixed(2)+' ms');
+  const cards=items.map(it=>{
+    const a=anoms[it.device];
+    const hasUtil=Number.isFinite(it.util_pct);
+    const util=Math.max(0,Math.min(100,it.util_pct||0));
+    const h=dHist[it.device]||{};
+    const chip=a
+      ? `<span class="badge ${Math.abs(a.z)>=4?'crit':'warn'}" title="${esc(a.value+' MB/s now vs ~'+a.baseline+' MB/s baseline ('+a.z+'σ)')}">${a.direction==='spike'?'▲':'▼'} ${esc(a.direction)} ${(a.z>0?'+':'')+a.z}σ</span>`
+      : `<span class="badge ok">${I18N.t('diskio.normal','normal')}</span>`;
+    return `<div class="dio-card">
+      <div class="dio-hd"><span class="dio-dev">${esc(it.device)}</span>${chip}</div>
+      <div style="display:flex;justify-content:space-between;font-size:12px">
+        <span class="muted">${I18N.t('diskio.col_util','Utilisation')}</span><span>${hasUtil?util.toFixed(1)+'%':'—'}</span></div>
+      <div class="dbar"><div style="width:${hasUtil?util:0}%;background:${sev(hasUtil?util:0)}"></div></div>
+      <div class="dio-stats">
+        <div class="kpi"><div class="v">${(it.read_mb_s||0).toFixed(1)}</div><div class="l">${I18N.t('diskio.s_read','Read MB/s')}</div></div>
+        <div class="kpi"><div class="v">${(it.write_mb_s||0).toFixed(1)}</div><div class="l">${I18N.t('diskio.s_write','Write MB/s')}</div></div>
+        <div class="kpi"><div class="v">${fmtLat(it.read_lat_ms)}</div><div class="l">${I18N.t('diskio.col_rlat','Read latency')}</div></div>
+        <div class="kpi"><div class="v">${fmtLat(it.write_lat_ms)}</div><div class="l">${I18N.t('diskio.col_wlat','Write latency')}</div></div>
+      </div>
+      ${_dioSpark(dLabels, h.read_mb_s, h.write_mb_s)}
+    </div>`;
+  }).join('');
+  body.innerHTML = attrHtml + `<div class="dio-grid">${cards}</div>`
+    + `<p class="cap" style="margin-top:12px">${I18N.t('diskio.footnote','Spikes are z-scored against each device’s own recent baseline and appear in the Insight Feed.')}</p>`;
+}
+
 function renderHealth(){
   if(!HH) return;
   setVer(HH.version);
@@ -3577,6 +3740,7 @@ function renderHealth(){
   if(TAB==='overview') renderMissionControl();   // cockpit binds HH (gpu, docker, systemd, diagnostics)
   if(TAB==='experiments') renderExperiments(false);   // throttled live refresh of training cards
   if(TAB==='costs') renderCosts(false);               // throttled live refresh of the costs page
+  if(TAB==='diskio') renderDiskIo();
 
   // Update-available badge — only visible when GitHub releases shows a newer tag.
   const up = HH.update || {};
@@ -3700,9 +3864,9 @@ function renderHealth(){
     // keep only the trailing health/exit detail (if any).
     const stext = c.status_text || '';
     const upStripped = stext.replace(/^Up\s+[^()]+\s*/i,'').trim() || (stext.startsWith('Up ') ? '' : stext);
-    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="${I18N.t('ct.click_logs','Click to tail logs')}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${svcLogo(c.name,c.image)}${esc(c.name)}</td>
+    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="${I18N.t('ct.click_logs','Click to tail logs')}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${svcLogo(c.name,c.image)}${copyable(c.name)}</td>
      <td><span class="badge ${c.status}">${esc(c.label)}</span></td>
-     <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
+     <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.image)}">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
      <td class="muted">${c.state==='running'?fmtUpShort(c.uptime_s):'—'}</td>
      <td class="muted">${fmtBytes(c.mem_bytes)}</td>
@@ -3718,8 +3882,10 @@ function renderHealth(){
         <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
         <td></td></tr>` : '')
     || (dk.available?'<tr><td colspan="9" class="muted">'+I18N.t('ct.none','No containers found.')+'</td></tr>':'');
-  // Click any container row to tail its logs in the side drawer (issue #28).
+  // Click any container row to tail its logs in the side drawer (issue #28) —
+  // except its copy button (#220), which must copy the name, not open logs.
   document.getElementById('cttbl').onclick = e => {
+    if(e.target.closest('.copybtn')) return;
     const tr = e.target.closest('.ctrow'); if(tr && tr.dataset.ct) openLogDrawer(tr.dataset.ct);
   };
 
@@ -3756,7 +3922,7 @@ function renderServicesBlock(sd){
     const upCell = s.status==='crit' && s.exit_status!=null
       ? `exit ${s.exit_status}`
       : (s.uptime_s ? fmtUpShort(s.uptime_s) : '—');
-    return `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${svcLogo(s.name,s.desc)}${esc(s.name)}
+    return `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${svcLogo(s.name,s.desc)}${copyable(s.name)}
        ${s.admin?'<span class="pill">yours</span>':''}${s.watched?'<span class="pill">watched</span>':''}</td>
      <td><span class="badge ${s.status}">${esc(s.active)}${s.sub&&s.sub!==s.active?' / '+esc(s.sub):''}</span></td>
      <td>${renderPorts(s.ports, portHost)}</td>
@@ -4055,9 +4221,12 @@ function upCard(c){
     : '';
   const tgt=c.type==='http'?c.target:(I18N.t('uptime.tcp_prefix','TCP')+' '+c.target);
   const dotcls=st==='up'?'mc-on':st==='down'?'mc-offdot':'';
-  const pill=st==='up'?`<span class="mc-pill mc-pill-ok">${esc(upStateLabel(st))}</span>`
-           :st==='down'?`<span class="mc-pill mc-pill-crit">${esc(upStateLabel(st))}</span>`
-           :`<span class="mc-pill" style="color:var(--mut);border-color:var(--bd)">${esc(upStateLabel(st))}</span>`;
+  const maintPill=c.in_maintenance?`<span class="badge maint" style="margin-left:6px">${esc(I18N.t('uptime.in_maintenance','🔧 maintenance'))}</span>`:'';
+  const pill=c.in_maintenance
+    ? `<span class="mc-pill" style="color:#58a6ff;border-color:#58a6ff55">${esc(I18N.t('uptime.maintenance','In maintenance'))}</span>`
+    : st==='up'?`<span class="mc-pill mc-pill-ok">${esc(upStateLabel(st))}</span>`
+    : st==='down'?`<span class="mc-pill mc-pill-crit">${esc(upStateLabel(st))}</span>`
+    : `<span class="mc-pill" style="color:var(--mut);border-color:var(--bd)">${esc(upStateLabel(st))}</span>`;
   let err='';
   if(st==='down' && c.last_err) err=`<div class="uperr">${esc(c.last_err)}</div>`;
   // alert line: bell state + (if down) how long it's been down (from the heartbeat)
@@ -4622,24 +4791,6 @@ async function restoreBackup(file){
 
 // ── Hosts tab (multi-machine monitoring slice 1) ─────────────────────────────
 const HSTATUS_ICON = {ok:'✅', warn:'⚠️', fail:'❌', info:'ℹ️'};
-
-// Reliable copy for plain HTTP contexts (the Clipboard API needs HTTPS or
-// localhost; ardi:9801 is neither). Tries the modern API first, falls back to
-// a hidden-textarea + execCommand('copy') which works almost everywhere.
-async function copyText(text){
-  try { await navigator.clipboard.writeText(text); return true; } catch(_) {}
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.setAttribute('readonly', '');
-  ta.style.position='fixed'; ta.style.top='0'; ta.style.left='0';
-  ta.style.opacity='0'; ta.style.pointerEvents='none';
-  document.body.appendChild(ta);
-  ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch(_) {}
-  document.body.removeChild(ta);
-  return ok;
-}
 function showHostStatus(level, text){
   const el=document.getElementById('hoststatus');
   toast(level, text);
@@ -5146,6 +5297,9 @@ function paintAiBand(g,x,loaded,serving){
 // ── Runs (pushed from notebooks / MLflow) — the primary Experiments view ──────
 // Source → colour dot (srcDot) and status → stroke icon+colour (stIcon) live in the
 // icon section; emoji maps replaced by the SVG status-icon family.
+// Aliases a training script might reasonably use when logging throughput via
+// r.log_metric(...) — no dedicated column/schema, just recognised by name.
+const TOK_METRIC_KEYS=['tokens_per_sec','tok_per_sec','tokens_sec','tok_s'];
 async function renderRuns(){
   const card=document.getElementById('runs-card'); if(!card) return;
   const status=(document.getElementById('runs-status')||{}).value||'';
@@ -5158,7 +5312,16 @@ async function renderRuns(){
   empty.hidden=true; if(tbl) tbl.style.display='';
   const fmtTs=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
   tb.innerHTML=runs.map(r=>{
-    const mets=Object.entries(r.metrics_latest||{}).slice(0,3).map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`).join(' · ');
+    // Throughput (tokens/sec) is logged like any other metric — no schema change —
+    // but it's worth a glance, so it's pulled to the front and chipped, not buried
+    // alphabetically among loss/accuracy in the generic 3-metric preview.
+    const entries=Object.entries(r.metrics_latest||{});
+    const tokEntry=entries.find(([k])=>TOK_METRIC_KEYS.includes(k));
+    const rest=entries.filter(([k])=>!TOK_METRIC_KEYS.includes(k)).slice(0, tokEntry?2:3);
+    const metParts=[];
+    if(tokEntry) metParts.push(`<span class="mchip" title="${esc(tokEntry[0])}">${(+tokEntry[1]).toFixed(0)} tok/s</span>`);
+    metParts.push(...rest.map(([k,v])=>`${esc(k)} ${(+v).toFixed(3)}`));
+    const mets=metParts.join(' · ');
     return `<tr data-id="${esc(r.id)}" style="cursor:pointer">
       <td><b>${esc(r.name)}</b></td>
       <td><span class="mchip">${srcDot(r.source)}${esc(r.source)}</span></td>
@@ -5196,7 +5359,10 @@ async function openRun(id){
   const params=j.params?(' · params '+esc(JSON.stringify(j.params))):'';
   document.getElementById('run-detail-meta').innerHTML=`${srcDot(j.source)}${esc(j.source)} · <span class="st-${esc(j.status)}">${stIcon(j.status)} ${esc(j.status)}</span> · ${esc(j.host||'')} · ${fmtDur(j.duration)}${params}`;
   const host=document.getElementById('run-metric-charts'); host.innerHTML='';
-  const keys=Object.keys(j.metrics||{});
+  // Tokens/sec (however the script named it) leads the chart list — it's the
+  // metric most worth a glance for an LLM training/fine-tune run.
+  const keys=Object.keys(j.metrics||{})
+    .sort((a,b)=>(TOK_METRIC_KEYS.includes(b)?1:0)-(TOK_METRIC_KEYS.includes(a)?1:0));
   keys.forEach((k,i)=>{
     const id2='runmetric'+i, m=j.metrics[k];
     host.insertAdjacentHTML('beforeend',`<div style="margin-top:8px"><div class="cap" style="margin-bottom:2px">${esc(k)}</div><div class="chartbox short"><canvas id="${id2}"></canvas></div></div>`);
@@ -5213,7 +5379,22 @@ async function openRun(id){
         y:{position:'left',min:0,grid:{color:cv('--free')},ticks:{color:cv('--mut'),callback:v=>v+' W'}},
         y1:{position:'right',min:0,max:100,grid:{display:false},ticks:{color:cv('--mut'),callback:v=>v+'%'}}},
       plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12}}}}});
-  document.getElementById('run-cost-cap').textContent=I18N.tf('exp.run_cost_cap','This run used {kwh} kWh and cost {cost} in GPU energy over its window · peak util {util}% · avg {avg} W.',{kwh:(j.energy_kwh||0).toFixed(3),cost:cur+(j.cost||0).toFixed(2),util:j.peak_util,avg:j.avg_w});
+  let costCap=I18N.tf('exp.run_cost_cap','This run used {kwh} kWh and cost {cost} in GPU energy over its window · peak util {util}% · avg {avg} W.',{kwh:(j.energy_kwh||0).toFixed(3),cost:cur+(j.cost||0).toFixed(2),util:j.peak_util,avg:j.avg_w});
+  const tokKey=keys.find(k=>TOK_METRIC_KEYS.includes(k));
+  if(tokKey){
+    const vals=(j.metrics[tokKey].values||[]).filter(v=>v!=null);
+    if(vals.length){
+      const avgTok=vals.reduce((s,v)=>s+v,0)/vals.length, peakTok=Math.max(...vals);
+      // avg tok/s * run seconds ≈ total tokens generated; ÷ kWh = tokens per kWh —
+      // the training-throughput analogue of the AI Models tab's "Tokens / Joule".
+      const tokPerKwh=(j.energy_kwh && j.duration) ? avgTok*j.duration/j.energy_kwh : 0;
+      const eff=tokPerKwh
+        ? I18N.tf('exp.run_tok_eff',' · {n} tokens/kWh',{n:tokPerKwh>=1e6?(tokPerKwh/1e6).toFixed(1)+'M':tokPerKwh>=1000?(tokPerKwh/1000).toFixed(0)+'K':Math.round(tokPerKwh)}) : '';
+      costCap+=' '+I18N.tf('exp.run_tok_cap','Throughput averaged {avg} tok/s (peak {peak}){eff}.',
+        {avg:avgTok.toFixed(0), peak:peakTok.toFixed(0), eff});
+    }
+  }
+  document.getElementById('run-cost-cap').textContent=costCap;
   document.getElementById('run-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -6457,10 +6638,13 @@ function infoCard(title, rowsHtml, emptyMsg){
     ? `<button type="button" class="copybtn copyall" title="${t}" aria-label="${t}">${sic('copy')}</button>` : '';
   return `<div class="infocard"><h3>${title}${copyAll}</h3>${rowsHtml || '<div class="muted">'+emptyMsg+'</div>'}</div>`;
 }
-// Copy text to the clipboard with a brief ✓ on the button. Falls back to a hidden
-// textarea + execCommand where the async Clipboard API isn't available (http / old).
+// Copy text to the clipboard, returning whether it worked (some callers show
+// their own "✓ Copied" / "⚠️ failed" text off this) and, when a button is
+// passed, flashing a brief ✓ on it directly. Falls back to a hidden textarea +
+// execCommand where the async Clipboard API isn't available — plain-HTTP hosts
+// (e.g. ardi:9801) and older browsers don't get navigator.clipboard at all.
 async function copyText(text, btn){
-  if(!text) return;
+  if(!text) return false;
   let ok = true;
   try { await navigator.clipboard.writeText(text); }
   catch(e){
@@ -6477,27 +6661,39 @@ async function copyText(text, btn){
     btn.classList.add('copied'); btn.innerHTML=sic('check');   // "original" icon
     btn._copyTimer=setTimeout(()=>{ btn.classList.remove('copied'); btn.innerHTML=old; btn._copyTimer=null; }, 1100);
   }
+  return ok;
 }
-// Wire per-row + per-card copy buttons inside a freshly-rendered .infogrid.
-function wireCopyButtons(root){
-  root.querySelectorAll('.copybtn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if(btn.classList.contains('copyall')){
-        const card = btn.closest('.infocard');
-        const title = (card.querySelector('h3')?.childNodes[0]?.textContent || '').trim();
-        const lines = [...card.querySelectorAll('.inforow')].map(r => {
-          const kk = (r.querySelector('.k')?.textContent || '').trim();
-          const vv = (r.querySelector('.v')?.textContent || '').replace(/\s+/g,' ').trim();
-          return (kk && vv) ? `${kk}: ${vv}` : '';
-        }).filter(Boolean);
-        copyText((title ? title+'\n' : '') + lines.join('\n'), btn);
-      } else {
-        const vv = (btn.previousElementSibling?.textContent || '').replace(/\s+/g,' ').trim();
-        copyText(vv, btn);
-      }
-    });
-  });
+// Inline "value + copy button" unit for any table cell, list item or detail
+// panel (#220) — the System tab's .inforow affordance, generalised. The button
+// reads its *previous sibling's* text at click time (handled once, below, by
+// the delegated listener), so nothing sensitive is duplicated into attributes.
+function copyable(value){
+  if(value==null || value==='') return '';
+  const t = I18N.t('copy.field','Copy value');
+  return `<span class="copywrap"><span class="copyval">${esc(String(value))}</span>`
+       + `<button type="button" class="copybtn mini" title="${t}" aria-label="${t}">${sic('copy')}</button></span>`;
 }
+// ONE delegated listener for every .copybtn in the document — infoRow's, the
+// per-card "copy all", and every copyable() chip dropped into any table/list/
+// panel. No per-render wiring call needed (elements can come and go freely).
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.copybtn'); if(!btn) return;
+  if(btn.classList.contains('copyall')){
+    const card = btn.closest('.infocard');
+    const title = (card.querySelector('h3')?.childNodes[0]?.textContent || '').trim();
+    const lines = [...card.querySelectorAll('.inforow')].map(r => {
+      const kk = (r.querySelector('.k')?.textContent || '').trim();
+      const vv = (r.querySelector('.v')?.textContent || '').replace(/\s+/g,' ').trim();
+      return (kk && vv) ? `${kk}: ${vv}` : '';
+    }).filter(Boolean);
+    copyText((title ? title+'\n' : '') + lines.join('\n'), btn);
+    return;
+  }
+  // infoRow's .v and copyable()'s .copyval are both the button's immediate
+  // preceding sibling — one read covers both shapes.
+  const vv = (btn.previousElementSibling?.textContent || '').replace(/\s+/g,' ').trim();
+  if(vv) copyText(vv, btn);
+});
 
 function renderSysInfo(){
   const el = document.getElementById('sysinfo');
@@ -6527,7 +6723,6 @@ function renderSysInfo(){
   el.innerHTML = `<div class="infogrid">
     ${infoCard(I18N.t('sys.card_system','System'), sys, I18N.t('sys.no_system','No system info reported.'))}
     ${infoCard(I18N.t('sys.card_hardware','Hardware'), hwh, I18N.t('sys.no_hardware','No hardware info reported.'))}</div>`;
-  wireCopyButtons(el);
 }
 
 // Compact byte formatter for interface RX/TX counters (distinct from fmtBytes,
@@ -6603,8 +6798,8 @@ async function renderNetwork(){
     const sp  = i.speed_mbps ? (i.speed_mbps>=1000?(i.speed_mbps/1000)+' Gb/s':i.speed_mbps+' Mb/s') : '—';
     const io  = (i.rx_bytes!=null||i.tx_bytes!=null) ? fmtIO(i.rx_bytes)+' / '+fmtIO(i.tx_bytes) : '—';
     const stc = i.state==='up' ? 'var(--ok)' : (i.state==='down'?'var(--crit)':'var(--mut)');
-    return `<tr><td>${esc(i.name)}<div class="muted" style="font-size:11px">${esc(i.type||'')}</div></td>
-      <td>${esc(ips)}</td><td>${i.mac?esc(i.mac):'—'}</td>
+    return `<tr><td>${copyable(i.name)}<div class="muted" style="font-size:11px">${esc(i.type||'')}</div></td>
+      <td>${ips!=='—'?copyable(ips):'—'}</td><td>${i.mac?copyable(i.mac):'—'}</td>
       <td><span style="color:${stc}">${esc(i.state||'?')}</span></td>
       <td>${sp}</td><td>${i.mtu||'—'}</td><td>${io}</td></tr>`;
   }).join('') || '<tr><td colspan="7" class="muted">'+I18N.t('net.no_ifaces','No interfaces.')+'</td></tr>';
@@ -6614,7 +6809,7 @@ async function renderNetwork(){
 
   const lrows = (net.listen||[]).map(s=>{
     const tag = s.exposed ? '<span class="exptag pub">'+I18N.t('net.exp_all','🌐 all interfaces')+'</span>' : '<span class="exptag loc">'+I18N.t('net.exp_local','🔒 local')+'</span>';
-    return `<tr><td>${esc(s.proto)}</td><td>${esc(s.addr)}</td><td>${s.port}</td>
+    return `<tr><td>${esc(s.proto)}</td><td>${copyable(s.addr)}</td><td>${s.port!=null?copyable(s.port):''}</td>
       <td>${s.proc?esc(s.proc):'—'}</td><td>${tag}</td></tr>`;
   }).join('') || '<tr><td colspan="5" class="muted">'+I18N.t('net.no_sockets','No listening sockets reported.')+'</td></tr>';
 
@@ -7233,7 +7428,7 @@ async function loadIntegrations(){
     tb.querySelectorAll('button[data-del]').forEach(b=>b.onclick=()=>deleteKey(b.dataset.del));
   }
   const snip=document.getElementById('intg_snippet');
-  if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)`;
+  if(snip) snip.textContent = `import homelab_run as homelab\nhomelab.configure(url="http://${location.hostname}:9800", key="hlm_…")\nwith homelab.run("my-finetune", params={"lr":2e-4}) as r:\n    for step, loss in enumerate(train()):\n        r.log_metric("loss", loss, step=step)\n        r.log_metric("tokens_per_sec", batch_tokens / step_seconds, step=step)`;
 }
 async function deleteKey(id){
   if(!confirm(I18N.t('confirm.revoke_key','Revoke this API key? Any client still using it will stop working immediately.'))) return;
@@ -7321,6 +7516,7 @@ setInterval(()=>{
   if(TAB==='host')     renderHostTab();
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
+  if(TAB==='diskio')   renderDiskIo();
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{
