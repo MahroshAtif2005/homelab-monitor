@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch
+import os, re, sys, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
@@ -39,6 +39,8 @@ DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
 RETENTION    = int(os.environ.get("RETENTION_DAYS", "180")) * 86400
+_DISK_IO_RETENTION = 7 * 86400   # per-device disk-I/O history: dense, 7-day ring
+_PROC_IO_RETENTION = 72 * 3600   # per-process I/O ring: short, spike-attribution only
 DOCKER_SOCK  = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 HOST_ROOT    = os.environ.get("HOST_ROOT", "/rootfs")          # host / mounted read-only (optional)
 PORT         = int(os.environ.get("PORT", "9800"))
@@ -104,6 +106,10 @@ CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
 CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS disk_io_samples(ts INTEGER NOT NULL, device TEXT NOT NULL, read_mb_s REAL, write_mb_s REAL, util_pct REAL);
+CREATE INDEX IF NOT EXISTS idx_diskio_ts ON disk_io_samples(device, ts);
+CREATE TABLE IF NOT EXISTS proc_io_samples(ts INTEGER NOT NULL, pid INTEGER, comm TEXT, read_bps INTEGER, write_bps INTEGER);
+CREATE INDEX IF NOT EXISTS idx_procio_ts ON proc_io_samples(ts);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS hosts(
   name TEXT PRIMARY KEY,
@@ -755,44 +761,102 @@ def read_disks():
 
 _disk_prev = {}
 
+# /proc/diskstats layout (Linux kernel Documentation/admin-guide/iostats.rst):
+# each line is  <major> <minor> <name> f1 f2 f3 …  where the fields after the
+# device name are 1-based columns. Mapping to our zero-based `parts` index:
+#   parts[3]  = f1  reads completed
+#   parts[5]  = f3  sectors read           (×512 B)
+#   parts[6]  = f4  ms spent reading
+#   parts[7]  = f5  writes completed
+#   parts[9]  = f7  sectors written        (×512 B)
+#   parts[10] = f8  ms spent writing
+#   parts[12] = f10 ms spent doing I/O     (drives utilisation%)
+_SECTOR_BYTES = 512
+
+# Partition-name matcher for the summary rollup. A partition is a whole-disk name
+# plus a trailing partition suffix, per the kernel's block-device naming:
+#   • classic disks:   sdaN / vdaN / hdaN / xvdaN   (letters + trailing digits)
+#   • nvme / mmc / md: nvme0n1pN / mmcblk0pN / md0pN (a digit, then 'p', digits)
+# Whole disks (sda, nvme0n1, md0) do NOT match. md*/dm* aggregates are excluded
+# separately by name prefix so their stacked members aren't double-counted.
+_DISK_PART_RE = re.compile(r"^(?:sd|vd|hd|xvd)[a-z]+\d+$|^.+\dp\d+$")
+
+def _is_physical_disk(dev):
+    """True only for physical whole-disks — the set the SUMMARY should sum so that
+    RAID/dm aggregates and partitions (which restate the same bytes) aren't
+    triple-counted. Per-device rows keep every device; only the rollup uses this."""
+    if dev.startswith("md") or dev.startswith("dm"):
+        return False                       # RAID/device-mapper aggregate
+    if _DISK_PART_RE.match(dev):
+        return False                       # a partition of some whole disk
+    return True
+
 def collect_disk_io():
-    """Read /proc/diskstats for host block devices and compute MB/s throughput."""
+    """Per-device throughput (MB/s), utilisation (%) and avg op-latency (ms) from
+    /proc/diskstats. First poll is a warm-up (no deltas yet). Never raises."""
     path = os.path.join(HOST_ROOT, "proc/diskstats") if os.path.exists(os.path.join(HOST_ROOT, "proc/diskstats")) else "/proc/diskstats"
+    if not os.path.exists(path):
+        return {"available": False, "warming_up": False, "reason": "no /proc/diskstats",
+                "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0}, "items": []}
     now = time.time()
     out = []
     try:
         with open(path, "r") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) < 13: continue
+                if len(parts) < 14: continue
                 dev = parts[2]
                 if dev.startswith("loop") or dev.startswith("ram") or dev.startswith("sr"): continue
                 try:
-                    s_read, s_write = int(parts[5]), int(parts[9])
-                except ValueError:
+                    reads    = int(parts[3])
+                    s_read   = int(parts[5])
+                    ms_read  = int(parts[6])
+                    writes   = int(parts[7])
+                    s_write  = int(parts[9])
+                    ms_write = int(parts[10])
+                    ms_io    = int(parts[12])
+                except (ValueError, IndexError):
                     continue
                 prev = _disk_prev.get(dev)
-                if prev:
-                    dt = now - prev[2]
-                    if dt > 0:
-                        rmb = ((s_read - prev[0]) * 512) / 1048576.0 / dt
-                        wmb = ((s_write - prev[1]) * 512) / 1048576.0 / dt
-                        out.append({
-                            "device": dev,
-                            "read_mb_s": round(rmb, 1),
-                            "write_mb_s": round(wmb, 1)
-                        })
-                _disk_prev[dev] = (s_read, s_write, now)
+                _disk_prev[dev] = (s_read, s_write, reads, writes, ms_read, ms_write, ms_io, now)
+                if not prev:
+                    continue                       # first poll for this device: warm up
+                dt = now - prev[7]
+                if dt <= 0:
+                    continue
+                rmb = ((s_read - prev[0]) * _SECTOR_BYTES) / 1048576.0 / dt
+                wmb = ((s_write - prev[1]) * _SECTOR_BYTES) / 1048576.0 / dt
+                d_reads, d_writes = reads - prev[2], writes - prev[3]
+                d_msread, d_mswrite, d_msio = ms_read - prev[4], ms_write - prev[5], ms_io - prev[6]
+                # utilisation: fraction of wall time the device had I/O in flight
+                util = max(0.0, min(100.0, (d_msio / (dt * 1000.0)) * 100.0))
+                # avg latency ms/op; guard the counter-wraps and div-by-zero -> None
+                r_lat = round(d_msread / d_reads, 2) if d_reads > 0 and d_msread >= 0 else None
+                w_lat = round(d_mswrite / d_writes, 2) if d_writes > 0 and d_mswrite >= 0 else None
+                out.append({
+                    "device": dev,
+                    "read_mb_s":  round(max(0.0, rmb), 1),
+                    "write_mb_s": round(max(0.0, wmb), 1),
+                    "util_pct":   round(util, 1),
+                    "read_lat_ms":  r_lat,
+                    "write_lat_ms": w_lat,
+                })
     except Exception:
         pass
     out.sort(key=lambda x: -(x["read_mb_s"] + x["write_mb_s"]))
+    # Summary totals sum PHYSICAL whole-disks only: md/dm RAID aggregates and
+    # partitions restate the same bytes as their spindles, so including them
+    # overstates the headline KPI ~3-4x on stacked (md-RAID) hosts.
+    phys = [x for x in out if _is_physical_disk(x["device"])]
     return {
         "available": bool(out),
+        "warming_up": not out,
         "summary": {
-            "total_read_mb_s": round(sum(x["read_mb_s"] for x in out), 1),
-            "total_write_mb_s": round(sum(x["write_mb_s"] for x in out), 1)
+            "total_read_mb_s":  round(sum(x["read_mb_s"]  for x in phys), 1),
+            "total_write_mb_s": round(sum(x["write_mb_s"] for x in phys), 1),
         },
-        "items": out
+        "items": out,
+        "at": int(now),
     }
 
 # hwmon drivers / thermal-zone types that expose the real CPU die/core sensors.
@@ -2635,6 +2699,99 @@ def _total_cpu_jiffies():
         parts = f.readline().split()[1:]   # cpu  user nice system idle iowait …
     return sum(int(x) for x in parts)
 
+# ── Per-process disk I/O attribution ("who is actually driving that spike") ────
+# Sample ONLY the bounded top-N candidate set collect_top_processes already
+# computes (by CPU delta + by RAM), one small read each per poll — never a full
+# /proc scan. Deltas across polls give per-process read_B/s + write_B/s; prev
+# state is keyed by pid and guarded by the process start-time so a recycled pid
+# can't inherit a stale counter. /proc/<pid>/io needs matching privilege:
+# unreadable (PermissionError/missing) -> degrade silently to no attribution.
+_PROC_IO_PREV = {}   # pid(str) -> (starttime:int, read_bytes:int, write_bytes:int, ts:float)
+
+def _fmt_bps(b):
+    """Human byte-rate: MB/s, KB/s or B/s. Never raises."""
+    try:
+        b = float(b or 0)
+    except (TypeError, ValueError):
+        return "0 B/s"
+    if b >= 1048576:
+        return "%.1f MB/s" % (b / 1048576.0)
+    if b >= 1024:
+        return "%.0f KB/s" % (b / 1024.0)
+    return "%d B/s" % int(b)
+
+def _read_proc_io(pid):
+    """Return (read_bytes, write_bytes) from /proc/<pid>/io, or None when it can't
+    be read (no privilege / pid gone / field absent). Never raises."""
+    try:
+        with open("/proc/%s/io" % pid) as f:
+            data = f.read()
+    except (OSError, ValueError):
+        return None
+    rb = wb = None
+    for line in data.splitlines():
+        if line.startswith("read_bytes:"):
+            try: rb = int(line.split(":", 1)[1])
+            except (ValueError, IndexError): pass
+        elif line.startswith("write_bytes:"):
+            try: wb = int(line.split(":", 1)[1])
+            except (ValueError, IndexError): pass
+    if rb is None or wb is None:
+        return None
+    return (rb, wb)
+
+def collect_proc_disk_io(candidates, now=None):
+    """Per-process disk read/write throughput for a BOUNDED candidate set.
+    `candidates`: iterable of (pid_str, comm, starttime) — the monitor's existing
+    top-by-CPU / top-by-RAM pids only, so cost stays O(top-N) reads, not O(all
+    pids). Reads /proc/<pid>/io for each, computes B/s from the delta vs the
+    previous poll, guarding pid reuse (start-time mismatch -> reset) and counter
+    resets/negatives (-> drop the sample). Returns {"available": False} when
+    /proc/<pid>/io is unreadable for EVERY candidate (no privilege / non-Linux)
+    so the feature is simply absent; otherwise the top writer/reader plus short
+    leader lists. Never surfaces cmdline/argv — only the process comm."""
+    if now is None:
+        now = time.time()
+    rows, seen, any_readable = [], set(), False
+    for pid, comm, starttime in candidates:
+        pid = str(pid)
+        seen.add(pid)
+        io = _read_proc_io(pid)
+        if io is None:
+            continue
+        any_readable = True
+        rb, wb = io
+        prev = _PROC_IO_PREV.get(pid)
+        _PROC_IO_PREV[pid] = (starttime, rb, wb, now)
+        if not prev:
+            continue                                   # first poll for this pid: warm up
+        p_start, p_rb, p_wb, p_ts = prev
+        if p_start != starttime:
+            continue                                   # pid recycled -> drop stale delta
+        dt = now - p_ts
+        if dt <= 0:
+            continue
+        d_rb, d_wb = rb - p_rb, wb - p_wb
+        if d_rb < 0 or d_wb < 0:
+            continue                                   # counter reset/wrap -> skip
+        rows.append({"name": comm, "pid": int(pid),
+                     "read_b_s":  int(d_rb / dt),
+                     "write_b_s": int(d_wb / dt)})
+    # Prune prev state to the current candidate set so it can't grow unbounded.
+    for dead in [p for p in _PROC_IO_PREV if p not in seen]:
+        _PROC_IO_PREV.pop(dead, None)
+    if not any_readable:
+        return {"available": False}                    # no /proc/<pid>/io access at all
+    writers = sorted((r for r in rows if r["write_b_s"] > 0), key=lambda r: -r["write_b_s"])
+    readers = sorted((r for r in rows if r["read_b_s"]  > 0), key=lambda r: -r["read_b_s"])
+    return {
+        "available": True,
+        "top_writer": writers[0] if writers else None,
+        "top_reader": readers[0] if readers else None,
+        "writers": writers[:5],
+        "readers": readers[:5],
+    }
+
 def collect_top_processes(top_n=10):
     """Top-N processes by CPU% and by RAM, aggregated by command. Reads /proc
     directly (no psutil); returns None where /proc isn't available (e.g. a
@@ -2647,6 +2804,9 @@ def collect_top_processes(top_n=10):
     prev_total = _PROC_PREV["total"]
     prev_pids  = _PROC_PREV["pids"]
     cur_pids, agg = {}, {}
+    # Per-pid meta kept only long enough to pick the bounded I/O-attribution set
+    # (top-N by CPU delta + top-N by RAM) — we do NOT read /proc/<pid>/io for all.
+    pid_meta = []   # (pid, comm, starttime, rss_kb, dcpu)
     for pid in pids:
         try:
             with open(f"/proc/{pid}/stat") as f:
@@ -2655,18 +2815,19 @@ def collect_top_processes(top_n=10):
             comm = stat[stat.find("(") + 1:rp]
             rest = stat[rp + 2:].split()         # fields from 'state' onward
             jiff = int(rest[11]) + int(rest[12]) # utime + stime
+            starttime = int(rest[19])            # field 22: start-time (pid-reuse guard)
             with open(f"/proc/{pid}/statm") as f:
                 rss_kb = int(f.read().split()[1]) * _PROC_PAGE_KB
         except (OSError, ValueError, IndexError):
             continue
         cur_pids[pid] = jiff
+        dpid = (jiff - prev_pids[pid]) if pid in prev_pids else 0
+        pid_meta.append((pid, comm, starttime, rss_kb, dpid if dpid > 0 else 0))
         a = agg.setdefault(comm, {"mem_kb": 0, "dcpu": 0, "count": 0})
         a["mem_kb"] += rss_kb
         a["count"]  += 1
-        if pid in prev_pids:
-            d = jiff - prev_pids[pid]
-            if d > 0:
-                a["dcpu"] += d
+        if dpid > 0:
+            a["dcpu"] += dpid
     _PROC_PREV["total"] = total
     _PROC_PREV["pids"]  = cur_pids
     ncpu = os.cpu_count() or 1
@@ -2676,9 +2837,22 @@ def collect_top_processes(top_n=10):
         cpu = (100.0 * a["dcpu"] / span * ncpu) if span > 0 else 0.0
         rows.append({"name": comm, "cpu_pct": round(cpu, 1),
                      "mem_mb": round(a["mem_kb"] / 1024), "count": a["count"]})
+    # Bounded candidate set for per-process I/O attribution: union of the top-N by
+    # CPU delta and top-N by RAM. Reuses the selection this function already runs
+    # (never a full-/proc io scan) and keeps the heavy-hitters that plausibly drive
+    # a disk spike in view across polls so their deltas accumulate.
+    cand = {}   # pid -> (pid, comm, starttime)
+    for m in sorted(pid_meta, key=lambda r: -r[4])[:top_n]:
+        cand[m[0]] = (m[0], m[1], m[2])
+    for m in sorted(pid_meta, key=lambda r: -r[3])[:top_n]:
+        cand[m[0]] = (m[0], m[1], m[2])
+    try:
+        proc_io = collect_proc_disk_io(list(cand.values()))
+    except Exception:
+        proc_io = {"available": False}
     return {"by_cpu": sorted(rows, key=lambda r: -r["cpu_pct"])[:top_n],
             "by_mem": sorted(rows, key=lambda r: -r["mem_mb"])[:top_n],
-            "ncpu": ncpu}
+            "ncpu": ncpu, "io": proc_io}
 
 # ── Experiments: training-run detection + GPU activity sessions ────────────────
 # Auto-recognise training / fine-tuning jobs from /proc cmdline, and reconstruct
@@ -5332,9 +5506,43 @@ def sample_once():
                            (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
         DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
                        _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
+        # Disk I/O moves fast, so sample it on its own tighter cadence (~45s) into
+        # a dedicated 7-day ring — dense enough for per-device sparklines + the
+        # anomaly baseline without bloating the DB. Sourced from the health_scan
+        # snapshot (populated every 15s) so no extra /proc read here.
+        if ts % 45 < INTERVAL:
+            dio = HEALTH.get("disk_io") or {}
+            if dio.get("available"):
+                for it in (dio.get("items") or []):
+                    DB.execute("INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) "
+                               "VALUES(?,?,?,?,?)",
+                               (ts, it["device"], it.get("read_mb_s"),
+                                it.get("write_mb_s"), it.get("util_pct")))
+            # Persist a BOUNDED per-process I/O ring: only the top-few writers +
+            # top-few readers from the attribution already computed (comm only,
+            # never argv). Deduped by pid -> at most ~6 rows/poll, not all ~20
+            # candidates. Feeds spike-time attribution; rides this same cadence.
+            _pio = (HEALTH.get("processes") or {}).get("io") or {}
+            if _pio.get("available"):
+                _seen_pids, _pio_rows = set(), []
+                for _r in (sorted((_pio.get("writers") or []),
+                                  key=lambda r: -(r.get("write_b_s") or 0))[:3]
+                           + sorted((_pio.get("readers") or []),
+                                    key=lambda r: -(r.get("read_b_s") or 0))[:3]):
+                    _p = _r.get("pid")
+                    if _p in _seen_pids:
+                        continue
+                    _seen_pids.add(_p)
+                    _pio_rows.append((ts, _p, _r.get("name"),
+                                      int(_r.get("read_b_s") or 0), int(_r.get("write_b_s") or 0)))
+                if _pio_rows:
+                    DB.executemany("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
+                                   "VALUES(?,?,?,?,?)", _pio_rows)
         if ts % 360 < INTERVAL:
             for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
                 DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
+            DB.execute("DELETE FROM disk_io_samples WHERE ts<?", (ts - _DISK_IO_RETENTION,))
+            DB.execute("DELETE FROM proc_io_samples WHERE ts<?", (ts - _PROC_IO_RETENTION,))
         if ts % 60 < INTERVAL:   # stale-run janitor: a crashed/disconnected push run -> killed
             DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
                        "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
@@ -5355,6 +5563,78 @@ def sample_once():
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
+
+_DISK_IO_MIN_DEV = 15.0    # MB/s: below this, a device's wobble isn't worth flagging
+_DISKIO_ANOM_WINDOW  = 6 * 3600   # trailing baseline window (~6h at the ~45s disk-io cadence)
+_DISKIO_ANOM_MIN_PTS = 30         # need a real baseline before scoring anything
+_DISKIO_ANOM_Z       = 3.0        # |z| at/above this is "look here", not noise
+_diskio_anom_active = set()       # devices currently flagged — edge-triggered so a
+                                   # persistent spike logs one event, not one per scan
+_diskio_anom_latest = {}          # device -> anomaly item, for the live /api/health badge
+
+def _disk_io_anomaly_items(cur, now):
+    """Per-device z-score flags on total (read+write) disk throughput: score the
+    latest reading against a trailing baseline (mean/stddev of the window
+    excluding the latest point), same maths style as the rest of the monitor's
+    threshold checks. Returns a list of {device, value, baseline, z, direction,
+    magnitude} dicts — only devices that actually fired. Never raises."""
+    since = now - _DISKIO_ANOM_WINDOW
+    by_dev = {}
+    try:
+        for dev, r, w in cur.execute(
+                "SELECT device, read_mb_s, write_mb_s FROM disk_io_samples "
+                "WHERE ts>=? ORDER BY ts", (since,)):
+            by_dev.setdefault(dev, []).append((r or 0.0) + (w or 0.0))
+    except Exception:
+        return []
+    out = []
+    for dev, vals in by_dev.items():
+        if len(vals) < _DISKIO_ANOM_MIN_PTS:
+            continue
+        latest = vals[-1]
+        base = vals[:-1]
+        n = len(base)
+        mean = sum(base) / n
+        sd = (sum((v - mean) ** 2 for v in base) / n) ** 0.5
+        dev_amt = latest - mean
+        if abs(dev_amt) < _DISK_IO_MIN_DEV or sd <= 0:
+            continue
+        z = dev_amt / sd
+        if abs(z) < _DISKIO_ANOM_Z:
+            continue
+        out.append({
+            "device": dev, "value": round(latest, 1), "baseline": round(mean, 1),
+            "z": round(z, 1), "direction": "spike" if z > 0 else "dip",
+            "magnitude": round(abs(latest - mean), 1),
+        })
+    return out
+
+def diskio_scan():
+    """Edge-triggered disk-I/O anomaly check: a device logs ONE event on the
+    ok->anomaly transition (not once per scan while it stays flagged), and drops
+    out of the active set once it's back to baseline — mirrors the existing
+    'log only on the state edge' convention used elsewhere so a persistently busy
+    disk can't spam the Insight Feed. Writes into the same `events` table as OOM
+    (kind='diskio_spike'), so it rides the existing events->insights plumbing for
+    free — no new alert/incident system needed."""
+    if _DB_MAINTENANCE:
+        return
+    now = int(time.time())
+    with LOCK:
+        items = _disk_io_anomaly_items(DB.cursor(), now)
+        firing = {it["device"]: it for it in items}
+        newly = [it for dev, it in firing.items() if dev not in _diskio_anom_active]
+        for it in newly:
+            detail = (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
+                      f"{it['z']:+.1f}σ)")[:300]
+            DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)",
+                      (now, it["device"], "diskio_spike", detail))
+        if newly:
+            DB.commit()
+        _diskio_anom_active.clear()
+        _diskio_anom_active.update(firing.keys())
+    _diskio_anom_latest.clear()
+    _diskio_anom_latest.update(firing)
 
 def oom_scan():
     targets = ({p["service"] for p in LATEST["procs"]} |
@@ -5380,13 +5660,17 @@ def oom_scan():
         _scan_since[svc] = int(time.time())
 
 def collector():
-    last_oom = last_health = last_notify = 0
+    last_oom = last_health = last_notify = last_diskio = 0
     while True:
         try:
             sample_once()
             now = time.time()
             if now - last_oom > 60:
                 oom_scan(); last_oom = now
+            if now - last_diskio > 60:
+                try: diskio_scan()
+                except Exception as e: print("diskio_scan error:", e, flush=True)
+                last_diskio = now
             if now - last_health > 15:
                 health_scan(); last_health = now
             # Notifier runs *after* the latest health/oom data is in place, so
@@ -5465,6 +5749,23 @@ def api_data():
             if i is not None:
                 services.setdefault(svc, [0] * len(labels))[i] = round(mem or 0)
         other = [max(0, total["mem"][i] - sum(s[i] for s in services.values())) for i in range(len(labels))]
+        # Per-device disk-I/O trend, same bucketing/labels as everything else on this
+        # endpoint — feeds the Disk I/O tab's per-device sparklines. disk_io_samples
+        # rides its own ~45s cadence (sparser than `samples`), so buckets it doesn't
+        # cover keep their 0-fill default (matches the `services` fill above).
+        disk_io = {}
+        for b, dev, r, w, u in cur.execute(
+                "SELECT (ts/?)*? b,device,AVG(read_mb_s),AVG(write_mb_s),AVG(util_pct) "
+                "FROM disk_io_samples WHERE ts>=? GROUP BY b,device", (bk, bk, since)).fetchall():
+            i = idx.get(int(b))
+            if i is None:
+                continue
+            d = disk_io.setdefault(dev, {"read_mb_s": [0] * len(labels),
+                                         "write_mb_s": [0] * len(labels),
+                                         "util_pct": [0] * len(labels)})
+            d["read_mb_s"][i]  = round(r or 0, 1)
+            d["write_mb_s"][i] = round(w or 0, 1)
+            d["util_pct"][i]   = round(u or 0, 1)
         ticks = cur.execute("SELECT COUNT(*) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 1
         summary = sorted(({"service": s, "peak": round(pk), "avg": round(av), "present": round(100 * cnt / ticks)}
                           for s, pk, av, cnt in cur.execute(
@@ -5483,7 +5784,8 @@ def api_data():
         evs = [{"ts": t, "service": s, "kind": k, "detail": d}
                for t, s, k, d in cur.execute("SELECT ts,service,kind,detail FROM events WHERE ts>=? ORDER BY ts",
                                               (since,)).fetchall()]
-        for e in evs:
+        oom_evs = [e for e in evs if e["kind"] == "oom"]
+        for e in oom_evs:
             row = cur.execute("SELECT service,mem FROM proc WHERE ts<=? AND service!=? ORDER BY ts DESC,mem DESC LIMIT 1",
                               (e["ts"] + INTERVAL, e["service"])).fetchone()
             if row:
@@ -5491,7 +5793,15 @@ def api_data():
                               f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}.")
         mem_total = LATEST["mem_total"] or 24576
         peak = max(total["mempk"]) if total["mempk"] else 0
-        insights = build_insights(total, services, mem_total, evs, LATEST["host"])
+        insights = build_insights(total, services, mem_total, oom_evs, LATEST["host"])
+        diskio_evs = [e for e in evs if e["kind"] == "diskio_spike"]
+        if diskio_evs:
+            latest_by_dev = {}
+            for e in diskio_evs:
+                latest_by_dev[e["service"]] = e   # `service` column holds the device name here
+            for dev, e in latest_by_dev.items():
+                insights.append({"level": "warning", "title": f"Disk I/O spike on {dev}",
+                                 "detail": e["detail"]})
     # Uptime rows ride the same Insight Feed (computed outside LOCK — uptime_overview
     # takes it itself). DOWN/slow endpoints surface on the cockpit with no new tile.
     try:
@@ -5502,8 +5812,8 @@ def api_data():
         up_summary = {"total": 0, "up": 0, "down": 0, "unknown": 0, "worst_down": None}
     return jsonify({"version": VERSION, "range": rng, "bucket_sec": bk, "labels": labels, "total": total,
                     "services": services, "other": other, "summary": summary, "model_summary": model_summary,
-                    "callers": callers, "events": evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
-                    "uptime_summary": up_summary,
+                    "callers": callers, "events": oom_evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
+                    "uptime_summary": up_summary, "disk_io": disk_io,
                     "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
 def _hhmm_to_min(s, default):
@@ -6841,9 +7151,17 @@ def api_health():
     # Set here (not baked into the cached collect_update payload) so toggling the
     # env flag takes effect on restart without waiting for the update cache.
     update["self_update_enabled"] = ALLOW_SELF_UPDATE
-    disk_io = HEALTH.get("disk_io") or {"available": False, "warming_up": True,
-                                         "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
-                                         "items": []}
+    disk_io = dict(HEALTH.get("disk_io") or {"available": False, "warming_up": True,
+                                              "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
+                                              "items": []})
+    # Per-process I/O attribution (Top writer/reader) — attach ONLY to this authed
+    # payload. Carries process comm (never cmdline/argv) and NEVER appears on the
+    # public status surface (build_public_status doesn't read processes/disk_io).
+    _pio = (HEALTH.get("processes") or {}).get("io")
+    if _pio and _pio.get("available"):
+        disk_io["attribution"] = _pio
+    if _diskio_anom_latest:
+        disk_io["anomalies"] = dict(_diskio_anom_latest)
     return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
                     "docker": docker, "systemd": systemd, "update": update,
                     "processes": HEALTH["processes"],
@@ -7810,10 +8128,16 @@ def api_brief_test():
         return jsonify({"ok": False, "error": str(e)}), 502
     return jsonify({"ok": True, "channel": ch})
 
-threading.Thread(target=collector, daemon=True).start()
-threading.Thread(target=host_poller, daemon=True).start()
-threading.Thread(target=uptime_worker, daemon=True).start()
-threading.Thread(target=brief_worker, daemon=True).start()
+# Under pytest, "pytest" is already in sys.modules by the time any test file's
+# `import app` runs — skip the live background workers there. They mutate global
+# state (LATEST/HEALTH/DB) on their own clock with no test-mode awareness, so a
+# long-enough suite could otherwise race a real collector tick against a test's
+# own explicit state setup. Never gated in production (no pytest import there).
+if "pytest" not in sys.modules:
+    threading.Thread(target=collector, daemon=True).start()
+    threading.Thread(target=host_poller, daemon=True).start()
+    threading.Thread(target=uptime_worker, daemon=True).start()
+    threading.Thread(target=brief_worker, daemon=True).start()
 
 
 import os as _os
