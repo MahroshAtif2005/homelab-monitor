@@ -770,6 +770,14 @@ a{color:var(--info)}
 .copybtn .sic{width:13px;height:13px}
 .infocard h3 .copybtn{opacity:.5;padding:1px}
 .infocard h3 .copybtn:hover{opacity:1}
+/* copyable() — the same quiet-until-hover affordance, generalised to any table
+   cell / list item / detail panel (#220). Reveals on hovering the wrapper
+   itself OR the enclosing table row, so it works in dense tables too. */
+.copywrap{display:inline-flex;align-items:center;gap:3px;max-width:100%}
+.copywrap .copyval{overflow:hidden;text-overflow:ellipsis}
+.copywrap:hover .copybtn,tr:hover .copywrap .copybtn{opacity:.6}
+.copybtn.mini{padding:1px}
+.copybtn.mini .sic{width:11px;height:11px}
 .kpirow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
 .kpirow .kpi{flex:1;min-width:120px}
 /* Security check rows reuse the app's .badge + .sdot + table styling; the only
@@ -3489,7 +3497,7 @@ function renderRegistry(j){
     const loaded=m.loaded
       ? '<span class="badge ok">'+I18N.t('registry.loaded','Loaded')+(m.vram_mb!=null?' · '+esc(fmtMB(m.vram_mb)):'')+'</span>'
       : '<span class="badge info">'+I18N.t('registry.ondisk','On disk')+'</span>';
-    return '<tr><td>'+esc(m.name)+'</td>'
+    return '<tr><td>'+copyable(m.name)+'</td>'
       +'<td><span class="pill" style="text-transform:none">'+esc(m.provider||'—')+'</span></td>'
       +'<td>'+(m.size_bytes!=null?esc(fmtBytes(m.size_bytes)):'<span class="muted">—</span>')+'</td>'
       +'<td>'+meta+'</td>'
@@ -3551,7 +3559,7 @@ function renderModels(){
     const models=bySvc[svc].slice().sort((a,b)=>(b.peak||0)-(a.peak||0));
     const rows=models.map(m=>{
       const pW=m.peak!=null?Math.max(2,m.peak/maxV*100):0, aW=m.avg!=null?Math.max(2,m.avg/maxV*100):0;
-      return `<tr><td><span class="dot" style="background:${c}"></span>${esc(m.model)}${modelMetaChips(m.model)}</td>
+      return `<tr><td><span class="dot" style="background:${c}"></span>${copyable(m.model)}${modelMetaChips(m.model)}</td>
         <td>${m.vram!=null?'<span class="badge ok">'+I18N.t('models.loaded','Loaded')+'</span>':'<span class="badge info">'+I18N.t('models.idle','Idle')+'</span>'}</td>
         <td>${m.vram!=null?fmtMB(m.vram):'—'}</td>
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
@@ -3778,9 +3786,9 @@ function renderHealth(){
     // keep only the trailing health/exit detail (if any).
     const stext = c.status_text || '';
     const upStripped = stext.replace(/^Up\s+[^()]+\s*/i,'').trim() || (stext.startsWith('Up ') ? '' : stext);
-    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="${I18N.t('ct.click_logs','Click to tail logs')}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${svcLogo(c.name,c.image)}${esc(c.name)}</td>
+    return `<tr class="ctrow" data-ct="${esc(c.name)}" title="${I18N.t('ct.click_logs','Click to tail logs')}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${svcLogo(c.name,c.image)}${copyable(c.name)}</td>
      <td><span class="badge ${c.status}">${esc(c.label)}</span></td>
-     <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)}</td>
+     <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.image)}">${esc(c.image)}</td>
      <td>${renderPorts(c.ports)}</td>
      <td class="muted">${c.state==='running'?fmtUpShort(c.uptime_s):'—'}</td>
      <td class="muted">${fmtBytes(c.mem_bytes)}</td>
@@ -3796,8 +3804,10 @@ function renderHealth(){
         <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
         <td></td></tr>` : '')
     || (dk.available?'<tr><td colspan="9" class="muted">'+I18N.t('ct.none','No containers found.')+'</td></tr>':'');
-  // Click any container row to tail its logs in the side drawer (issue #28).
+  // Click any container row to tail its logs in the side drawer (issue #28) —
+  // except its copy button (#220), which must copy the name, not open logs.
   document.getElementById('cttbl').onclick = e => {
+    if(e.target.closest('.copybtn')) return;
     const tr = e.target.closest('.ctrow'); if(tr && tr.dataset.ct) openLogDrawer(tr.dataset.ct);
   };
 
@@ -3834,7 +3844,7 @@ function renderServicesBlock(sd){
     const upCell = s.status==='crit' && s.exit_status!=null
       ? `exit ${s.exit_status}`
       : (s.uptime_s ? fmtUpShort(s.uptime_s) : '—');
-    return `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${svcLogo(s.name,s.desc)}${esc(s.name)}
+    return `<tr><td><span class="sdot" style="background:${SC[s.status]}"></span>${svcLogo(s.name,s.desc)}${copyable(s.name)}
        ${s.admin?'<span class="pill">yours</span>':''}${s.watched?'<span class="pill">watched</span>':''}</td>
      <td><span class="badge ${s.status}">${esc(s.active)}${s.sub&&s.sub!==s.active?' / '+esc(s.sub):''}</span></td>
      <td>${renderPorts(s.ports, portHost)}</td>
@@ -4700,24 +4710,6 @@ async function restoreBackup(file){
 
 // ── Hosts tab (multi-machine monitoring slice 1) ─────────────────────────────
 const HSTATUS_ICON = {ok:'✅', warn:'⚠️', fail:'❌', info:'ℹ️'};
-
-// Reliable copy for plain HTTP contexts (the Clipboard API needs HTTPS or
-// localhost; ardi:9801 is neither). Tries the modern API first, falls back to
-// a hidden-textarea + execCommand('copy') which works almost everywhere.
-async function copyText(text){
-  try { await navigator.clipboard.writeText(text); return true; } catch(_) {}
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.setAttribute('readonly', '');
-  ta.style.position='fixed'; ta.style.top='0'; ta.style.left='0';
-  ta.style.opacity='0'; ta.style.pointerEvents='none';
-  document.body.appendChild(ta);
-  ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch(_) {}
-  document.body.removeChild(ta);
-  return ok;
-}
 function showHostStatus(level, text){
   const el=document.getElementById('hoststatus');
   toast(level, text);
@@ -6535,10 +6527,13 @@ function infoCard(title, rowsHtml, emptyMsg){
     ? `<button type="button" class="copybtn copyall" title="${t}" aria-label="${t}">${sic('copy')}</button>` : '';
   return `<div class="infocard"><h3>${title}${copyAll}</h3>${rowsHtml || '<div class="muted">'+emptyMsg+'</div>'}</div>`;
 }
-// Copy text to the clipboard with a brief ✓ on the button. Falls back to a hidden
-// textarea + execCommand where the async Clipboard API isn't available (http / old).
+// Copy text to the clipboard, returning whether it worked (some callers show
+// their own "✓ Copied" / "⚠️ failed" text off this) and, when a button is
+// passed, flashing a brief ✓ on it directly. Falls back to a hidden textarea +
+// execCommand where the async Clipboard API isn't available — plain-HTTP hosts
+// (e.g. ardi:9801) and older browsers don't get navigator.clipboard at all.
 async function copyText(text, btn){
-  if(!text) return;
+  if(!text) return false;
   let ok = true;
   try { await navigator.clipboard.writeText(text); }
   catch(e){
@@ -6555,27 +6550,39 @@ async function copyText(text, btn){
     btn.classList.add('copied'); btn.innerHTML=sic('check');   // "original" icon
     btn._copyTimer=setTimeout(()=>{ btn.classList.remove('copied'); btn.innerHTML=old; btn._copyTimer=null; }, 1100);
   }
+  return ok;
 }
-// Wire per-row + per-card copy buttons inside a freshly-rendered .infogrid.
-function wireCopyButtons(root){
-  root.querySelectorAll('.copybtn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if(btn.classList.contains('copyall')){
-        const card = btn.closest('.infocard');
-        const title = (card.querySelector('h3')?.childNodes[0]?.textContent || '').trim();
-        const lines = [...card.querySelectorAll('.inforow')].map(r => {
-          const kk = (r.querySelector('.k')?.textContent || '').trim();
-          const vv = (r.querySelector('.v')?.textContent || '').replace(/\s+/g,' ').trim();
-          return (kk && vv) ? `${kk}: ${vv}` : '';
-        }).filter(Boolean);
-        copyText((title ? title+'\n' : '') + lines.join('\n'), btn);
-      } else {
-        const vv = (btn.previousElementSibling?.textContent || '').replace(/\s+/g,' ').trim();
-        copyText(vv, btn);
-      }
-    });
-  });
+// Inline "value + copy button" unit for any table cell, list item or detail
+// panel (#220) — the System tab's .inforow affordance, generalised. The button
+// reads its *previous sibling's* text at click time (handled once, below, by
+// the delegated listener), so nothing sensitive is duplicated into attributes.
+function copyable(value){
+  if(value==null || value==='') return '';
+  const t = I18N.t('copy.field','Copy value');
+  return `<span class="copywrap"><span class="copyval">${esc(String(value))}</span>`
+       + `<button type="button" class="copybtn mini" title="${t}" aria-label="${t}">${sic('copy')}</button></span>`;
 }
+// ONE delegated listener for every .copybtn in the document — infoRow's, the
+// per-card "copy all", and every copyable() chip dropped into any table/list/
+// panel. No per-render wiring call needed (elements can come and go freely).
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.copybtn'); if(!btn) return;
+  if(btn.classList.contains('copyall')){
+    const card = btn.closest('.infocard');
+    const title = (card.querySelector('h3')?.childNodes[0]?.textContent || '').trim();
+    const lines = [...card.querySelectorAll('.inforow')].map(r => {
+      const kk = (r.querySelector('.k')?.textContent || '').trim();
+      const vv = (r.querySelector('.v')?.textContent || '').replace(/\s+/g,' ').trim();
+      return (kk && vv) ? `${kk}: ${vv}` : '';
+    }).filter(Boolean);
+    copyText((title ? title+'\n' : '') + lines.join('\n'), btn);
+    return;
+  }
+  // infoRow's .v and copyable()'s .copyval are both the button's immediate
+  // preceding sibling — one read covers both shapes.
+  const vv = (btn.previousElementSibling?.textContent || '').replace(/\s+/g,' ').trim();
+  if(vv) copyText(vv, btn);
+});
 
 function renderSysInfo(){
   const el = document.getElementById('sysinfo');
@@ -6605,7 +6612,6 @@ function renderSysInfo(){
   el.innerHTML = `<div class="infogrid">
     ${infoCard(I18N.t('sys.card_system','System'), sys, I18N.t('sys.no_system','No system info reported.'))}
     ${infoCard(I18N.t('sys.card_hardware','Hardware'), hwh, I18N.t('sys.no_hardware','No hardware info reported.'))}</div>`;
-  wireCopyButtons(el);
 }
 
 // Compact byte formatter for interface RX/TX counters (distinct from fmtBytes,
@@ -6681,8 +6687,8 @@ async function renderNetwork(){
     const sp  = i.speed_mbps ? (i.speed_mbps>=1000?(i.speed_mbps/1000)+' Gb/s':i.speed_mbps+' Mb/s') : '—';
     const io  = (i.rx_bytes!=null||i.tx_bytes!=null) ? fmtIO(i.rx_bytes)+' / '+fmtIO(i.tx_bytes) : '—';
     const stc = i.state==='up' ? 'var(--ok)' : (i.state==='down'?'var(--crit)':'var(--mut)');
-    return `<tr><td>${esc(i.name)}<div class="muted" style="font-size:11px">${esc(i.type||'')}</div></td>
-      <td>${esc(ips)}</td><td>${i.mac?esc(i.mac):'—'}</td>
+    return `<tr><td>${copyable(i.name)}<div class="muted" style="font-size:11px">${esc(i.type||'')}</div></td>
+      <td>${ips!=='—'?copyable(ips):'—'}</td><td>${i.mac?copyable(i.mac):'—'}</td>
       <td><span style="color:${stc}">${esc(i.state||'?')}</span></td>
       <td>${sp}</td><td>${i.mtu||'—'}</td><td>${io}</td></tr>`;
   }).join('') || '<tr><td colspan="7" class="muted">'+I18N.t('net.no_ifaces','No interfaces.')+'</td></tr>';
@@ -6692,7 +6698,7 @@ async function renderNetwork(){
 
   const lrows = (net.listen||[]).map(s=>{
     const tag = s.exposed ? '<span class="exptag pub">'+I18N.t('net.exp_all','🌐 all interfaces')+'</span>' : '<span class="exptag loc">'+I18N.t('net.exp_local','🔒 local')+'</span>';
-    return `<tr><td>${esc(s.proto)}</td><td>${esc(s.addr)}</td><td>${s.port}</td>
+    return `<tr><td>${esc(s.proto)}</td><td>${copyable(s.addr)}</td><td>${s.port!=null?copyable(s.port):''}</td>
       <td>${s.proc?esc(s.proc):'—'}</td><td>${tag}</td></tr>`;
   }).join('') || '<tr><td colspan="5" class="muted">'+I18N.t('net.no_sockets','No listening sockets reported.')+'</td></tr>';
 
