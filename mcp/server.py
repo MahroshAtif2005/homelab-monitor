@@ -223,8 +223,10 @@ def get_entity_cost(name: str, kind: str = "", range: str = "7d") -> dict:
 def get_experiments(range: str = "7d", status: str = "") -> dict:
     """Tracked training/eval runs (Experiments tab), each priced with the real GPU
     energy it burned. Optionally filter by `status` (running/finished/failed/killed).
-    Each row carries its params, latest metrics (loss/accuracy…), duration and cost.
-    Answers "which runs ran, how did they do, and what did each one cost?".
+    Each row carries its params, latest metrics (loss/accuracy…, plus throughput as
+    `tokens_per_sec` when an LLM training script logged it), duration and cost.
+    Answers "which runs ran, how did they do, what did each one cost, and how many
+    tokens/sec were they pushing?".
     """
     return hc.get_experiments(range, status)
 
@@ -233,8 +235,9 @@ def get_experiments(range: str = "7d", status: str = "") -> dict:
 @_track
 def get_experiment(run_id: str) -> dict:
     """Full detail for one tracked run by `run_id` (from `get_experiments`): its
-    logged-metric series (the loss curve), the GPU power/util time-series over the
-    run, and the priced energy it burned. An unknown id returns an HTTP 404 error.
+    logged-metric series (the loss curve, and a tokens/sec curve too if logged),
+    the GPU power/util time-series over the run, and the priced energy it burned.
+    An unknown id returns an HTTP 404 error.
     """
     return hc.get_experiment(run_id)
 
