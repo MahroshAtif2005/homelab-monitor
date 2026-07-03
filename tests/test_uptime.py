@@ -489,9 +489,60 @@ class TestApi(unittest.TestCase):
         r = self.c.delete("/api/uptime/" + cid)
         self.assertEqual(r.status_code, 404)
 
+    def test_notify_uptime_clears_correct_cert_key(self):
+        _clean_db()
+        cid_a, _ = app.create_uptime_check({
+            "label": "check-a", "type": "http",
+            "target": "http://example-a.com", "interval_sec": 60, "timeout_sec": 10
+        })
+        cid_b, _ = app.create_uptime_check({
+            "label": "check-b", "type": "http",
+            "target": "http://example-b.com", "interval_sec": 60, "timeout_sec": 10
+        })
+        app._NOTIFIED[f"uptime:cert:{cid_a}"] = True
+        app._NOTIFIED[f"uptime:cert:{cid_b}"] = True
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="a only", kind="uptime", pattern=cid_a,
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        s = {**app.SETTING_DEFAULTS}
+        app.notify_uptime(s)
+        self.assertNotIn(f"uptime:cert:{cid_a}", app._NOTIFIED)
+        self.assertIn(f"uptime:cert:{cid_b}", app._NOTIFIED)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_create_rejects_non_numeric_timestamps(self):
+        resp = client.post("/api/maintenance", json={
+            "label": "bad timestamp", "kind": "uptime", "pattern": "*",
+            "start_ts": "not-a-number", "end_ts": "also-not-a-number",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("numeric", resp.get_json()["error"])
+
+    def test_create_rejects_oversized_daily_window(self):
+        now = int(time.time())
+        resp = client.post("/api/maintenance", json={
+            "label": "too long daily", "kind": "uptime", "pattern": "*",
+            "start_ts": now, "end_ts": now + 90000,
+            "recurrence": "daily",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("24h", resp.get_json()["error"])
+
+    def test_create_rejects_oversized_weekly_window(self):
+        now = int(time.time())
+        resp = client.post("/api/maintenance", json={
+            "label": "too long weekly", "kind": "uptime", "pattern": "*",
+            "start_ts": now, "end_ts": now + 700000,
+            "recurrence": "weekly",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("7d", resp.get_json()["error"])
+
 
 class TestTlsCertExpiry(unittest.TestCase):
     """Tests for _tls_cert_days and cert_status surfacing in _uptime_state."""
@@ -603,3 +654,124 @@ class TestTlsCertExpiry(unittest.TestCase):
         self.assertIsNone(state["cert_status"])
         self.assertIsNone(state["cert_days_remaining"])
 
+
+
+# ── Maintenance windows ────────────────────────────────────────────────────────
+
+class TestMaintenanceWindows(unittest.TestCase):
+    def setUp(self):
+        with app.LOCK:
+            app.DB.execute("DELETE FROM maintenance_windows")
+            app.DB.commit()
+        app._NOTIFIED.clear()
+
+    def test_create_and_list(self):
+        now = int(time.time())
+        wid = app.create_maintenance_window(
+            label="nightly reboot", kind="uptime", pattern="*",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        windows = app.list_maintenance_windows()
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["id"], wid)
+        self.assertEqual(windows[0]["label"], "nightly reboot")
+
+    def test_delete(self):
+        now = int(time.time())
+        wid = app.create_maintenance_window(
+            label="test", kind="*", pattern="*",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        app.delete_maintenance_window(wid)
+        self.assertEqual(app.list_maintenance_windows(), [])
+
+    def test_in_maintenance_active(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="active", kind="uptime", pattern="my-check",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        self.assertTrue(app._in_maintenance("uptime", "my-check"))
+
+    def test_in_maintenance_expired(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="expired", kind="uptime", pattern="my-check",
+            start_ts=now - 3600, end_ts=now - 60
+        )
+        self.assertFalse(app._in_maintenance("uptime", "my-check"))
+
+    def test_in_maintenance_wildcard_pattern(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="all uptime", kind="uptime", pattern="*",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        self.assertTrue(app._in_maintenance("uptime", "any-check"))
+        self.assertTrue(app._in_maintenance("uptime", "another"))
+
+    def test_in_maintenance_kind_mismatch(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="containers only", kind="container", pattern="*",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        self.assertFalse(app._in_maintenance("uptime", "my-check"))
+
+    def test_in_maintenance_wildcard_kind(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="everything", kind="*", pattern="*",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        self.assertTrue(app._in_maintenance("uptime", "any"))
+        self.assertTrue(app._in_maintenance("container", "immich"))
+
+    def test_emit_suppressed_during_maintenance(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="suppress", kind="container", pattern="immich",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        s = {**app.SETTING_DEFAULTS}
+        app._emit(s, "container:immich", "critical", "Down", "immich is down")
+        self.assertNotIn("container:immich", app._NOTIFIED)
+
+    def test_emit_fires_outside_maintenance(self):
+        now = int(time.time())
+        app.create_maintenance_window(
+            label="other", kind="container", pattern="other-service",
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        with patch("app.dispatch_alert", return_value=[("discord", True, "")]):
+            s = {**app.SETTING_DEFAULTS}
+            app._emit(s, "container:immich", "critical", "Down", "immich is down")
+        self.assertIn("container:immich", app._NOTIFIED)
+
+    def test_daily_recurrence_active(self):
+        now = int(time.time())
+        # Window started 30 min ago, lasts 1 hour, recurs daily
+        app.create_maintenance_window(
+            label="daily", kind="uptime", pattern="*",
+            start_ts=now - 1800, end_ts=now + 1800, recurrence="daily"
+        )
+        self.assertTrue(app._in_maintenance("uptime", "check"))
+
+    def test_uptime_overview_includes_maintenance_flag(self):
+        now = int(time.time())
+        _clean_db()
+        cid, _ = app.create_uptime_check({
+            "label": "test-check", "type": "http",
+            "target": "http://example.com", "interval_sec": 60, "timeout_sec": 10
+        })
+        app.create_maintenance_window(
+            label="maint", kind="uptime", pattern=cid,
+            start_ts=now - 60, end_ts=now + 3600
+        )
+        overview = app.uptime_overview()
+        check = next(c for c in overview["checks"] if c["id"] == cid)
+        self.assertTrue(check["in_maintenance"])
+
+
+if __name__ == "__main__":
+    unittest.main()
