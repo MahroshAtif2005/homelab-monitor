@@ -55,6 +55,7 @@ INSTRUCTIONS = (
     "tools: `get_containers` and `get_services` (full Docker/systemd lists), "
     "`get_memory` (per-service/per-process RAM breakdown), `get_gpu` (utilisation, "
     "per-model VRAM, and who's driving it), `get_ai_models` (loaded models), "
+    "`get_installed_models` (every model available, by provider — not just loaded), "
     "`get_history` (charted time-series), `get_costs`/`get_entity_cost` (power "
     "turned into money, per machine and per process/container/service/model), "
     "`get_experiments`/`get_experiment` (tracked runs priced by the GPU energy they "
@@ -180,6 +181,18 @@ def get_ai_models(range: str = "6h") -> dict:
     "24h", "7d"). Answers "why is the GPU pinned, and which service is calling it?".
     """
     return hc.get_ai_models(range)
+
+
+@mcp.tool()
+@_track
+def get_installed_models() -> dict:
+    """Installed-models registry (#219): every AI model available on the hub —
+    grouped by provider (ollama, vllm, llama.cpp, LM Studio, ComfyUI, …) — not just
+    what's currently loaded. Ollama entries carry on-disk size/quant/param detail;
+    other providers carry name/loaded/vram. Answers "what can I run, and where?"
+    without SSHing in to run `ollama list` or poke a server's API by hand.
+    """
+    return hc.get_installed_models()
 
 
 @mcp.tool()

@@ -92,6 +92,7 @@ if _PROM_OK:
         "container_state":   Gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
         "systemd_unit":      Gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
         "model_vram":        Gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
+        "models_installed":  Gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
     }
 LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
@@ -258,7 +259,7 @@ _apply_schema_migrations(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
-          "model_meta": {}, "serving": [], "training": [], "devtools": []}
+          "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -519,6 +520,17 @@ def _match_probe(ct):
     for key, fn in PROBES:
         if key in img or key in name:
             return fn
+    return None
+
+def _match_probe_key(ct):
+    """Return the PROBES key (provider id, e.g. 'ollama', 'vllm', 'lmstudio') for a
+    container whose image/name matches a known server, else None. Same match order
+    as _match_probe — kept as a separate lookup so callers that only need the
+    provider label don't have to carry the fn around."""
+    img, name = ct.get("image", "").lower(), ct.get("name", "").lower()
+    for key, fn in PROBES:
+        if key in img or key in name:
+            return key
     return None
 
 CATALOG_MAX = 15   # max idle "available" models listed per server before collapsing to a count
@@ -5230,20 +5242,26 @@ def sample_once():
     # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
     ai = [c for c in conts if _match_probe(c)]
     models = []
+    model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
             found_lists = list(ex.map(probe_models, ai))
+        provider_of = {c["name"]: _match_probe_key(c) for c in ai}
         for ct, found in zip(ai, found_lists):
             svc = ct["name"]
+            provider = provider_of.get(svc)
             smem = procs.get(svc)                         # MB this server holds on the GPU now
             api_vram = any(v is not None for _, v in found)
             for mdl, vram in found:
                 if vram is not None:                      # server reported its own VRAM (Ollama)
-                    models.append((svc, mdl, round(vram)))
+                    vram_val = round(vram)
                 elif not api_vram and len(found) == 1 and smem:
-                    models.append((svc, mdl, round(smem)))  # single model ↔ all the server's VRAM
+                    vram_val = round(smem)                # single model ↔ all the server's VRAM
                 else:
-                    models.append((svc, mdl, None))         # server up but idle / can't attribute
+                    vram_val = None                        # server up but idle / can't attribute
+                models.append((svc, mdl, vram_val))
+                model_catalog.append({"service": svc, "provider": provider, "model": mdl,
+                                       "loaded": vram_val is not None, "vram_mb": vram_val})
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = sample_callers(conts, {c["name"] for c in ai})
@@ -5333,6 +5351,7 @@ def sample_once():
                   gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  model_catalog=model_catalog,
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
@@ -6183,22 +6202,57 @@ def _model_registry(now=None):
     return list(models), reachable
 
 
+def _merge_registry(ollama_models, catalog):
+    """Combine the rich ollama on-disk registry (size/quant/param/modified) with the
+    provider-tagged catalog built each sample cycle from EVERY recognised AI server
+    (#219 — vLLM, llama.cpp, LM Studio, ComfyUI, InvokeAI, …). Pure → unit-testable.
+
+    Ollama entries already carry the full registry detail and are tagged
+    provider='ollama'/host='local' as-is. Catalog entries whose provider is
+    'ollama' are dropped here (the ollama registry is the authoritative, richer
+    source for that provider); every other provider becomes a lightweight entry
+    (name/provider/loaded/vram — no on-disk size, most catalogue APIs don't expose
+    one). Entries missing a model name are skipped."""
+    out = [dict(m, provider="ollama", host="local") for m in ollama_models]
+    seen = {(m["name"], m["provider"]) for m in out}
+    for c in catalog or []:
+        name = c.get("model")
+        provider = c.get("provider") or "other"
+        if not name or provider == "ollama":
+            continue
+        key = (name, provider)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": name, "provider": provider, "host": "local",
+            "size_bytes": None, "size_gb": None, "family": None,
+            "param_size": None, "quant": None, "modified": None,
+            "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),
+        })
+    return out
+
+
 @app.route("/api/models")
 def api_models():
-    """The Model Registry: the full inventory of models PULLED to disk on this
-    host's ollama (GET /api/tags), cross-referenced with what's loaded right now
-    (/api/ps) so the UI can flag resident models + their live VRAM.
+    """The Model Registry: the full inventory of models available on this host —
+    ollama's on-disk catalogue (GET /api/tags, size/quant/param detail) merged with
+    every other recognised AI server's model list (#219: vLLM, llama.cpp, LM Studio,
+    ComfyUI, InvokeAI, …), cross-referenced with what's loaded right now so the UI
+    can flag resident models + their live VRAM, grouped by provider.
 
     Always 200, graceful-degrade, never 500, no secret leak (we echo a `reachable`
-    bool, never the URL/creds). Cached ~45s — this is rarely-changing metadata, so
-    a busy tab can't hammer ollama. Read-only: no generation, no GPU spin.
+    bool, never the URL/creds). Ollama half cached ~45s so a busy tab can't hammer
+    it; the rest rides the existing sampler's cached model_catalog (no extra I/O).
     /api/tags is polled outside any held LOCK."""
-    models, reachable = _model_registry()
+    ollama_models, reachable = _model_registry()
+    models = _merge_registry(ollama_models, LATEST.get("model_catalog"))
     return jsonify({
         "enabled": COPILOT_ENABLED,
         "ollama_reachable": reachable,
         "models": models,
         "totals": _registry_totals(models),
+        "providers": sorted({m["provider"] for m in models}),
     })
 
 
@@ -6812,7 +6866,8 @@ def metrics():
 
     # Clear all multi-label gauges before re-populating so stale series vanish.
     for key in ("gpu_vram_used", "gpu_vram_total", "gpu_util", "gpu_temp", "gpu_power",
-                "host_disk_used", "model_vram", "container_state", "systemd_unit"):
+                "host_disk_used", "model_vram", "container_state", "systemd_unit",
+                "models_installed"):
         _G[key].clear()
 
     # ── GPU ──────────────────────────────────────────────────────────────────
@@ -6838,6 +6893,15 @@ def metrics():
         if vram is not None:
             _G["model_vram"].labels(server=entry.get("service", "?"),
                                     model=entry.get("model", "?")).set(vram)
+
+    # ── Installed-models registry, by provider (#219) — no new I/O: counts the
+    # already-sampled model_catalog, same source the /api/models endpoint merges.
+    provider_counts = {}
+    for entry in (LATEST.get("model_catalog") or []):
+        p = entry.get("provider") or "unknown"
+        provider_counts[p] = provider_counts.get(p, 0) + 1
+    for provider, count in provider_counts.items():
+        _G["models_installed"].labels(provider=provider).set(count)
 
     # ── Docker containers ────────────────────────────────────────────────────
     docker = HEALTH.get("docker") or {}

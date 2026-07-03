@@ -1730,11 +1730,14 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <h2 data-i18n="registry.title">📦 Installed models</h2>
       <span class="ch-meta" id="registry-summary"></span>
       <span class="ch-space"></span>
+      <input type="text" id="registry-filter" class="field" autocomplete="off" spellcheck="false"
+             style="width:180px;font-size:12px;padding:5px 8px"
+             placeholder="Filter by model or provider…">
       <button class="btn" id="registry-refresh" type="button"
               data-i18n="registry.refresh" title="Refresh registry">↻ Refresh</button>
     </div>
     <div id="registry-body"></div>
-    <p class="cap" data-i18n="registry.cap">Every model pulled to this host's local LLM (ollama) — the on-disk inventory, a superset of what's loaded right now. Sizes are on disk; a <b>Loaded</b> badge marks models resident in VRAM this moment. Read-only.</p>
+    <p class="cap" data-i18n="registry.cap">Every model this host's recognised AI servers report — ollama's on-disk inventory (size, params, quant) plus what every other server (vLLM, llama.cpp, …) is currently serving, grouped by provider. A <b>Loaded</b> badge marks models resident in VRAM this moment. Read-only.</p>
   </div>
   <div id="modelsbody"></div>
   <p class="cap" data-i18n-html="models.section_cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
@@ -3444,29 +3447,42 @@ function _registryDate(s){
     return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
   }catch(e){ return '—'; }
 }
+let REGISTRY_LAST=null;   // last /api/models payload — re-filtered client-side, no refetch
 function renderRegistry(j){
   const card=document.getElementById('registry-card'); if(!card) return;
-  // Registry is local-ollama only — hide entirely on remote hosts.
+  // Registry is local-host only — hide entirely on remote hosts (#219 fleet-wide
+  // merge is a follow-up; ollama disk detail + the per-container catalog both
+  // only reflect the hub itself today).
   if(CURRENT_HOST!=='local'){ card.hidden=true; return; }
   card.hidden=false;
+  if(j) REGISTRY_LAST=j;
   const body=document.getElementById('registry-body');
   const sum=document.getElementById('registry-summary');
-  const models=(j&&j.models)||[];
-  if(!j || !j.enabled || !j.ollama_reachable){
+  const all=(REGISTRY_LAST&&REGISTRY_LAST.models)||[];
+  if(!REGISTRY_LAST || !REGISTRY_LAST.enabled){
     if(sum) sum.textContent='';
     body.innerHTML='<div class="ins info" style="margin:2px 0"><div class="ic">🌙</div><div>'
-      +'<div class="t">'+I18N.t('registry.offline','Local LLM not reachable')+'</div>'
-      +'<div class="d">'+I18N.t('registry.offline_d','Start ollama on this host to list the models pulled to disk. Read-only — the monitor never pulls, loads or removes models.')+'</div></div></div>';
+      +'<div class="t">'+I18N.t('registry.offline','No AI model server reachable')+'</div>'
+      +'<div class="d">'+I18N.t('registry.offline_d','Start ollama or another recognised server (vLLM, llama.cpp, …) on this host and it will appear here. Read-only — the monitor never pulls, loads or removes models.')+'</div></div></div>';
     return;
   }
-  if(!models.length){
+  if(!all.length){
     if(sum) sum.textContent='';
-    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.empty','No models pulled to disk yet. Run "ollama pull <model>" on this host and it will appear here.')+'</div>';
+    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.empty','No models detected yet. Pull one to ollama, or start another recognised server, and it will appear here.')+'</div>';
     return;
   }
-  const t=j.totals||{};
+  const t=REGISTRY_LAST.totals||{};
   if(sum) sum.textContent=I18N.tf('registry.summary','{n} models · {gb} GB on disk · {loaded} loaded',
-    {n:t.count!=null?t.count:models.length, gb:fmtBytes(t.total_bytes).replace(' GB',''), loaded:t.loaded!=null?t.loaded:0});
+    {n:t.count!=null?t.count:all.length, gb:fmtBytes(t.total_bytes).replace(' GB',''), loaded:t.loaded!=null?t.loaded:0});
+  const q=(document.getElementById('registry-filter')||{}).value||'';
+  const needle=q.trim().toLowerCase();
+  const models=needle
+    ? all.filter(m=>(m.name||'').toLowerCase().includes(needle) || (m.provider||'').toLowerCase().includes(needle))
+    : all;
+  if(!models.length){
+    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.no_match','No models match your filter.')+'</div>';
+    return;
+  }
   const rows=models.map(m=>{
     const meta=[m.param_size,m.quant].filter(Boolean).map(esc).join(' · ')
       || (m.family?esc(m.family):'<span class="muted">—</span>');
@@ -3474,13 +3490,15 @@ function renderRegistry(j){
       ? '<span class="badge ok">'+I18N.t('registry.loaded','Loaded')+(m.vram_mb!=null?' · '+esc(fmtMB(m.vram_mb)):'')+'</span>'
       : '<span class="badge info">'+I18N.t('registry.ondisk','On disk')+'</span>';
     return '<tr><td>'+esc(m.name)+'</td>'
-      +'<td>'+esc(fmtBytes(m.size_bytes))+'</td>'
+      +'<td><span class="pill" style="text-transform:none">'+esc(m.provider||'—')+'</span></td>'
+      +'<td>'+(m.size_bytes!=null?esc(fmtBytes(m.size_bytes)):'<span class="muted">—</span>')+'</td>'
       +'<td>'+meta+'</td>'
       +'<td>'+loaded+'</td>'
       +'<td><span class="muted">'+esc(_registryDate(m.modified))+'</span></td></tr>';
   }).join('');
   body.innerHTML='<table style="margin-top:4px"><thead><tr>'
     +'<th>'+I18N.t('registry.col_model','Model')+'</th>'
+    +'<th>'+I18N.t('registry.col_provider','Provider')+'</th>'
     +'<th>'+I18N.t('registry.col_size','Size')+'</th>'
     +'<th>'+I18N.t('registry.col_meta','Params · Quant')+'</th>'
     +'<th>'+I18N.t('registry.col_status','Status')+'</th>'
@@ -3497,12 +3515,14 @@ async function loadRegistry(){
   REGISTRY_BUSY=false;
   renderRegistry(j);
 }
-// Wire the registry refresh button once (element is in static markup from load).
+// Wire the registry refresh button + filter box once (elements are in static markup from load).
 let REGISTRY_WIRED=false;
 function _wireRegistry(){
   if(REGISTRY_WIRED) return; REGISTRY_WIRED=true;
   const rgb=document.getElementById('registry-refresh');
   if(rgb) rgb.onclick=()=>loadRegistry();
+  const flt=document.getElementById('registry-filter');
+  if(flt) flt.addEventListener('input',()=>renderRegistry(null));
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────

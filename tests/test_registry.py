@@ -10,6 +10,8 @@ Covers the pure parse/totals math + endpoint shape with no ollama in CI:
     LLM is disabled or ollama is unreachable, never 500
   • no secret (URL) leak
   • the ~45s cache: a second call inside the TTL does not re-fetch
+  • #219: PROBES provider-key lookup + merging the ollama disk registry with the
+    fleet's multi-provider model_catalog (vLLM, llama.cpp, …) into one list
 """
 import json
 import os
@@ -112,18 +114,88 @@ class TestRegistryTotals(unittest.TestCase):
                              "total_bytes": 0, "total_gb": 0.0})
 
 
+class TestMatchProbeKey(unittest.TestCase):
+    def test_matches_by_image_or_name(self):
+        self.assertEqual(app._match_probe_key({"image": "ollama/ollama", "name": "ollama"}), "ollama")
+        self.assertEqual(app._match_probe_key({"image": "vllm/vllm-openai:latest", "name": "vllm-server"}), "vllm")
+        self.assertEqual(app._match_probe_key({"image": "ghcr.io/lm-studio/server", "name": "lmstudio"}),
+                          "lmstudio")
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(app._match_probe_key({"image": "nginx:latest", "name": "reverse-proxy"}))
+
+    def test_key_matches_fn_from_match_probe(self):
+        # _match_probe and _match_probe_key must agree on which PROBES row wins.
+        ct = {"image": "vllm/vllm-openai:latest", "name": "vllm-server"}
+        key = app._match_probe_key(ct)
+        fn = app._match_probe(ct)
+        expected_fn = dict(app.PROBES)[key]
+        self.assertIs(fn, expected_fn)
+
+
+class TestMergeRegistry(unittest.TestCase):
+    def test_ollama_entries_tagged_and_kept(self):
+        ollama = app._parse_model_registry(SAMPLE_TAGS, [])
+        out = app._merge_registry(ollama, [])
+        self.assertEqual(len(out), 3)
+        self.assertTrue(all(m["provider"] == "ollama" and m["host"] == "local" for m in out))
+
+    def test_vllm_catalog_entry_merged_in(self):
+        catalog = [{"service": "vllm-server", "provider": "vllm", "model": "mistral-7b-instruct",
+                    "loaded": True, "vram_mb": 5200}]
+        out = app._merge_registry([], catalog)
+        self.assertEqual(len(out), 1)
+        m = out[0]
+        self.assertEqual(m["name"], "mistral-7b-instruct")
+        self.assertEqual(m["provider"], "vllm")
+        self.assertTrue(m["loaded"])
+        self.assertEqual(m["vram_mb"], 5200)
+        self.assertIsNone(m["size_bytes"])   # vLLM's /v1/models has no on-disk size
+
+    def test_catalog_ollama_entries_deduped_against_disk_registry(self):
+        ollama = app._parse_model_registry(SAMPLE_TAGS, [])
+        # The PROBES ollama probe would ALSO report gemma3:1b via /api/tags — the
+        # richer disk registry entry must win, not a duplicate lightweight one.
+        catalog = [{"service": "ollama", "provider": "ollama", "model": "gemma3:1b",
+                    "loaded": False, "vram_mb": None}]
+        out = app._merge_registry(ollama, catalog)
+        self.assertEqual(len(out), 3)   # still just the 3 ollama disk entries
+
+    def test_catalog_entries_missing_model_name_skipped(self):
+        catalog = [{"service": "x", "provider": "vllm", "model": None}]
+        self.assertEqual(app._merge_registry([], catalog), [])
+
+    def test_same_name_two_providers_both_kept(self):
+        catalog = [{"service": "a", "provider": "vllm", "model": "llama3", "loaded": True, "vram_mb": 1},
+                   {"service": "b", "provider": "llama.cpp", "model": "llama3", "loaded": False, "vram_mb": None}]
+        out = app._merge_registry([], catalog)
+        self.assertEqual({m["provider"] for m in out}, {"vllm", "llama.cpp"})
+
+    def test_totals_across_providers(self):
+        ollama = app._parse_model_registry(SAMPLE_TAGS, [])
+        catalog = [{"service": "vllm-server", "provider": "vllm", "model": "mistral-7b-instruct",
+                    "loaded": True, "vram_mb": 5200}]
+        out = app._merge_registry(ollama, catalog)
+        t = app._registry_totals(out)
+        self.assertEqual(t["count"], 4)
+        self.assertEqual(t["loaded"], 1)   # only mistral (vllm) — ollama fixture has no resident set
+
+
 class TestEndpoint(unittest.TestCase):
     def setUp(self):
         self._url = app.COPILOT_OLLAMA_URL
         self._en = app.COPILOT_ENABLED
         self._cache = app._REGISTRY_CACHE
+        self._catalog = app.LATEST.get("model_catalog")
         app._REGISTRY_CACHE = None
+        app.LATEST["model_catalog"] = []
         self.c = app.app.test_client()
 
     def tearDown(self):
         app.COPILOT_OLLAMA_URL = self._url
         app.COPILOT_ENABLED = self._en
         app._REGISTRY_CACHE = self._cache
+        app.LATEST["model_catalog"] = self._catalog
 
     def test_always_200_unreachable(self):
         app.COPILOT_ENABLED = True
@@ -134,7 +206,20 @@ class TestEndpoint(unittest.TestCase):
         self.assertFalse(j["ollama_reachable"])
         self.assertEqual(j["models"], [])
         self.assertEqual(j["totals"]["count"], 0)
+        self.assertEqual(j["providers"], [])
         self.assertIn("enabled", j)
+
+    def test_merges_catalog_from_other_providers(self):
+        app.COPILOT_ENABLED = True
+        app.COPILOT_OLLAMA_URL = "http://127.0.0.1:1"   # dead port — no ollama entries
+        app.LATEST["model_catalog"] = [
+            {"service": "vllm-server", "provider": "vllm", "model": "mistral-7b-instruct",
+             "loaded": True, "vram_mb": 5200},
+        ]
+        j = self.c.get("/api/models").get_json()
+        self.assertEqual(j["providers"], ["vllm"])
+        self.assertEqual(len(j["models"]), 1)
+        self.assertEqual(j["models"][0]["provider"], "vllm")
 
     def test_disabled_returns_enabled_false_empty(self):
         app.COPILOT_ENABLED = False

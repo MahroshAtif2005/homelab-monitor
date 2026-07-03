@@ -165,6 +165,21 @@ DISK_SCANNING = {"path": "/slow", "state": "scanning"}
 METRICS = "# HELP gpu_util GPU utilization\ngpu_util{gpu=\"gpu0\"} 73\n"
 HEALTHZ = {"status": "ok", "version": "0.13.1"}
 
+MODELS = {
+    "enabled": True, "ollama_reachable": True,
+    "providers": ["ollama", "vllm"],
+    "models": [
+        {"name": "llama3:70b", "provider": "ollama", "host": "local",
+         "size_bytes": 40_000_000_000, "size_gb": 37.25, "family": "llama",
+         "param_size": "70B", "quant": "Q4_0", "modified": "2026-06-18T08:30:00Z",
+         "loaded": True, "vram_mb": 8200},
+        {"name": "mistral-7b-instruct", "provider": "vllm", "host": "local",
+         "size_bytes": None, "size_gb": None, "family": None, "param_size": None,
+         "quant": None, "modified": None, "loaded": True, "vram_mb": 5200},
+    ],
+    "totals": {"count": 2, "loaded": 2, "total_bytes": 40_000_000_000, "total_gb": 37.25},
+}
+
 ROUTES = {
     "/api/fleet": FLEET,
     "/api/host_data/local": HOST_LOCAL,
@@ -174,6 +189,7 @@ ROUTES = {
     "/api/costs": COSTS,
     "/api/costs/entity": COSTS_ENTITY,
     "/api/runs": RUNS,
+    "/api/models": MODELS,
     "/healthz": HEALTHZ,
 }
 
@@ -321,6 +337,13 @@ def run():
         check(r["loaded"][0]["model"] == "llama3:70b", "loaded models")
         check(r["callers"][0]["caller"] == "open-webui", "caller attribution")
         check(r["vram_summary"][0]["peak"] == 8200, "vram summary")
+
+        print("get_installed_models")
+        r = hc.get_installed_models()
+        check(r["providers"] == ["ollama", "vllm"], "providers grouped")
+        check(len(r["models"]) == 2, "installed models list")
+        check(any(m["provider"] == "vllm" for m in r["models"]), "vllm entry surfaced")
+        check(r["totals"]["count"] == 2, "totals passthrough")
 
         print("get_events / get_alerts")
         r = hc.get_events()

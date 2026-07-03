@@ -7,6 +7,9 @@ release notes.
 
 ## [Unreleased]
 
+**Added**
+- **Installed-models registry now spans providers, not just ollama.** The AI Models tab's "Installed models" panel merges ollama's on-disk catalogue (size, params, quant, last-modified) with every other recognised server's model list — vLLM, llama.cpp, LM Studio, ComfyUI, and the rest of the fleet's `PROBES` table — grouped by a new **Provider** column, with a filter box to search by model or provider. Surfaced via a new MCP tool `get_installed_models()` and a `homelab_models_installed_total{provider=...}` Prometheus gauge, so "what can I run, and where" no longer means SSHing in. Cross-host dedupe stays a follow-up. (#219)
+
 **Fixed**
 - **Daily Brief on chat channels was a starved, misleading blob — rebuilt.** The brief only ever sent its rich card to **email**; Discord/Telegram/Slack/ntfy got a stripped text summary that (a) showed the headline twice, (b) was always coloured info-blue regardless of severity, (c) said "Services: 1 failed" without naming the service, and — worst — (d) **counted an offline host as up** (`5/5` while one machine was down), because it read each host's stale stored *Test* result instead of the live online flag the dashboard uses. Now: the fleet tally comes from the same `_host_is_online()` source as `/api/fleet` (offline hosts are correctly counted and show their last error); chat messages are coloured by real severity; action lines **name** the failing container/unit (e.g. `immich_ml — Exited (137) 2 hours ago`); the headline isn't repeated; and **Discord posts the full HTML brief as an attachment** alongside the clean summary. All "infant-icon" emoji are gone — status is shown with colour (CSS dots, the embed stripe) and quiet uppercase labels. (#170)
 
