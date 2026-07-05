@@ -198,6 +198,7 @@ def _data_dir_writable():
 def _open_db_connection(path):
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 def _apply_schema_migrations(conn):
