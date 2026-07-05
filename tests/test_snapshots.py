@@ -359,6 +359,25 @@ class TestSnapshots(unittest.TestCase):
             data = r.get_json()
         assert_snapshot(self, "api_network", data)
 
+    # ─── POST /api/integration/mlflow/sync ───────────────────────────────────
+
+    def test_api_mlflow_sync_post(self):
+        with app.LOCK:
+            app.DB.execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                ("mlflow_uri", "http://mlflow.local:5000")
+            )
+            app.DB.commit()
+        with frozen_time(), \
+             patch("app.sync_mlflow", return_value=5):
+            r = self.client.post("/api/integration/mlflow/sync")
+            data = r.get_json()
+        # Cleanup
+        with app.LOCK:
+            app.DB.execute("DELETE FROM settings WHERE key='mlflow_uri'")
+            app.DB.commit()
+        assert_snapshot(self, "api_integration_mlflow_sync_post", data)
+
     # ─── GET /healthz ─────────────────────────────────────────────────────────
 
     def test_healthz(self):
@@ -370,8 +389,14 @@ class TestSnapshots(unittest.TestCase):
 
     def test_api_changelog(self):
         r = self.client.get("/api/changelog")
-        data = r.get_json()
-        # version and sections depend on the CHANGELOG.md file — snapshot as-is
+        raw = r.get_json()
+        # Snapshot only stable properties — full markdown text changes every release
+        data = {
+            "status": r.status_code,
+            "has_content": bool(raw and raw.get("markdown")),
+            "has_sections": bool(raw and raw.get("sections")),
+            "markdown_prefix": (raw.get("markdown") or "")[:100],
+        }
         assert_snapshot(self, "api_changelog", data)
 
     # ─── GET /favicon.ico ────────────────────────────────────────────────────
@@ -508,6 +533,29 @@ class TestSnapshots(unittest.TestCase):
             data = r.get_json()
         assert_snapshot(self, "api_disk_scan_bad_path", data)
 
+    def test_api_disk_scan_scanning(self):
+        with patch("app._safe_host_dir", return_value="/tmp"), \
+             patch.dict(app._DISK_SCAN, {"/tmp": {"state": "scanning", "at": FROZEN_TS, "path": "/tmp"}}):
+            r = self.client.get("/api/disk_scan?path=/tmp")
+            data = r.get_json()
+        assert_snapshot(self, "api_disk_scan_scanning", data)
+
+    def test_api_disk_scan_done(self):
+        done_entry = {
+            "state": "done",
+            "at": FROZEN_TS,
+            "total": 1024,
+            "free": 512,
+            "error": None,
+            "entries": [{"name": "foo", "size": 512, "type": "file"}],
+        }
+        with frozen_time(), \
+             patch("app._safe_host_dir", return_value="/tmp"), \
+             patch.dict(app._DISK_SCAN, {"/tmp": done_entry}):
+            r = self.client.get("/api/disk_scan?path=/tmp")
+            data = r.get_json()
+        assert_snapshot(self, "api_disk_scan_done", data)
+
     # ─── GET /api/fleet ───────────────────────────────────────────────────────
 
     def test_api_fleet(self):
@@ -527,6 +575,17 @@ class TestSnapshots(unittest.TestCase):
             data = r.get_json()
         assert_snapshot(self, "api_hosts_test", data)
 
+    def test_api_hosts_test_success(self):
+        with patch("app.uuid.uuid4", return_value=MagicMock(hex="hosttestsuccessaabbccddeeff0011")):
+            self.client.post("/api/hosts",
+                             json={"name": "testhost-snap", "ssh_target": "user@10.0.0.5"},
+                             content_type="application/json")
+        probe_result = {"ok": True, "latency_ms": 12, "ssh": True}
+        with patch("app.probe_host", return_value=probe_result):
+            r = self.client.post("/api/hosts/testhost-snap/test")
+            data = r.get_json()
+        assert_snapshot(self, "api_hosts_test_success", data)
+
     # ─── POST /api/hosts/<name>/run ──────────────────────────────────────────
 
     def test_api_hosts_run(self):
@@ -536,6 +595,19 @@ class TestSnapshots(unittest.TestCase):
                                  content_type="application/json")
             data = r.get_json()
         assert_snapshot(self, "api_hosts_run", data)
+
+    def test_api_hosts_run_success(self):
+        with patch("app.uuid.uuid4", return_value=MagicMock(hex="hostrunsuccessaabbccddeeff0022")):
+            self.client.post("/api/hosts",
+                             json={"name": "testhost-run", "ssh_target": "user@10.0.0.6"},
+                             content_type="application/json")
+        run_result = {"ok": True, "stdout": "testhost-run\n", "stderr": "", "rc": 0}
+        with patch("app.run_on_host", return_value=run_result):
+            r = self.client.post("/api/hosts/testhost-run/run",
+                                 json={"cmd": "hostname"},
+                                 content_type="application/json")
+            data = r.get_json()
+        assert_snapshot(self, "api_hosts_run_success", data)
 
     # ─── GET /api/backup ─────────────────────────────────────────────────────
 
@@ -775,6 +847,32 @@ class TestSnapshots(unittest.TestCase):
             r = self.client.get("/api/public-status/nonexistent")
         data = {"status": r.status_code}
         assert_snapshot(self, "api_public_status_one_notfound", data)
+
+    def test_api_public_status_one_found(self):
+        detail = {
+            "id": "check-snap-001",
+            "label": "Snap Service",
+            "type": "http",
+            "host": "example.com",
+            "state": "up",
+            "last_latency_ms": 42,
+            "last_checked": FROZEN_TS,
+            "interval_sec": 60,
+            "up_since": FROZEN_TS - 3600,
+            "uptime": {"24h": 100.0, "7d": 99.9, "30d": 99.8, "90d": 99.7},
+            "daily": [],
+            "response_series": [],
+            "incidents": [],
+            "cert_days_remaining": None,
+            "cert_expires_at": None,
+            "cert_status": None,
+        }
+        with frozen_time(), \
+             patch.dict(os.environ, {"PUBLIC_STATUS": "1"}), \
+             patch("app._public_status_detail", return_value=detail):
+            r = self.client.get("/api/public-status/check-snap-001")
+            data = r.get_json()
+        assert_snapshot(self, "api_public_status_one_found", data)
 
     # ─── GET /public ─────────────────────────────────────────────────────────
 
