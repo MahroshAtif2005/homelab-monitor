@@ -180,7 +180,14 @@ CREATE TABLE IF NOT EXISTS samples_1m (
   mem_total REAL,
   power     REAL,
   temp      REAL,
-  cnt       INTEGER DEFAULT 1
+  cnt       INTEGER DEFAULT 1,
+  cpu       REAL,
+  ram_used  REAL,
+  ram_total REAL,
+  load1     REAL,
+  ctemp     REAL,
+  cpu_power REAL,
+  dram_power REAL
 );
 CREATE TABLE IF NOT EXISTS samples_1h (
   ts        INTEGER PRIMARY KEY,
@@ -189,7 +196,14 @@ CREATE TABLE IF NOT EXISTS samples_1h (
   mem_total REAL,
   power     REAL,
   temp      REAL,
-  cnt       INTEGER DEFAULT 1
+  cnt       INTEGER DEFAULT 1,
+  cpu       REAL,
+  ram_used  REAL,
+  ram_total REAL,
+  load1     REAL,
+  ctemp     REAL,
+  cpu_power REAL,
+  dram_power REAL
 );
 CREATE TABLE IF NOT EXISTS net_samples_1m (
   ts        INTEGER PRIMARY KEY,
@@ -283,12 +297,14 @@ def _apply_schema_migrations(conn):
 def _backfill_rollups(conn):
     """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
     conn.executescript("""
-        INSERT OR IGNORE INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt)
-        SELECT (ts/60)*60, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*)
+        INSERT OR IGNORE INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
+        SELECT (ts/60)*60, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*),
+               AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp), AVG(cpu_power), AVG(dram_power)
         FROM samples GROUP BY (ts/60)*60;
 
-        INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt)
-        SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*)
+        INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
+        SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*),
+               AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp), AVG(cpu_power), AVG(dram_power)
         FROM samples GROUP BY (ts/3600)*3600;
 
         INSERT OR IGNORE INTO net_samples_1m(ts,bytes_in,bytes_out,cnt)
@@ -5686,7 +5702,10 @@ def sample_once():
                        "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
                        (ts, ts - 180))
         # Phase 1.2a: keep rollup tables current after each raw insert
-        _rollup_now(DB, ts, *gcols)
+        _rollup_now(DB, ts, *gcols,
+                    cpu=host["cpu"], ram_used=host["ram_used"], ram_total=host["ram_total"],
+                    load1=host["load1"], ctemp=host["ctemp"],
+                    cpu_power=cpu_power, dram_power=dram_power)
         _rollup_net_now(DB, ts, _cur_net_rows)
         DB.commit()
     # MLflow pull (network; outside the lock) every ~5 min when configured.
@@ -5800,32 +5819,33 @@ def oom_scan():
                 DB.commit()
         _scan_since[svc] = int(time.time())
 
-def _rollup_now(conn, ts, util, mem_used, mem_total, power, temp):
+def _rollup_now(conn, ts, util, mem_used, mem_total, power, temp,
+                cpu=None, ram_used=None, ram_total=None, load1=None, ctemp=None,
+                cpu_power=None, dram_power=None):
     """Upsert the current minute and hour rollup buckets for samples."""
     m = (ts // 60) * 60
     h = (ts // 3600) * 3600
-    conn.execute("""
-        INSERT INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt)
-        VALUES(?,?,?,?,?,?,1)
-        ON CONFLICT(ts) DO UPDATE SET
-          util=(util*cnt+excluded.util)/(cnt+1),
-          mem_used=(mem_used*cnt+excluded.mem_used)/(cnt+1),
-          mem_total=(mem_total*cnt+excluded.mem_total)/(cnt+1),
-          power=(power*cnt+excluded.power)/(cnt+1),
-          temp=(temp*cnt+excluded.temp)/(cnt+1),
-          cnt=cnt+1
-    """, (m, util, mem_used, mem_total, power, temp))
-    conn.execute("""
-        INSERT INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt)
-        VALUES(?,?,?,?,?,?,1)
-        ON CONFLICT(ts) DO UPDATE SET
-          util=(util*cnt+excluded.util)/(cnt+1),
-          mem_used=(mem_used*cnt+excluded.mem_used)/(cnt+1),
-          mem_total=(mem_total*cnt+excluded.mem_total)/(cnt+1),
-          power=(power*cnt+excluded.power)/(cnt+1),
-          temp=(temp*cnt+excluded.temp)/(cnt+1),
-          cnt=cnt+1
-    """, (h, util, mem_used, mem_total, power, temp))
+    for bucket, tbl in ((m, "samples_1m"), (h, "samples_1h")):
+        conn.execute(f"""
+            INSERT INTO {tbl}(ts,util,mem_used,mem_total,power,temp,cnt,
+                cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
+            VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?)
+            ON CONFLICT(ts) DO UPDATE SET
+              util=CASE WHEN excluded.util IS NOT NULL THEN (COALESCE(util,0)*cnt+excluded.util)/(cnt+1) ELSE util END,
+              mem_used=CASE WHEN excluded.mem_used IS NOT NULL THEN (COALESCE(mem_used,0)*cnt+excluded.mem_used)/(cnt+1) ELSE mem_used END,
+              mem_total=CASE WHEN excluded.mem_total IS NOT NULL THEN (COALESCE(mem_total,0)*cnt+excluded.mem_total)/(cnt+1) ELSE mem_total END,
+              power=CASE WHEN excluded.power IS NOT NULL THEN (COALESCE(power,0)*cnt+excluded.power)/(cnt+1) ELSE power END,
+              temp=CASE WHEN excluded.temp IS NOT NULL THEN (COALESCE(temp,0)*cnt+excluded.temp)/(cnt+1) ELSE temp END,
+              cpu=CASE WHEN excluded.cpu IS NOT NULL THEN (COALESCE(cpu,0)*cnt+excluded.cpu)/(cnt+1) ELSE cpu END,
+              ram_used=CASE WHEN excluded.ram_used IS NOT NULL THEN (COALESCE(ram_used,0)*cnt+excluded.ram_used)/(cnt+1) ELSE ram_used END,
+              ram_total=CASE WHEN excluded.ram_total IS NOT NULL THEN (COALESCE(ram_total,0)*cnt+excluded.ram_total)/(cnt+1) ELSE ram_total END,
+              load1=CASE WHEN excluded.load1 IS NOT NULL THEN (COALESCE(load1,0)*cnt+excluded.load1)/(cnt+1) ELSE load1 END,
+              ctemp=CASE WHEN excluded.ctemp IS NOT NULL THEN (COALESCE(ctemp,0)*cnt+excluded.ctemp)/(cnt+1) ELSE ctemp END,
+              cpu_power=CASE WHEN excluded.cpu_power IS NOT NULL THEN (COALESCE(cpu_power,0)*cnt+excluded.cpu_power)/(cnt+1) ELSE cpu_power END,
+              dram_power=CASE WHEN excluded.dram_power IS NOT NULL THEN (COALESCE(dram_power,0)*cnt+excluded.dram_power)/(cnt+1) ELSE dram_power END,
+              cnt=cnt+1
+        """, (bucket, util, mem_used, mem_total, power, temp,
+              cpu, ram_used, ram_total, load1, ctemp, cpu_power, dram_power))
 
 
 def _rollup_net_now(conn, ts, net_rows):
@@ -6072,16 +6092,16 @@ def api_cost():
         def avg_w(since):
             return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
         def total_kwh(since):
-            tot = cur.execute("SELECT SUM(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0
+            tot = cur.execute("SELECT SUM(power*cnt) FROM samples_1h WHERE ts>=?", (since,)).fetchone()[0] or 0
             return tot * kwh_per_wsample
         def split_kwh(since):
-            """One pass over (ts,power) >= since -> (day_kwh, night_kwh)."""
+            """One pass over (ts,power,cnt) >= since -> (day_kwh, night_kwh)."""
             day_w = night_w = 0.0
-            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL", (since,)):
+            for ts, p, c in cur.execute("SELECT ts,power,cnt FROM samples_1h WHERE ts>=? AND power IS NOT NULL", (since,)):
                 if is_night(ts):
-                    night_w += p
+                    night_w += (p or 0) * (c or 1)
                 else:
-                    day_w += p
+                    day_w += (p or 0) * (c or 1)
             return day_w * kwh_per_wsample, night_w * kwh_per_wsample
 
         lt = time.localtime(now)
@@ -6100,20 +6120,20 @@ def api_cost():
                         "day_cost": round(dc, 2), "night_cost": round(nc, 2)}
 
         # Cumulative-cost series across the selected range (mirrors api_data buckets).
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        since = (cur.execute("SELECT MIN(ts) FROM samples_1h").fetchone()[0] or now) if span is None else now - span
         bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
         labels, cost_cum, running = [], [], 0.0
         if mode == "dual":                            # stream + classify per bucket (one pass)
             acc = {}
-            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
+            for ts, p, c in cur.execute("SELECT ts,power,cnt FROM samples_1h WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
                 b = (ts // bk) * bk
                 price = night_price if is_night(ts) else day_price
-                acc[b] = acc.get(b, 0.0) + (p or 0) * kwh_per_wsample * price
+                acc[b] = acc.get(b, 0.0) + (p or 0) * (c or 1) * kwh_per_wsample * price
             for b in sorted(acc):
                 running += acc[b]
                 labels.append(int(b)); cost_cum.append(round(running, 4))
-        else:                                         # single: cheap SQL-bucketed path (unchanged)
-            rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
+        else:                                         # single: cheap SQL-bucketed path
+            rows = cur.execute("SELECT (ts/?)*? b, SUM(power*cnt) FROM samples_1h WHERE ts>=? GROUP BY b ORDER BY b",
                                (bk, bk, since)).fetchall()
             for b, p in rows:
                 running += (p or 0) * kwh_per_wsample * day_price
@@ -6169,27 +6189,28 @@ def api_costs():
     kwh_per = INTERVAL / 3_600_000.0
     with LOCK:
         c = DB.cursor()
-        since = (c.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        since = (c.execute("SELECT MIN(ts) FROM samples_1h").fetchone()[0] or now) if span is None else now - span
         bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
         comp = c.execute(f"SELECT (ts/?)*? b, AVG(power), AVG(cpu_power), AVG(dram_power) "
-                         f"FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
+                         f"FROM samples_1h WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
         # component energy + cost over the range (tariff-aware, one streaming pass)
         comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
         cost_range = 0.0
         nticks = 0
-        for ts, p, cp, dp in c.execute("SELECT ts,power,cpu_power,dram_power FROM samples WHERE ts>=?", (since,)):
-            nticks += 1
+        for ts, p, cp, dp, cnt_ in c.execute("SELECT ts,power,cpu_power,dram_power,cnt FROM samples_1h WHERE ts>=?", (since,)):
+            nticks += cnt_ or 1
             price = _price_at(ctx, ts)
-            tot = (p or 0) + (cp or 0) + (dp or 0)
-            comp_kwh["gpu"] += (p or 0) * kwh_per
-            comp_kwh["cpu"] += (cp or 0) * kwh_per
-            comp_kwh["dram"] += (dp or 0) * kwh_per
+            n = cnt_ or 1
+            tot = ((p or 0) + (cp or 0) + (dp or 0)) * n
+            comp_kwh["gpu"] += (p or 0) * n * kwh_per
+            comp_kwh["cpu"] += (cp or 0) * n * kwh_per
+            comp_kwh["dram"] += (dp or 0) * n * kwh_per
             cost_range += tot * kwh_per * price
         # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
         def win_cost(start):
             tot = 0.0
-            for ts, w in c.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=?", (start,)):
-                tot += (w or 0) * kwh_per * _price_at(ctx, ts)
+            for ts, w, cnt_ in c.execute(f"SELECT ts, {_TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=?", (start,)):
+                tot += (w or 0) * (cnt_ or 1) * kwh_per * _price_at(ctx, ts)
             return round(tot, 2)
         lt = time.localtime(now)
         midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
@@ -6275,16 +6296,16 @@ def api_cost_heatmap():
         with LOCK:
             c = DB.cursor()
             rows = c.execute(
-                f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? ORDER BY ts",
+                f"SELECT ts, {_TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=? ORDER BY ts",
                 (since,)).fetchall()
         # aggregate OUTSIDE the lock — pure Python, no DB calls below
-        for ts, w in rows:
+        for ts, w, row_cnt in rows:
             lt = time.localtime(ts)
             # Python weekday(): Mon=0..Sun=6 — matches our locale day labels
             d = lt.tm_wday
             h = lt.tm_hour
-            sum_w[d][h] += (w or 0)
-            cnt[d][h] += 1
+            sum_w[d][h] += (w or 0) * (row_cnt or 1)
+            cnt[d][h] += row_cnt or 1
             if span_min is None or ts < span_min:
                 span_min = ts
             if span_max is None or ts > span_max:

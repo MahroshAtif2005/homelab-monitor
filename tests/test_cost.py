@@ -14,11 +14,21 @@ class TestCost(unittest.TestCase):
         now = int(time.time())
         with app.LOCK:
             app.DB.execute("DELETE FROM samples")
+            app.DB.execute("DELETE FROM samples_1h")
             n = 3600 // app.INTERVAL
             for i in range(n):
                 ts = now - 3600 + i * app.INTERVAL
                 app.DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp) "
                                "VALUES(?,?,?,?,?,?)", (ts, 0, 0, 0, watts, 0))
+            app.DB.commit()
+            app.DB.executescript("""
+                INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,
+                    cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power,cnt)
+                SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp),
+                    AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp),
+                    AVG(cpu_power), AVG(dram_power), COUNT(*)
+                FROM samples GROUP BY (ts/3600)*3600;
+            """)
             app.DB.commit()
 
     def test_disabled_without_price(self):
@@ -82,10 +92,20 @@ class TestDualTariff(unittest.TestCase):
                 app.DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp) "
                                "VALUES(?,?,?,?,?,?)", (ts, 0, 0, 0, watts, 0))
             app.DB.commit()
+            app.DB.executescript("""
+                INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,
+                    cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power,cnt)
+                SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp),
+                    AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp),
+                    AVG(cpu_power), AVG(dram_power), COUNT(*)
+                FROM samples GROUP BY (ts/3600)*3600;
+            """)
+            app.DB.commit()
 
     def setUp(self):
         with app.LOCK:
             app.DB.execute("DELETE FROM samples")
+            app.DB.execute("DELETE FROM samples_1h")
             app.DB.commit()
 
     def tearDown(self):
