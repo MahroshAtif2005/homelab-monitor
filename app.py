@@ -221,6 +221,10 @@ CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
@@ -293,6 +297,20 @@ def _apply_schema_migrations(conn):
     except sqlite3.OperationalError:
         pass
     conn.commit()
+    _record_baseline_if_needed(conn)
+
+def _record_baseline_if_needed(conn):
+    """Stamp migration 0001 on any DB that already has the baseline schema applied."""
+    try:
+        applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
+        if "0001" not in applied:
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)",
+                ("0001", int(time.time()))
+            )
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 def _backfill_rollups(conn):
     """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
