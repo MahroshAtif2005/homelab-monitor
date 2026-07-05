@@ -1,0 +1,22 @@
+{
+  "hosts": [
+    {
+      "at": 1735689600,
+      "host": {
+        "cpu": 30,
+        "hostname": "testhost"
+      },
+      "is_local": true,
+      "label": "testhost (this hub)",
+      "last_check": {
+        "summary": {
+          "overall": "ok"
+        }
+      },
+      "name": "local",
+      "online": true,
+      "ssh_target": null
+    }
+  ],
+  "interval": 10
+}

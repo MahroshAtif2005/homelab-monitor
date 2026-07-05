@@ -1,0 +1,5 @@
+{
+  "error": "not a readable directory: /no/such/dir",
+  "path": "/no/such/dir",
+  "state": "error"
+}

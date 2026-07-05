@@ -1,0 +1,8 @@
+{
+  "host": {
+    "name": "patch-host",
+    "ssh_target": "user@10.0.0.99",
+    "tags": ""
+  },
+  "ok": true
+}

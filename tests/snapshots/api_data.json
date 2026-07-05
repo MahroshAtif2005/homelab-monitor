@@ -1,0 +1,123 @@
+{
+  "bucket_sec": 10,
+  "callers": [],
+  "disk_io": {},
+  "events": [],
+  "insights": [
+    {
+      "detail": "VRAM peaked at 33% (16576 MB free at the tightest).",
+      "level": "ok",
+      "title": "GPU has plenty of headroom"
+    }
+  ],
+  "labels": [
+    1735689570,
+    1735689580,
+    1735689590
+  ],
+  "mem_total": 24576,
+  "model_summary": [],
+  "now": {
+    "callers": [],
+    "cpu_power": null,
+    "devtools": [],
+    "dram_power": null,
+    "gpu_avail": false,
+    "gpu_extra": {},
+    "gpus": [],
+    "host": {
+      "cores": 8,
+      "cpu": 35,
+      "ctemp": 55,
+      "disks": [],
+      "hostname": "testhost",
+      "load1": 1.5,
+      "ram_kernel": 500,
+      "ram_total": 32000,
+      "ram_used": 16000,
+      "uptime": 86400
+    },
+    "mem_total": 24576,
+    "mem_used": 8192,
+    "model_catalog": [],
+    "model_meta": {},
+    "models": [],
+    "power": 130,
+    "procs": [],
+    "serving": [],
+    "temp": 66,
+    "training": [],
+    "ts": 1735689600,
+    "util": 42
+  },
+  "other": [
+    8000,
+    8000,
+    8000
+  ],
+  "peak_mem": 8000,
+  "pressure_free_mb": 2048,
+  "range": "1h",
+  "services": {},
+  "summary": [],
+  "total": {
+    "cpu": [
+      30,
+      31,
+      32
+    ],
+    "ctemp": [
+      55,
+      55,
+      55
+    ],
+    "load1": [
+      1.5,
+      1.5,
+      1.5
+    ],
+    "mem": [
+      8000,
+      8000,
+      8000
+    ],
+    "mempk": [
+      8000,
+      8000,
+      8000
+    ],
+    "power": [
+      120,
+      130,
+      140
+    ],
+    "ram_total": [
+      32000,
+      32000,
+      32000
+    ],
+    "ram_used": [
+      16000,
+      16000,
+      16000
+    ],
+    "temp": [
+      65,
+      65,
+      65
+    ],
+    "util": [
+      40,
+      41,
+      42
+    ]
+  },
+  "uptime_summary": {
+    "down": 0,
+    "total": 0,
+    "unknown": 0,
+    "up": 0,
+    "worst_down": null
+  },
+  "version": "0.23.0"
+}
