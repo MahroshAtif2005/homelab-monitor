@@ -172,6 +172,41 @@ CREATE TABLE IF NOT EXISTS maintenance_windows(
   kind TEXT NOT NULL DEFAULT '*', pattern TEXT NOT NULL DEFAULT '*',
   start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
   recurrence TEXT, note TEXT, created_at INTEGER NOT NULL);
+-- Phase 1.2a: per-minute and per-hour rollup tables (additive; raw tables unchanged)
+CREATE TABLE IF NOT EXISTS samples_1m (
+  ts        INTEGER PRIMARY KEY,
+  util      REAL,
+  mem_used  REAL,
+  mem_total REAL,
+  power     REAL,
+  temp      REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS samples_1h (
+  ts        INTEGER PRIMARY KEY,
+  util      REAL,
+  mem_used  REAL,
+  mem_total REAL,
+  power     REAL,
+  temp      REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS net_samples_1m (
+  ts        INTEGER PRIMARY KEY,
+  bytes_in  REAL,
+  bytes_out REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS net_samples_1h (
+  ts        INTEGER PRIMARY KEY,
+  bytes_in  REAL,
+  bytes_out REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
+CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
+CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
+CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
@@ -245,6 +280,27 @@ def _apply_schema_migrations(conn):
         pass
     conn.commit()
 
+def _backfill_rollups(conn):
+    """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
+    conn.executescript("""
+        INSERT OR IGNORE INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt)
+        SELECT (ts/60)*60, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*)
+        FROM samples GROUP BY (ts/60)*60;
+
+        INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt)
+        SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*)
+        FROM samples GROUP BY (ts/3600)*3600;
+
+        INSERT OR IGNORE INTO net_samples_1m(ts,bytes_in,bytes_out,cnt)
+        SELECT (ts/60)*60, AVG(bytes_in), AVG(bytes_out), COUNT(*)
+        FROM net_samples GROUP BY (ts/60)*60;
+
+        INSERT OR IGNORE INTO net_samples_1h(ts,bytes_in,bytes_out,cnt)
+        SELECT (ts/3600)*3600, AVG(bytes_in), AVG(bytes_out), COUNT(*)
+        FROM net_samples GROUP BY (ts/3600)*3600;
+    """)
+    conn.commit()
+
 def reopen_db():
     """Close and reopen the global DB handle after a restore (same path, new file)."""
     global DB, DB_EPHEMERAL
@@ -255,6 +311,7 @@ def reopen_db():
     os.makedirs(_data_dir(), exist_ok=True)
     DB = _open_db_connection(DB_PATH)
     _apply_schema_migrations(DB)
+    _backfill_rollups(DB)
     DB_EPHEMERAL = False
 
 # Open the history DB, but never let a missing/unwritable /data mount kill the
@@ -271,6 +328,7 @@ except sqlite3.OperationalError as e:
     DB = _open_db_connection(":memory:")
     DB_EPHEMERAL = True
 _apply_schema_migrations(DB)
+_backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
@@ -5583,8 +5641,9 @@ def sample_once():
                 DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
                            "VALUES(?,?,?,?,?,?,?)",
                            (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
+        _cur_net_rows = list(_net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
-                       _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
+                       _cur_net_rows)
         # Disk I/O moves fast, so sample it on its own tighter cadence (~45s) into
         # a dedicated 7-day ring — dense enough for per-device sparklines + the
         # anomaly baseline without bloating the DB. Sourced from the health_scan
@@ -5626,6 +5685,9 @@ def sample_once():
             DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
                        "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
                        (ts, ts - 180))
+        # Phase 1.2a: keep rollup tables current after each raw insert
+        _rollup_now(DB, ts, *gcols)
+        _rollup_net_now(DB, ts, _cur_net_rows)
         DB.commit()
     # MLflow pull (network; outside the lock) every ~5 min when configured.
     if get_settings().get("mlflow_uri") and ts % 300 < INTERVAL:
@@ -5737,6 +5799,54 @@ def oom_scan():
                 DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)", (ets, svc, "oom", line.strip()[:300]))
                 DB.commit()
         _scan_since[svc] = int(time.time())
+
+def _rollup_now(conn, ts, util, mem_used, mem_total, power, temp):
+    """Upsert the current minute and hour rollup buckets for samples."""
+    m = (ts // 60) * 60
+    h = (ts // 3600) * 3600
+    conn.execute("""
+        INSERT INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt)
+        VALUES(?,?,?,?,?,?,1)
+        ON CONFLICT(ts) DO UPDATE SET
+          util=(util*cnt+excluded.util)/(cnt+1),
+          mem_used=(mem_used*cnt+excluded.mem_used)/(cnt+1),
+          mem_total=(mem_total*cnt+excluded.mem_total)/(cnt+1),
+          power=(power*cnt+excluded.power)/(cnt+1),
+          temp=(temp*cnt+excluded.temp)/(cnt+1),
+          cnt=cnt+1
+    """, (m, util, mem_used, mem_total, power, temp))
+    conn.execute("""
+        INSERT INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt)
+        VALUES(?,?,?,?,?,?,1)
+        ON CONFLICT(ts) DO UPDATE SET
+          util=(util*cnt+excluded.util)/(cnt+1),
+          mem_used=(mem_used*cnt+excluded.mem_used)/(cnt+1),
+          mem_total=(mem_total*cnt+excluded.mem_total)/(cnt+1),
+          power=(power*cnt+excluded.power)/(cnt+1),
+          temp=(temp*cnt+excluded.temp)/(cnt+1),
+          cnt=cnt+1
+    """, (h, util, mem_used, mem_total, power, temp))
+
+
+def _rollup_net_now(conn, ts, net_rows):
+    """Upsert the current minute and hour rollup buckets for net_samples."""
+    if not net_rows:
+        return
+    m = (ts // 60) * 60
+    h = (ts // 3600) * 3600
+    # Aggregate across all ifaces for this tick
+    total_in  = sum(r[2] or 0 for r in net_rows)
+    total_out = sum(r[3] or 0 for r in net_rows)
+    for bucket, tbl in ((m, "net_samples_1m"), (h, "net_samples_1h")):
+        conn.execute(f"""
+            INSERT INTO {tbl}(ts,bytes_in,bytes_out,cnt)
+            VALUES(?,?,?,1)
+            ON CONFLICT(ts) DO UPDATE SET
+              bytes_in=(bytes_in*cnt+excluded.bytes_in)/(cnt+1),
+              bytes_out=(bytes_out*cnt+excluded.bytes_out)/(cnt+1),
+              cnt=cnt+1
+        """, (bucket, total_in, total_out))
+
 
 def collector():
     last_oom = last_health = last_notify = last_diskio = 0
