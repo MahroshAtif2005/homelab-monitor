@@ -3858,7 +3858,7 @@ function renderHealth(){
   // Containers
   const dk=HH.docker||{}, ds=dk.summary||{};
   document.getElementById('ct-ctl-notice').innerHTML = (dk.available && !dk.controls_enabled)
-    ? `<div class="ins info"><div class="ic">🔒</div><div><div class="t">${I18N.t('ct.controls_off_title','Container controls are off')}</div><div class="d">${I18N.t('ct.controls_off_body','Bring the stack up with docker-compose.controls.yml (see website/configuration.md) to start, stop, restart containers and change their restart policy from here.')}</div></div></div>`
+    ? `<div class="ins info"><div class="ic">🔒</div><div><div class="t">${I18N.t('ct.controls_off_title','Container controls are off')}</div><div class="d">${I18N.t('ct.controls_off_body','Someone set ENABLE_CONTROLS=0 (or dropped docker-compose.readonly.yml) on this box — unset it to start, stop, restart containers and change their restart policy from here. See website/configuration.md.')}</div></div></div>`
     : '';
   document.getElementById('ctkpis').innerHTML = dk.available? [
     {v:ds.total||0,l:I18N.t('kpi.containers','Containers')},{v:ds.running||0,l:I18N.t('kpi.running','Running')},
@@ -3952,7 +3952,7 @@ function renderServicesBlock(sd){
   const controlsEnabled = !!(HH && HH.systemd && HH.systemd.controls_enabled);
   const notice = document.getElementById('svc-ctl-notice');
   if(notice) notice.innerHTML = (sd.available && !controlsEnabled)
-    ? `<div class="ins info"><div class="ic">🔒</div><div><div class="t">${I18N.t('svc.controls_off_title','Service controls are off')}</div><div class="d">${I18N.t('svc.controls_off_body','Bring the stack up with docker-compose.controls.yml (see website/configuration.md) to start, stop and restart services from here.')}</div></div></div>`
+    ? `<div class="ins info"><div class="ic">🔒</div><div><div class="t">${I18N.t('svc.controls_off_title','Service controls are off')}</div><div class="d">${I18N.t('svc.controls_off_body','Someone set ENABLE_CONTROLS=0 (or dropped docker-compose.readonly.yml) on this box — unset it to start, stop and restart services from here. See website/configuration.md.')}</div></div></div>`
     : '';
   if(!sd.available){
     svc.innerHTML = `<div class="ins info"><div class="ic">ℹ️</div><div><div class="t">${win?I18N.t('svc.off_win','service monitoring is off'):I18N.t('svc.off_systemd','systemd monitoring is off')}</div><div class="d">${esc(sd.reason||(win?I18N.t('svc.reason_win','No services returned.'):I18N.t('svc.reason_systemd','No D-Bus / systemd detected.')))}</div></div></div>`;

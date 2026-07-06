@@ -52,23 +52,22 @@ CHECK_UPDATES = os.environ.get("CHECK_UPDATES", "true").strip().lower() not in (
 # this network lookup and keep the offline package counts.
 CHECK_OS_UPDATES = os.environ.get("CHECK_OS_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
 UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
-# Opt-in one-click self-update button. OFF by default: this is the first action
-# that *writes* (it recreates this very container via a detached docker:cli helper
-# and restarts the app). Needs the docker socket mounted read-write. See
-# start_self_update() and website/configuration.md.
-ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "").strip().lower() in ("1", "true", "yes", "on")
+# One-click self-update button. ON by default (recreates this very container
+# via a detached docker:cli helper and restarts the app) — set
+# ALLOW_SELF_UPDATE=0 to turn it off. Needs the docker socket mounted
+# read-write, which the shipped docker-compose.yml now does by default too.
+# See start_self_update() and website/configuration.md.
+ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
 SELF_UPDATE_HELPER_IMAGE = os.environ.get("SELF_UPDATE_HELPER_IMAGE", "docker:cli")
-# Opt-in container/service controls (start/stop/restart, restart policy). OFF by
-# default for the same reason as self-update: this is a monitoring tool that's
-# "intentionally unauthenticated on a trusted LAN" (see api_hosts_run below) —
-# turning it into something that can also stop things needs an explicit choice,
-# not a silent default. Local container/service control also needs the docker
-# socket and the systemd D-Bus socket mounted read-write (see
-# docker-compose.controls.yml) — remote hosts (SSH) aren't affected by that,
-# they only need ENABLE_CONTROLS itself. Gates every mutating route in this
+# Container/service controls (start/stop/restart, restart policy). ON by
+# default alongside self-update — set ENABLE_CONTROLS=0 to turn it off (see
+# docker-compose.readonly.yml for restoring the old fully-read-only posture,
+# sockets included). Local container/service control needs the docker socket
+# and the systemd D-Bus socket mounted read-write, which the shipped
+# docker-compose.yml now does by default. Gates every mutating route in this
 # section; read-only collection (collect_docker/collect_systemd) is unaffected.
 # See website/configuration.md.
-ENABLE_CONTROLS = os.environ.get("ENABLE_CONTROLS", "").strip().lower() in ("1", "true", "yes", "on")
+ENABLE_CONTROLS = os.environ.get("ENABLE_CONTROLS", "1").strip().lower() not in ("0", "false", "no", "off")
 # Split cache: once we know there's an update, the answer won't change for hours
 # so we can cache it long. But "no update found" / network errors should expire
 # sooner — otherwise a release published right after deploy stays invisible for
@@ -7143,7 +7142,7 @@ def api_container_action(name):
     tab has no remote inventory yet (see website/multi-host.md), so there's
     nothing to control on a remote host. Gated by ENABLE_CONTROLS."""
     if not ENABLE_CONTROLS:
-        return jsonify({"ok": False, "error": "Container controls are disabled. Bring the stack up with docker-compose.controls.yml to enable them (see website/configuration.md)."}), 403
+        return jsonify({"ok": False, "error": "Container controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
     if not _CT_NAME_RE.match(name or ""):
         return jsonify({"ok": False, "error": "invalid container name"}), 400
     action = ((request.get_json(silent=True) or {}).get("action") or "").strip()
@@ -7166,7 +7165,7 @@ def api_container_action(name):
 def api_container_restart_policy(name):
     """Change a container's restart policy (local host only — see api_container_action)."""
     if not ENABLE_CONTROLS:
-        return jsonify({"ok": False, "error": "Container controls are disabled. Bring the stack up with docker-compose.controls.yml to enable them (see website/configuration.md)."}), 403
+        return jsonify({"ok": False, "error": "Container controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
     if not _CT_NAME_RE.match(name or ""):
         return jsonify({"ok": False, "error": "invalid container name"}), 400
     policy = ((request.get_json(silent=True) or {}).get("policy") or "").strip()
@@ -7724,7 +7723,7 @@ def api_service_action(name):
     sudo-password plumbing as api_hosts_run) or Windows service (SSH +
     PowerShell). Body: {action, host?, sudo_password?}. Gated by ENABLE_CONTROLS."""
     if not ENABLE_CONTROLS:
-        return jsonify({"ok": False, "error": "Service controls are disabled. Bring the stack up with docker-compose.controls.yml to enable them (see website/configuration.md)."}), 403
+        return jsonify({"ok": False, "error": "Service controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
     if not _UNIT_NAME_RE.match(name or ""):
         return jsonify({"ok": False, "error": "invalid unit/service name"}), 400
     body = request.get_json(silent=True) or {}

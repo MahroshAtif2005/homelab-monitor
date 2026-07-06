@@ -1,4 +1,5 @@
-"""Unit tests for the opt-in container/service controls (ENABLE_CONTROLS).
+"""Unit tests for the container/service controls (ENABLE_CONTROLS — on by
+default, gated off with ENABLE_CONTROLS=0 or docker-compose.readonly.yml).
 
 Docker (_docker_req) and systemd (systemd_unit_action) are stubbed — these
 tests never touch a real socket. SSH-backed remote actions stub run_on_host /

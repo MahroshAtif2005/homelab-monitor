@@ -23,28 +23,33 @@ Set these under `environment:` in `docker-compose.yml`. All optional.
 | `WATCH_CONTAINERS` | *(empty)* | Comma-separated container names to always scan for OOM events, even if not GPU-attributed. |
 | `WATCH_SERVICES` | *(empty)* | Comma-separated systemd units to always surface in the Services tab. |
 | `CHECK_UPDATES` | `true` | Whether to poll GitHub releases for "update available" banner. |
-| `ALLOW_SELF_UPDATE` | *(off)* | Opt-in. Adds an **Update now** button to the update modal that pulls the new image, recreates this container, and restarts it (rolling back automatically if the new version fails its health-check). Off by default — see note below. |
+| `ALLOW_SELF_UPDATE` | **on** | Adds an **Update now** button to the update modal that pulls the new image, recreates this container, and restarts it (rolling back automatically if the new version fails its health-check). Set to `0` to turn it off — see note below. |
 | `SELF_UPDATE_HELPER_IMAGE` | `docker:cli` | Image used for the short-lived detached helper that runs `docker compose` to recreate the container during a self-update. Override only if `docker:cli` isn't reachable in your registry. |
 | `MONITOR_IMAGE` | *(unset)* | Used **internally** by the self-update flow to pin an exact image — the versioned `:x.y.z` tag for the upgrade, the previous image ref/digest for a rollback. You normally never set this by hand; left unset, the shipped compose file falls back to the usual `sikamikaniko123/homelab-monitor:latest`. |
 | `SSH_DIR` | `/data/.ssh` | Where the multi-host SSH keypair lives. Persists across rebuilds. |
-| `ENABLE_CONTROLS` | *(off)* | Opt-in. Turns on the action buttons on the Containers and Services tabs (start/stop/restart, restart policy). Off by default — see note below. |
+| `ENABLE_CONTROLS` | **on** | Turns on the action buttons on the Containers and Services tabs (start/stop/restart, restart policy). Set to `0` to turn them off — see note below. |
 
-### One-click self-update (`ALLOW_SELF_UPDATE`)
+### Write actions (`ALLOW_SELF_UPDATE`, `ENABLE_CONTROLS`)
 
-This is the first and only action in the monitor that **writes** — everything
-else is read-only. It is therefore **off by default** and must be opted into
-using the bundled override file:
+Two things in the monitor **write**, not just read: the one-click self-update,
+and the Containers/Services tabs' start/stop/restart controls. Both are **on
+by default** in the shipped `docker-compose.yml` (which mounts the docker
+socket and the systemd D-Bus socket read-write for exactly this reason). If
+you'd rather this box stay pure read-only monitoring, bring it up with the
+bundled opt-out override instead:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.self-update.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.readonly.yml up -d
 ```
 
-`docker-compose.self-update.yml` sets `ALLOW_SELF_UPDATE: "1"` and upgrades the
-docker socket from `:ro` to read-write (needed to create the update helper). The
-main `docker-compose.yml` keeps `:ro` so plain monitoring deployments are
-unaffected.
+`docker-compose.readonly.yml` sets both env vars to `"0"` and puts both
+sockets back to `:ro`. You can also flip either one independently by setting
+just that env var — the socket permissions only matter for whichever write
+path you actually leave enabled.
 
-When enabled and a newer release exists, the update modal shows an **Update now**
+#### One-click self-update
+
+When a newer release exists, the update modal shows an **Update now**
 button. On click (after a confirm) it pulls the new image, launches a detached
 `docker:cli` helper that recreates this container via your compose file, and the
 helper health-checks the result: if the new version doesn't report itself healthy
@@ -53,8 +58,8 @@ log live and reloads itself once the new version is up.
 
 Requirements / caveats:
 
-- The docker socket must be mounted **read-write** (not `:ro`) — handled
-  automatically by the override file.
+- The docker socket must be mounted **read-write** (not `:ro`) — the default
+  as of the shipped `docker-compose.yml`.
 - The container must have been started with **docker compose** (the helper reads
   the compose project labels to know what to recreate). A plain `docker run`
   deploy is refused with a clear message — use the manual command instead.
@@ -67,25 +72,7 @@ Requirements / caveats:
   ref/digest on rollback; with a hardcoded `:latest` image line, pinning and
   rollback would silently degrade to re-pulling `:latest`.
 
-### Container & service controls (`ENABLE_CONTROLS`)
-
-By default the Containers and Services tabs are **read-only**, like the rest of
-the dashboard. `ENABLE_CONTROLS` turns on start/stop/restart (and, for
-containers, changing the restart policy) directly from those tabs. It's off by
-default for the same reason as self-update — this is a monitoring tool that's
-intentionally unauthenticated on a trusted LAN, so turning it into something
-that can also stop things is a choice you opt into, not a default:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.controls.yml up -d
-```
-
-`docker-compose.controls.yml` sets `ENABLE_CONTROLS: "1"` and upgrades **both**
-the docker socket and the systemd D-Bus socket from `:ro` to read-write —
-control of the **local** host needs write access to both. The main
-`docker-compose.yml` keeps both `:ro` so plain monitoring deployments are
-unaffected. Combine it with `docker-compose.self-update.yml` too if you want
-both opt-in write features at once (Compose merges override files).
+#### Container & service controls
 
 What's honest about what it can actually do, by host:
 
