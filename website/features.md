@@ -34,7 +34,9 @@ server. See the [full list of 30+ servers](model-servers.md).
 Health of **every** Docker container with uptime, **RAM and GPU-VRAM in separate
 columns** (RAM is the real resident set — page cache excluded — so the numbers add
 up), real on-disk footprint, a **table total**, and clickable port chips that open
-`host:port` in a new tab.
+`host:port` in a new tab. Opt into [`ENABLE_CONTROLS`](configuration.md#container--service-controls-enable_controls)
+to start, stop, restart and change the restart policy of local containers
+straight from the table.
 
 ![Containers](https://raw.githubusercontent.com/SikamikanikoBG/homelab-monitor/main/docs/containers.png)
 
@@ -42,7 +44,9 @@ up), real on-disk footprint, a **table total**, and clickable port chips that op
 
 **systemd** service health for the active host (local *or* remote), with the units
 *you* deployed highlighted, any failed unit surfaced first, plus per-unit uptime,
-memory, and listen ports.
+memory, and listen ports. Same [`ENABLE_CONTROLS`](configuration.md#container--service-controls-enable_controls)
+opt-in adds start/stop/restart — for the local host and for any registered
+remote (Linux or Windows) too.
 
 ![Services](https://raw.githubusercontent.com/SikamikanikoBG/homelab-monitor/main/docs/services.png)
 
