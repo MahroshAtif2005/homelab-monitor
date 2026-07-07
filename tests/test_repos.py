@@ -181,7 +181,7 @@ class TestCostsRepo(unittest.TestCase):
         self.db = sqlite3.connect(":memory:")
         self.db.execute(
             "CREATE TABLE samples_1h(ts INTEGER PRIMARY KEY, util REAL, "
-            "mem_used REAL, mem_total REAL, power REAL, temp REAL, cnt INTEGER)"
+            "mem_used REAL, mem_total REAL, power REAL, temp REAL, cnt INTEGER, cpu_power REAL, dram_power REAL)"
         )
         self.db.execute(
             "CREATE TABLE samples(ts INTEGER PRIMARY KEY, util REAL, "
@@ -217,7 +217,7 @@ class TestCostsRepo(unittest.TestCase):
     def test_heatmap_since(self):
         self._insert_1h(1000, 150.0)
         self._insert_1h(2000, 250.0)
-        rows = costs.heatmap_since(1500, "power", conn=self.db)
+        rows = costs.heatmap_since(1500, conn=self.db)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], 2000)
         self.assertAlmostEqual(rows[0][1], 250.0)

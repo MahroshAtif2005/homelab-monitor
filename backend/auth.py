@@ -23,7 +23,6 @@ def _key_lookup(presented):
         if exp and exp < now:
             return None
         auth_repo.update_last_used(kid, now, conn=_app.DB)
-        _app.DB.commit()
     return kid
 
 

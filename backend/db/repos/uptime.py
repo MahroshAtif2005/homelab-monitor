@@ -129,6 +129,23 @@ def trim_results(check_id: str, cap: int, conn=None):
     c.commit()
 
 
+def insert_result_and_trim(check_id: str, ts: int, up: int, latency_ms, cert_days, cap: int,
+                            code=None, err=None, cert_expires_at=None, conn=None):
+    """Insert a full uptime result and trim old rows in one transaction."""
+    c = conn or connection()
+    c.execute(
+        "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (check_id, ts, up, latency_ms, code, err, cert_days, cert_expires_at)
+    )
+    c.execute(
+        "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
+        "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
+        (check_id, check_id, cap)
+    )
+    c.commit()
+
+
 def results_since(check_id: str, ts: int, conn=None) -> list:
     """Return uptime_results for a check since ts, ordered ascending."""
     c = conn or connection()
@@ -185,11 +202,3 @@ def results_last_one(check_id: str, conn=None):
     ).fetchone()
 
 
-def results_90d(check_id: str, since: int, conn=None) -> list:
-    """Return full result rows for a check since `since` (90-day window)."""
-    c = conn or connection()
-    return c.execute(
-        "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at "
-        "FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
-        (check_id, since)
-    ).fetchall()

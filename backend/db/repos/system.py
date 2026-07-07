@@ -1,6 +1,8 @@
 """backend/db/repos/system.py — helpers for events, disk_io_samples, and misc queries (Phase 4.1)."""
 from backend.db import connection
 
+_TOTAL_W_EXPR = "COALESCE(power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0)"
+
 
 # ── events table ─────────────────────────────────────────────────────────────
 
@@ -11,6 +13,13 @@ def insert_event(ts: int, service: str, kind: str, detail: str, conn=None):
         "INSERT OR IGNORE INTO events VALUES(?,?,?,?)",
         (ts, service, kind, detail)
     )
+    c.commit()
+
+
+def insert_events_batch(event_tuples: list, conn=None):
+    """Insert multiple (ts, service, kind, detail) event rows in one transaction."""
+    c = conn or connection()
+    c.executemany("INSERT OR IGNORE INTO events VALUES(?,?,?,?)", event_tuples)
     c.commit()
 
 
@@ -160,11 +169,11 @@ def min_ts_samples_1h(conn=None):
     return c.execute("SELECT MIN(ts) FROM samples_1h").fetchone()[0]
 
 
-def query_samples_for_cost(ts_from: int, ts_to: int, total_w_expr: str, conn=None) -> list:
+def query_samples_for_cost(ts_from: int, ts_to: int, conn=None) -> list:
     """Return (ts, total_w) from samples in [ts_from, ts_to)."""
     c = conn or connection()
     return c.execute(
-        f"SELECT ts, {total_w_expr} w FROM samples WHERE ts>=? AND ts<?",
+        f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? AND ts<?",
         (ts_from, ts_to)
     ).fetchall()
 

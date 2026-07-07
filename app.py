@@ -4020,10 +4020,10 @@ def run_uptime_check(check):
     try:
         from backend.db.repos import uptime as _uptime_repo
         with LOCK:
-            _uptime_repo.insert_result_full(
-                check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at,
+            _uptime_repo.insert_result_and_trim(
+                check["id"], ts, 1 if up else 0, latency, cert_days, _UPTIME_RESULT_CAP,
+                code=code, err=err, cert_expires_at=cert_expires_at,
                 conn=DB)
-            _uptime_repo.trim_results(check["id"], _UPTIME_RESULT_CAP, conn=DB)
     except Exception as e:
         print("run_uptime_check DB error:", e, flush=True)
 
@@ -4807,12 +4807,14 @@ def diskio_scan():
         items = _disk_io_anomaly_items(DB.cursor(), now)
         firing = {it["device"]: it for it in items}
         newly = [it for dev, it in firing.items() if dev not in _diskio_anom_active]
-        for it in newly:
-            detail = (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
-                      f"{it['z']:+.1f}σ)")[:300]
-            _sys_repo.insert_event(now, it["device"], "diskio_spike", detail, conn=DB)
         if newly:
-            DB.commit()
+            batch = [
+                (now, it["device"], "diskio_spike",
+                 (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
+                  f"{it['z']:+.1f}σ)")[:300])
+                for it in newly
+            ]
+            _sys_repo.insert_events_batch(batch, conn=DB)
         _diskio_anom_active.clear()
         _diskio_anom_active.update(firing.keys())
     _diskio_anom_latest.clear()
@@ -5496,7 +5498,7 @@ def _brief_yesterday_cost():
     try:
         from backend.db.repos import system as _sys_repo
         with LOCK:
-            for ts, w in _sys_repo.query_samples_for_cost(y0, today0, _TOTAL_W_EXPR, conn=DB):
+            for ts, w in _sys_repo.query_samples_for_cost(y0, today0, conn=DB):
                 cost += (w or 0) * kwh_per * _price_at(ctx, ts)
                 kwh  += (w or 0) * kwh_per
     except Exception:
@@ -5899,7 +5901,7 @@ def _public_monitor(check, now):
     from backend.db.repos import uptime as _uptime_repo
     cid = check["id"]
     with LOCK:
-        rows = _uptime_repo.results_90d(cid, now - 7776000, conn=DB)  # 90 days
+        rows = _uptime_repo.results_since_full(cid, now - 7776000, conn=DB)  # 90 days
     def win(w):
         sub = [r for r in rows if r[0] >= now - w]
         return round(100.0 * sum(1 for r in sub if r[1]) / len(sub), 2) if sub else None

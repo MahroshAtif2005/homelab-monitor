@@ -120,8 +120,7 @@ def api_runs_metrics(rid):
         if not exp_repo.exists_run(rid, conn=_app.DB):
             return jsonify({"ok": False, "error": "unknown run"}), 404
         if rows:
-            exp_repo.insert_metrics(rows, conn=_app.DB)
-            exp_repo.update_run_heartbeat(rid, now, conn=_app.DB)
+            exp_repo.insert_metrics_and_update_heartbeat(rid, rows, now, conn=_app.DB)
     return jsonify({"ok": True, "logged": len(rows)})
 
 
@@ -147,8 +146,7 @@ def api_runs_delete(rid):
     (like deleting a host or an API key), so it's open on the LAN rather than
     key-gated — the key gates *ingest* (forgery from notebooks), not housekeeping."""
     with _app.LOCK:
-        rowcount = exp_repo.delete_run(rid, conn=_app.DB)
-        exp_repo.delete_run_metrics(rid, conn=_app.DB)
+        rowcount = exp_repo.delete_run_with_metrics(rid, conn=_app.DB)
     return (jsonify({"ok": True}) if rowcount
             else (jsonify({"ok": False, "error": "unknown run"}), 404))
 
@@ -161,18 +159,10 @@ def api_runs_list():
     status = request.args.get("status")
     key_filter = request.args.get("key")
     now = int(time.time()); since = 0 if span is None else now - span
-    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes,key_id "
-         "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
-    args = [since, now]
-    if status in _app.RUN_STATUS:
-        q += "AND status=? "; args.append(status)
-    if key_filter:
-        q += "AND key_id=? "; args.append(key_filter)
-    q += "ORDER BY started_at DESC LIMIT 500"
     out = []
     with _app.LOCK:
         key_names = dict(auth_repo.get_names(conn=_app.DB))
-        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in exp_repo.list_runs(q, args, conn=_app.DB):
+        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in exp_repo.list_runs(since, now, status=status if status in _app.RUN_STATUS else None, key_id=key_filter or None, conn=_app.DB):
             e_kwh, cost, avg_w, peak_u = _app._run_cost_window(_app.DB.cursor(), started, ended, ctx)
             kv = dict(exp_repo.get_run_metrics_latest(rid, conn=_app.DB))
             out.append({"id": rid, "name": name, "source": source, "status": st,

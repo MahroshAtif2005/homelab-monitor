@@ -1,6 +1,8 @@
 """Read helpers for cost/rollup tables."""
 from backend.db import connection
 
+_TOTAL_W_EXPR = "COALESCE(power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0)"
+
 
 def power_since(ts: int, table: str = "samples_1h", conn=None) -> list:
     """Return (ts, power) rows from a rollup table since ts."""
@@ -11,11 +13,11 @@ def power_since(ts: int, table: str = "samples_1h", conn=None) -> list:
     ).fetchall()
 
 
-def heatmap_since(ts: int, total_w_expr: str, conn=None) -> list:
+def heatmap_since(ts: int, conn=None) -> list:
     """Return (ts, total_watts) rows from samples_1h for heatmap computation."""
     c = conn or connection()
     return c.execute(
-        f"SELECT ts, {total_w_expr} FROM samples_1h WHERE ts>=? ORDER BY ts", (ts,)
+        f"SELECT ts, {_TOTAL_W_EXPR} FROM samples_1h WHERE ts>=? ORDER BY ts", (ts,)
     ).fetchall()
 
 
@@ -89,11 +91,11 @@ def samples_1h_full_since(ts: int, conn=None) -> list:
     ).fetchall()
 
 
-def samples_1h_total_w_since(ts: int, total_w_expr: str, conn=None) -> list:
+def samples_1h_total_w_since(ts: int, conn=None) -> list:
     """Return (ts, total_w, cnt) from samples_1h since ts using total_w_expr."""
     c = conn or connection()
     return c.execute(
-        f"SELECT ts, {total_w_expr} w, cnt FROM samples_1h WHERE ts>=?", (ts,)
+        f"SELECT ts, {_TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=?", (ts,)
     ).fetchall()
 
 
@@ -130,9 +132,9 @@ def max_vram_for_service(name: str, ts: int, conn=None):
     ).fetchone()[0]
 
 
-def samples_1h_heatmap(ts: int, total_w_expr: str, conn=None) -> list:
+def samples_1h_heatmap(ts: int, conn=None) -> list:
     """Return (ts, total_w, cnt) from samples_1h since ts for heatmap."""
     c = conn or connection()
     return c.execute(
-        f"SELECT ts, {total_w_expr} w, cnt FROM samples_1h WHERE ts>=? ORDER BY ts", (ts,)
+        f"SELECT ts, {_TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=? ORDER BY ts", (ts,)
     ).fetchall()

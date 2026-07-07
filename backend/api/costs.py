@@ -138,7 +138,7 @@ def api_costs():
         # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
         def win_cost(start):
             tot = 0.0
-            for ts, w, cnt_ in costs_repo.samples_1h_total_w_since(start, _app._TOTAL_W_EXPR, conn=_app.DB):
+            for ts, w, cnt_ in costs_repo.samples_1h_total_w_since(start, conn=_app.DB):
                 tot += (w or 0) * (cnt_ or 1) * kwh_per * _app._price_at(ctx, ts)
             return round(tot, 2)
         lt = time.localtime(now)
@@ -225,7 +225,7 @@ def api_cost_heatmap():
     span_min = span_max = None
     try:
         with _app.LOCK:
-            rows = costs_repo.samples_1h_heatmap(since, _app._TOTAL_W_EXPR, conn=_app.DB)
+            rows = costs_repo.samples_1h_heatmap(since, conn=_app.DB)
         # aggregate OUTSIDE the lock — pure Python, no _app.DB calls below
         for ts, w, row_cnt in rows:
             lt = time.localtime(ts)

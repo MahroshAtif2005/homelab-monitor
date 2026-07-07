@@ -63,10 +63,37 @@ def delete_run_metrics(run_id: str, conn=None):
     c.commit()
 
 
-def list_runs(query: str, args: list, conn=None) -> list:
-    """Execute a dynamic SELECT on runs with args. Returns fetchall()."""
+def delete_run_with_metrics(run_id: str, conn=None) -> int:
+    """Delete a run and all its metrics in one transaction. Returns rowcount of run delete."""
     c = conn or connection()
-    return c.execute(query, args).fetchall()
+    cur = c.execute("DELETE FROM runs WHERE id=?", (run_id,))
+    c.execute("DELETE FROM run_metrics WHERE run_id=?", (run_id,))
+    c.commit()
+    return cur.rowcount
+
+
+def insert_metrics_and_update_heartbeat(run_id: str, metrics_list: list, ts: int, conn=None):
+    """Insert metrics and update heartbeat in one transaction."""
+    c = conn or connection()
+    c.executemany(
+        "INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", metrics_list
+    )
+    c.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (ts, run_id))
+    c.commit()
+
+
+def list_runs(since: int, now: int, status=None, key_id=None, limit: int = 500, conn=None) -> list:
+    """Return runs active in [since, now] with optional status/key_id filters."""
+    c = conn or connection()
+    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes,key_id "
+         "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
+    args = [since, now]
+    if status is not None:
+        q += "AND status=? "; args.append(status)
+    if key_id is not None:
+        q += "AND key_id=? "; args.append(key_id)
+    q += f"ORDER BY started_at DESC LIMIT {int(limit)}"
+    return c.execute(q, args).fetchall()
 
 
 def get_run(rid: str, conn=None):
