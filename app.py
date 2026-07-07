@@ -5907,6 +5907,7 @@ def _brief_run_once(now=None):
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import brief_worker
+from backend.collectors import watchdog as _collector_watchdog
 
 
 if "pytest" not in sys.modules:
@@ -5914,6 +5915,7 @@ if "pytest" not in sys.modules:
     threading.Thread(target=host_poller, daemon=True).start()
     threading.Thread(target=uptime_worker, daemon=True).start()
     threading.Thread(target=brief_worker, daemon=True).start()
+    threading.Thread(target=_collector_watchdog, daemon=True).start()
 
 
 import os as _os

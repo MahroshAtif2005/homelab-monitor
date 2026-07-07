@@ -4,11 +4,51 @@ backend/collectors — background worker functions extracted from app.py (Phase 
 Each function uses a lazy ``import app as _app`` so that module-level globals
 (_app.LATEST, _app.HEALTH, DB, _app.LOCK, …) are resolved at call time, avoiding circular
 imports. Thread-start lines remain in app.py and resolve via re-exports.
+
+Phase 4.3 — one thread per worker, watchdog detects stalls
+===========================================================
+Each worker already runs in its own daemon thread (started in app.py), so a stalled
+worker cannot block any of the others.  This module adds:
+
+  * ``_heartbeat(name, interval)`` — called by each worker at the start of every
+    cycle; records a monotonic timestamp in ``_HEARTBEATS``.
+  * ``watchdog()`` — a daemon thread that wakes every ``check_interval`` seconds and
+    logs any worker whose last heartbeat is older than 2× its declared sleep interval.
+
+Thread-safety: ``_HEARTBEAT_LOCK`` guards ``_HEARTBEATS``.  It is never held while
+calling into app code, so there is no lock-ordering hazard with app.py's LOCK or
+_NOTIFIER_LOCK.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor
 from backend.db.repos.samples import rollup_now as _rollup_now
 from backend.db.repos.samples import rollup_net_now as _rollup_net_now
+from backend._heartbeat import heartbeat as _heartbeat, get_heartbeats as _get_heartbeats
+
+# Re-export so callers can do `from backend.collectors import _HEARTBEATS, _HEARTBEAT_LOCK`
+# (used by tests that import the heartbeat module directly for isolation assertions).
+from backend._heartbeat import _HEARTBEATS, _HEARTBEAT_LOCK  # noqa: F401
+
+
+def watchdog(check_interval: float = 10.0) -> None:  # pragma: no cover
+    """Daemon loop: log workers that haven't heartbeated within 2× their interval.
+
+    Runs in its own daemon thread; never raises so it survives indefinitely.
+    Exceptions in worker code cause the worker loop to catch-and-continue, so
+    the heartbeat simply stops updating — the watchdog detects that gap.
+    """
+    while True:
+        time.sleep(check_interval)
+        now = time.monotonic()
+        for name, info in _get_heartbeats().items():
+            deadline = info["ts"] + info["interval"] * 2
+            if now > deadline:
+                overdue = now - deadline
+                print(
+                    f"[watchdog] WARNING: worker '{name}' overdue by "
+                    f"{overdue:.1f}s (interval={info['interval']}s)",
+                    flush=True,
+                )
 
 
 # ── Background workers ───────────────────────────────────────────────────────
@@ -24,6 +64,7 @@ def host_poller():
     # Stagger the first run a touch so we don't fire before the app is fully up.
     time.sleep(2)
     while True:
+        _heartbeat("host_poller", _app.INTERVAL)
         try:
             hosts = _app.list_hosts()
             if hosts:
@@ -42,6 +83,7 @@ def uptime_worker():
     collector thread so a slow/hanging probe never delays metric sampling. Inert (zero
     outbound) when no checks are configured/enabled."""
     while True:
+        _heartbeat("uptime_worker", 5)
         try:
             _app._uptime_tick()
         except Exception as e:
@@ -293,6 +335,7 @@ def collector():
     import app as _app
     last_oom = last_health = last_notify = last_diskio = 0
     while True:
+        _heartbeat("collector", _app.INTERVAL)
         try:
             sample_once()
             now = time.time()
@@ -322,6 +365,7 @@ def brief_worker():
     """Dedicated daemon: every 30s, send the daily brief if it's due. Inert unless
     the brief is enabled with a configured channel."""
     while True:
+        _heartbeat("brief_worker", 30)
         try:
             _app._brief_run_once()
         except Exception as e:
