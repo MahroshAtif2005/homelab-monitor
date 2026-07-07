@@ -43,11 +43,12 @@ def _alert_host_label():
         name = ((_app.LATEST or {}).get("host") or {}).get("hostname")
         if name:
             return str(name).strip()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"notify/_alert_host_label hostname lookup error: {e}", flush=True)
     try:
         return socket.gethostname()
-    except Exception:
+    except Exception as e:
+        print(f"notify/_alert_host_label gethostname error: {e}", flush=True)
         return ""
 
 

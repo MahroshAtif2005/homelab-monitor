@@ -112,7 +112,8 @@ def probe_wyoming(ip):
                         break
                     rest += chunk
                 data = json.loads(rest[:need].decode("utf-8", "replace")) if need else {}
-        except Exception:
+        except Exception as e:
+            print(f"probes/probe_wyoming error: {e}", flush=True)
             continue
         names = []
         for grp in ("asr", "tts", "wake", "handle", "intent"):
@@ -221,7 +222,8 @@ def probe_models(ct):
     ip = ct.get("ip") or "127.0.0.1"
     try:
         found = [(m, v) for m, v in fn(ip) if m]
-    except Exception:
+    except Exception as e:
+        print(f"probes/probe_models error: {e}", flush=True)
         return []
     loaded = [x for x in found if x[1] is not None]
     idle   = [x for x in found if x[1] is None]
@@ -262,6 +264,7 @@ def probe_host_metrics(user, host, port, family="linux", timeout=15):
     try:
         return json.loads(out), None, ms, False
     except Exception as e:
+        print(f"probes/_run_probe bad JSON: {e}", flush=True)
         return None, f"bad JSON from probe: {e}", ms, False
 
 # ── Group 3: probe_host ───────────────────────────────────────────────────────

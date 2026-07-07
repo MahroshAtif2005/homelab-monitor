@@ -204,19 +204,23 @@ def sample_once():
     # never wedge the sample, so each is isolated.
     try:
         model_meta = _app.collect_model_meta(ai, models)
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once collect_model_meta error: {e}", flush=True)
         model_meta = {}
     try:
         serving = _app.collect_serving(ai)
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once collect_serving error: {e}", flush=True)
         serving = []
     try:
         training = _app.collect_training(gpu_pids)
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once collect_training error: {e}", flush=True)
         training = []
     try:
         devtools = _app.collect_devtools(gpu_pids)
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once collect_devtools error: {e}", flush=True)
         devtools = []
 
     host = _app.read_host()
@@ -226,12 +230,14 @@ def sample_once():
     rapl = {}
     try:
         rapl = _app.read_rapl_power()
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once read_rapl_power error: {e}", flush=True)
         rapl = {}
     cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
     try:
         top_cpu = _app.collect_top_processes()
-    except Exception:
+    except Exception as e:
+        print(f"collectors/sample_once collect_top_processes error: {e}", flush=True)
         top_cpu = None
     _app.HEALTH["processes"] = top_cpu
     ts = int(time.time())

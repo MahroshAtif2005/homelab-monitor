@@ -105,6 +105,7 @@ def api_brief_test():
     try:
         _app.send_brief(s, ch)
     except Exception as e:
+        print(f"api/uptime_api send_brief error: {e}", flush=True)
         return jsonify({"ok": False, "error": str(e)}), 502
     return jsonify({"ok": True, "channel": ch})
 

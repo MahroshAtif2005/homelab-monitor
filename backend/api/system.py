@@ -174,7 +174,8 @@ def api_changelog():
         path = os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "CHANGELOG.md")
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-    except Exception:
+    except Exception as e:
+        print(f"api/system api_changelog error reading CHANGELOG.md: {e}", flush=True)
         return jsonify({"current": _app.VERSION, "sections": [], "markdown": ""})
     # Split on "## [x.y.z](url) — date" headers (Keep-a-Changelog style).
     hdr = re.compile(r"^##\s*\[([^\]]+)\]\(([^)]*)\)\s*[—\-–]?\s*(.*)$")
@@ -227,7 +228,8 @@ def locales(fn):
         return ("Not found", 404)
     try:
         resp = send_from_directory(_app._LOCALES_DIR, fn)
-    except Exception:
+    except Exception as e:
+        print(f"api/system api_locale error serving {fn}: {e}", flush=True)
         return ("Not found", 404)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
@@ -437,8 +439,9 @@ def api_backup_restore():
                     shutil.copy2(_app.DB_PATH, "%s.pre-restore-%d.bak" % (_app.DB_PATH, int(time.time())))
                 try:
                     _app.DB.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    # close can fail on already-closed conn; restore proceeds regardless
+                    print(f"api/system db_restore DB.close() error (non-fatal): {e}", flush=True)
                 _app.db_backup.remove_wal_sidecars(_app.DB_PATH)
                 os.replace(upload_path, _app.DB_PATH)
                 upload_path = None
@@ -447,8 +450,8 @@ def api_backup_restore():
             except Exception as e:
                 try:
                     _app.reopen_db()
-                except Exception:
-                    pass
+                except Exception as re:
+                    print(f"api/system db_restore reopen_db error: {re}", flush=True)
                 return jsonify({"ok": False, "error": "Restore failed: %s" % e}), 500
             finally:
                 _app._DB_MAINTENANCE = False

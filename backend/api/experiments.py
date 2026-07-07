@@ -211,11 +211,13 @@ def api_mlflow_sync():
         try:
             return jsonify({"ok": True, "synced": _app.sync_mlflow()})
         except Exception as e:
+            print(f"api/experiments sync_mlflow error: {e}", flush=True)
             return jsonify({"ok": False, "error": str(e)[:200]}), 502
     try:
         _app._mlf("POST", "/api/2.0/mlflow/experiments/search", {"max_results": 1})
         return jsonify({"ok": True, "reachable": True})
     except Exception as e:
+        print(f"api/experiments mlflow reachability check error: {e}", flush=True)
         return jsonify({"ok": False, "reachable": False, "error": str(e)[:200]}), 502
 
 
