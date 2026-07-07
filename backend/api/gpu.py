@@ -2,6 +2,8 @@
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import time
 
+from backend.db.repos import samples as samples_repo
+
 bp = Blueprint('gpu', __name__)
 
 
@@ -20,9 +22,8 @@ def api_sessions():
     span = _app.RANGES.get(rng, 604800)
     now = int(time.time())
     with _app.LOCK:
-        cur = _app.DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
-        rows = cur.execute("SELECT ts,util,power,mem_used FROM samples WHERE ts>=? ORDER BY ts", (since,)).fetchall()
+        since = (samples_repo.min_ts(conn=_app.DB) or now) if span is None else now - span
+        rows = samples_repo.sessions_since(since, conn=_app.DB)
     sessions = _app._gpu_sessions(rows, _app.INTERVAL, price=price)[:50]
     tot_energy = round(sum(x["energy_kwh"] for x in sessions), 3)
     return jsonify({

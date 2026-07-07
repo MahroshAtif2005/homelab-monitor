@@ -207,9 +207,9 @@ def notify_scan():
     # ── GPU OOM events from the _app.DB (each event_ts notified at most once) ─────
     try:
         cutoff = int(time.time()) - 3600
+        from backend.db.repos import system as system_repo
         with _app.LOCK:
-            rows = _app.DB.execute("SELECT ts, service, detail FROM events "
-                              "WHERE kind='oom' AND ts>=? ORDER BY ts", (cutoff,)).fetchall()
+            rows = system_repo.query_oom_events_since(cutoff, conn=_app.DB)
         for ets, svc, detail in rows:
             key = f"oom:{svc}:{ets}"
             with _NOTIFIER_LOCK:

@@ -272,11 +272,13 @@ def probe_host(name):
     cached on the host row so the UI can show the last-known state even when
     the user hasn't re-tested."""
     import app as _app
+    from backend.db.repos import hosts as hosts_repo
     with _app.LOCK:
-        row = _app.DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
-    if not row:
+        ssh_target = hosts_repo.get_ssh_target(name, conn=_app.DB)
+    if not ssh_target:
         return None
-    parsed = _app._parse_ssh_target(row[0])
+    row = (ssh_target,)
+    parsed = _app._parse_ssh_target(ssh_target)
     if not parsed:
         result = {"checks": [{"id": "parse", "label": "SSH target", "status": "fail",
                               "detail": f"could not parse '{row[0]}'"}]}

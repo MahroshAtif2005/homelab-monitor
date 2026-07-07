@@ -7,6 +7,8 @@ import time
 from functools import wraps
 from flask import request, jsonify, g
 
+from backend.db.repos import auth as auth_repo
+
 
 def _key_lookup(presented):
     import app as _app
@@ -14,14 +16,13 @@ def _key_lookup(presented):
         return None
     now = int(time.time())
     with _app.LOCK:
-        row = _app.DB.execute("SELECT id, expires_at FROM api_keys WHERE key_hash=?",
-                              (_app._hash_key(presented),)).fetchone()
+        row = auth_repo.get_by_hash(_app._hash_key(presented), conn=_app.DB)
         if not row:
             return None
         kid, exp = row
         if exp and exp < now:
             return None
-        _app.DB.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, kid))
+        auth_repo.update_last_used(kid, now, conn=_app.DB)
         _app.DB.commit()
     return kid
 

@@ -14,10 +14,10 @@ import threading
 import time as _time
 
 import app as _app
+from backend.db.repos.schema import open_db_connection as _open_db_connection
 
 # Module-level name so tests can patch it: patch.object(backend.db, 'DB_PATH', ...)
 DB_PATH = _app.DB_PATH
-_open_db_connection = _app._open_db_connection
 
 _local = threading.local()
 

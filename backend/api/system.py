@@ -7,6 +7,8 @@ import shutil
 import tempfile
 import threading
 
+from backend.db.repos import system as system_repo
+
 bp = Blueprint('system', __name__)
 
 
@@ -16,12 +18,9 @@ def api_data():
     rng = request.args.get("range", "6h")
     span = _app.RANGES.get(rng, 21600); now = int(time.time())
     with _app.LOCK:
-        cur = _app.DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
+        since = (system_repo.min_ts_samples(conn=_app.DB) or now) if span is None else now - span
         bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
-        tot = cur.execute("SELECT (ts/?)*? b,AVG(util),AVG(mem_used),MAX(mem_used),AVG(power),AVG(temp),"
-                          "AVG(cpu),AVG(ram_used),AVG(ram_total),AVG(load1),AVG(ctemp) "
-                          "FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
+        tot = system_repo.query_samples_bucketed(bk, since, conn=_app.DB)
         labels = [int(r[0]) for r in tot]
         idx = {b: i for i, b in enumerate(labels)}
         total = {"util": [round(r[1] or 0) for r in tot], "mem": [round(r[2] or 0) for r in tot],
@@ -30,20 +29,15 @@ def api_data():
                  "ram_used": [round(r[7] or 0) for r in tot], "ram_total": [round(r[8] or 0) for r in tot],
                  "load1": [round(r[9] or 0, 2) for r in tot], "ctemp": [round(r[10] or 0) for r in tot]}
         services = {}
-        for b, svc, mem in cur.execute("SELECT (ts/?)*? b,service,AVG(mem) FROM proc WHERE ts>=? GROUP BY b,service",
-                                       (bk, bk, since)).fetchall():
+        for b, svc, mem in system_repo.query_proc_bucketed(bk, since, conn=_app.DB):
             i = idx.get(int(b))
             if i is not None:
                 services.setdefault(svc, [0] * len(labels))[i] = round(mem or 0)
         other = [max(0, total["mem"][i] - sum(s[i] for s in services.values())) for i in range(len(labels))]
         # Per-device disk-I/O trend, same bucketing/labels as everything else on this
-        # endpoint — feeds the Disk I/O tab's per-device sparklines. disk_io_samples
-        # rides its own ~45s cadence (sparser than `samples`), so buckets it doesn't
-        # cover keep their 0-fill default (matches the `services` fill above).
+        # endpoint — feeds the Disk I/O tab's per-device sparklines.
         disk_io = {}
-        for b, dev, r, w, u in cur.execute(
-                "SELECT (ts/?)*? b,device,AVG(read_mb_s),AVG(write_mb_s),AVG(util_pct) "
-                "FROM disk_io_samples WHERE ts>=? GROUP BY b,device", (bk, bk, since)).fetchall():
+        for b, dev, r, w, u in system_repo.query_disk_io_bucketed(bk, since, conn=_app.DB):
             i = idx.get(int(b))
             if i is None:
                 continue
@@ -53,28 +47,21 @@ def api_data():
             d["read_mb_s"][i]  = round(r or 0, 1)
             d["write_mb_s"][i] = round(w or 0, 1)
             d["util_pct"][i]   = round(u or 0, 1)
-        ticks = cur.execute("SELECT COUNT(*) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 1
+        ticks = system_repo.count_samples_since(since, conn=_app.DB)
         summary = sorted(({"service": s, "peak": round(pk), "avg": round(av), "present": round(100 * cnt / ticks)}
-                          for s, pk, av, cnt in cur.execute(
-                              "SELECT service,MAX(mem),AVG(mem),COUNT(DISTINCT ts) FROM proc WHERE ts>=? GROUP BY service",
-                              (since,)).fetchall()), key=lambda x: -x["peak"])
+                          for s, pk, av, cnt in system_repo.query_proc_summary(since, conn=_app.DB)),
+                         key=lambda x: -x["peak"])
         model_summary = sorted(({"service": s, "model": m, "peak": round(pk or 0), "avg": round(av or 0)}
-                                for s, m, pk, av in cur.execute(
-                                    "SELECT service,model,MAX(vram),AVG(vram) FROM models WHERE ts>=? AND vram IS NOT NULL "
-                                    "GROUP BY service,model", (since,)).fetchall()), key=lambda x: -x["peak"])
-        # Caller attribution: connection-seconds per (caller → server) over the range.
-        # Each sample of `conns` open connections represents _app.INTERVAL seconds of traffic.
+                                for s, m, pk, av in system_repo.query_model_summary(since, conn=_app.DB)),
+                               key=lambda x: -x["peak"])
         callers = sorted(({"caller": c, "server": s, "seconds": int((tot or 0) * _app.INTERVAL), "samples": n}
-                          for c, s, tot, n in cur.execute(
-                              "SELECT caller,server,SUM(conns),COUNT(DISTINCT ts) FROM edges WHERE ts>=? "
-                              "GROUP BY caller,server", (since,)).fetchall()), key=lambda x: -x["seconds"])
+                          for c, s, tot, n in system_repo.query_edges_summary(since, conn=_app.DB)),
+                         key=lambda x: -x["seconds"])
         evs = [{"ts": t, "service": s, "kind": k, "detail": d}
-               for t, s, k, d in cur.execute("SELECT ts,service,kind,detail FROM events WHERE ts>=? ORDER BY ts",
-                                              (since,)).fetchall()]
+               for t, s, k, d in system_repo.query_events_range(since, conn=_app.DB)]
         oom_evs = [e for e in evs if e["kind"] == "oom"]
         for e in oom_evs:
-            row = cur.execute("SELECT service,mem FROM proc WHERE ts<=? AND service!=? ORDER BY ts DESC,mem DESC LIMIT 1",
-                              (e["ts"] + _app.INTERVAL, e["service"])).fetchone()
+            row = system_repo.query_proc_at_time(e["ts"] + _app.INTERVAL, e["service"], conn=_app.DB)
             if row:
                 e["blame"] = (f"{e['service']} lost to {row[0]} (holding {round(row[1])} MB) at "
                               f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}.")
@@ -114,10 +101,8 @@ def api_network():
     span = _app.RANGES.get(rng, 3600)
     now = int(time.time())
     with _app.LOCK:
-        cur = _app.DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM net_samples").fetchone()[0] or now) if span is None else now - span
-        rows = cur.execute("SELECT ts,iface,bytes_in,bytes_out FROM net_samples WHERE ts>=? ORDER BY iface,ts",
-                           (since,)).fetchall()
+        since = (system_repo.min_ts_net_samples(conn=_app.DB) or now) if span is None else now - span
+        rows = system_repo.query_net_samples(since, conn=_app.DB)
     bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
     series = {}
     for ts, iface, bi, bo in rows:

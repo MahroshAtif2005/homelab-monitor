@@ -7,6 +7,8 @@ bp = Blueprint('experiments', __name__)
 
 # decorator defined in _app.app.py — must import at module level (used as @require_api_key)
 from backend.auth import require_api_key  # no circular import — backend.auth uses lazy _app
+from backend.db.repos import auth as auth_repo
+from backend.db.repos import experiments as exp_repo
 
 
 @bp.route("/api/integration/keys", methods=["GET", "POST"])
@@ -27,10 +29,8 @@ def api_keys_route():
         return jsonify({"ok": True, "id": kid, "key": key})
     now = int(time.time())
     with _app.LOCK:
-        rows = _app.DB.execute("SELECT id,name,prefix,created_at,expires_at,last_used_at "
-                          "FROM api_keys ORDER BY created_at DESC").fetchall()
-        counts = dict(_app.DB.execute("SELECT key_id, COUNT(*) FROM runs WHERE key_id IS NOT NULL "
-                                 "GROUP BY key_id").fetchall())
+        rows = auth_repo.list_all(conn=_app.DB)
+        counts = dict(auth_repo.count_runs_by_key(conn=_app.DB))
     keys = [{"id": kid, "name": name, "prefix": prefix, "created_at": created,
              "expires_at": exp, "last_used_at": used, "expired": bool(exp and exp < now),
              "runs": counts.get(kid, 0)}
@@ -43,9 +43,8 @@ def api_keys_delete(kid):
     import app as _app
     """Revoke (remove) a key. Runs it pushed are kept; they just lose live attribution."""
     with _app.LOCK:
-        cur = _app.DB.execute("DELETE FROM api_keys WHERE id=?", (kid,))
-        _app.DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount
+        rowcount = auth_repo.delete(kid, conn=_app.DB)
+    return (jsonify({"ok": True}) if rowcount
             else (jsonify({"ok": False, "error": "unknown key"}), 404))
 
 
@@ -65,14 +64,11 @@ def api_runs_create():
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 413
     with _app.LOCK:
-        _app.DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,notes,"
-                   "heartbeat_at,ext_id,created_at,key_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                   "ON CONFLICT(id) DO NOTHING",
-                   (rid, _app._clip(body.get("name") or "run", _app.MAX_RUN_FIELD), source, "running",
-                    int(body.get("started_at") or now), None, _app._clip(body.get("host"), 256),
-                    params, tags, _app._clip(body.get("notes"), _app.MAX_RUN_FIELD), now, None, now,
-                    getattr(g, "api_key_id", None)))
-        _app.DB.commit()
+        exp_repo.insert_run(
+            rid, _app._clip(body.get("name") or "run", _app.MAX_RUN_FIELD), source, "running",
+            int(body.get("started_at") or now), None, _app._clip(body.get("host"), 256),
+            params, tags, _app._clip(body.get("notes"), _app.MAX_RUN_FIELD), now, None, now,
+            getattr(g, "api_key_id", None), conn=_app.DB)
     return jsonify({"ok": True, "id": rid})
 
 
@@ -97,9 +93,8 @@ def api_runs_update(rid):
         return jsonify({"ok": False, "error": str(e)}), 413
     args.append(rid)
     with _app.LOCK:
-        cur = _app.DB.execute(f"UPDATE runs SET {','.join(sets)} WHERE id=?", args)
-        _app.DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount else (jsonify({"ok": False, "error": "unknown run"}), 404))
+        rowcount = exp_repo.update_run(','.join(sets), args, conn=_app.DB)
+    return (jsonify({"ok": True}) if rowcount else (jsonify({"ok": False, "error": "unknown run"}), 404))
 
 
 @bp.route("/api/runs/<rid>/metrics", methods=["POST"])
@@ -122,12 +117,11 @@ def api_runs_metrics(rid):
         except (KeyError, TypeError, ValueError):
             continue
     with _app.LOCK:
-        if not _app.DB.execute("SELECT 1 FROM runs WHERE id=?", (rid,)).fetchone():
+        if not exp_repo.exists_run(rid, conn=_app.DB):
             return jsonify({"ok": False, "error": "unknown run"}), 404
         if rows:
-            _app.DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
-            _app.DB.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (now, rid))
-            _app.DB.commit()
+            exp_repo.insert_metrics(rows, conn=_app.DB)
+            exp_repo.update_run_heartbeat(rid, now, conn=_app.DB)
     return jsonify({"ok": True, "logged": len(rows)})
 
 
@@ -141,10 +135,8 @@ def api_runs_finish(rid):
         status = "finished"
     ended = int(body.get("ended_at") or time.time())
     with _app.LOCK:
-        cur = _app.DB.execute("UPDATE runs SET status=?, ended_at=?, heartbeat_at=? WHERE id=?",
-                         (status, ended, ended, rid))
-        _app.DB.commit()
-    return (jsonify({"ok": True, "id": rid, "status": status}) if cur.rowcount
+        rowcount = exp_repo.update_run_status(rid, status, ended, ended, conn=_app.DB)
+    return (jsonify({"ok": True, "id": rid, "status": status}) if rowcount
             else (jsonify({"ok": False, "error": "unknown run"}), 404))
 
 
@@ -155,10 +147,9 @@ def api_runs_delete(rid):
     (like deleting a host or an API key), so it's open on the LAN rather than
     key-gated — the key gates *ingest* (forgery from notebooks), not housekeeping."""
     with _app.LOCK:
-        cur = _app.DB.execute("DELETE FROM runs WHERE id=?", (rid,))
-        _app.DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
-        _app.DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount
+        rowcount = exp_repo.delete_run(rid, conn=_app.DB)
+        exp_repo.delete_run_metrics(rid, conn=_app.DB)
+    return (jsonify({"ok": True}) if rowcount
             else (jsonify({"ok": False, "error": "unknown run"}), 404))
 
 
@@ -180,17 +171,10 @@ def api_runs_list():
     q += "ORDER BY started_at DESC LIMIT 500"
     out = []
     with _app.LOCK:
-        cur = _app.DB.cursor()
-        key_names = dict(cur.execute("SELECT id, name FROM api_keys").fetchall())
-        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in cur.execute(q, args).fetchall():
-            e_kwh, cost, avg_w, peak_u = _app._run_cost_window(cur, started, ended, ctx)
-            kv = {}
-            # latest value per key = the last-logged row (max rowid), robust even when
-            # several points share a timestamp.
-            for k, v in cur.execute(
-                    "SELECT key, value FROM run_metrics WHERE run_id=? AND rowid IN "
-                    "(SELECT MAX(rowid) FROM run_metrics WHERE run_id=? GROUP BY key)", (rid, rid)):
-                kv[k] = v
+        key_names = dict(auth_repo.get_names(conn=_app.DB))
+        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in exp_repo.list_runs(q, args, conn=_app.DB):
+            e_kwh, cost, avg_w, peak_u = _app._run_cost_window(_app.DB.cursor(), started, ended, ctx)
+            kv = dict(exp_repo.get_run_metrics_latest(rid, conn=_app.DB))
             out.append({"id": rid, "name": name, "source": source, "status": st,
                         "started_at": started, "ended_at": ended, "duration": (ended or now) - started,
                         "host": host, "params": _app._safe_json(params), "tags": _app._safe_json(tags), "notes": notes,
@@ -205,24 +189,20 @@ def api_runs_get(rid):
     ctx = _app._cost_ctx()
     now = int(time.time())
     with _app.LOCK:
-        cur = _app.DB.cursor()
-        r = cur.execute("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
-                        "FROM runs WHERE id=?", (rid,)).fetchone()
+        r = exp_repo.get_run(rid, conn=_app.DB)
         if not r:
             return jsonify({"error": "unknown run"}), 404
         (rid, name, source, st, started, ended, host, params, tags, notes) = r
         end = ended or now
         metrics = {}
-        for k, ts, step, v in cur.execute(
-                "SELECT key,ts,step,value FROM run_metrics WHERE run_id=? ORDER BY key,ts,step", (rid,)):
+        for k, ts, step, v in exp_repo.get_run_metrics(rid, conn=_app.DB):
             d = metrics.setdefault(k, {"steps": [], "ts": [], "values": []})
             d["steps"].append(step); d["ts"].append(ts); d["values"].append(v)
         bk = max(_app.INTERVAL, round(max(1, end - started) / _app.MAX_POINTS))
         labels, power_w, util_pct = [], [], []
-        for b, ap, au in cur.execute("SELECT (ts/?)*? b, AVG(power), AVG(util) FROM samples "
-                                     "WHERE ts>=? AND ts<=? GROUP BY b ORDER BY b", (bk, bk, started, end)):
+        for b, ap, au in exp_repo.get_run_power_buckets(started, end, bk, conn=_app.DB):
             labels.append(int(b)); power_w.append(round(ap or 0)); util_pct.append(round(au or 0))
-        e_kwh, cost, avg_w, peak_u = _app._run_cost_window(cur, started, end, ctx)
+        e_kwh, cost, avg_w, peak_u = _app._run_cost_window(_app.DB.cursor(), started, end, ctx)
     return jsonify({"id": rid, "name": name, "source": source, "status": st,
                     "started_at": started, "ended_at": ended, "duration": end - started, "host": host,
                     "params": _app._safe_json(params), "tags": _app._safe_json(tags), "notes": notes, "metrics": metrics,

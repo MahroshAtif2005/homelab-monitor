@@ -7,56 +7,8 @@ imports. Thread-start lines remain in app.py and resolve via re-exports.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor
-
-# ── Rollup helpers (called by sample_once, take explicit conn param) ─────────
-
-def _rollup_now(conn, ts, util, mem_used, mem_total, power, temp,
-                cpu=None, ram_used=None, ram_total=None, load1=None, ctemp=None,
-                cpu_power=None, dram_power=None):
-    """Upsert the current minute and hour rollup buckets for samples."""
-    m = (ts // 60) * 60
-    h = (ts // 3600) * 3600
-    for bucket, tbl in ((m, "samples_1m"), (h, "samples_1h")):
-        conn.execute(f"""
-            INSERT INTO {tbl}(ts,util,mem_used,mem_total,power,temp,cnt,
-                cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
-            VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?)
-            ON CONFLICT(ts) DO UPDATE SET
-              util=CASE WHEN excluded.util IS NOT NULL THEN (COALESCE(util,0)*cnt+excluded.util)/(cnt+1) ELSE util END,
-              mem_used=CASE WHEN excluded.mem_used IS NOT NULL THEN (COALESCE(mem_used,0)*cnt+excluded.mem_used)/(cnt+1) ELSE mem_used END,
-              mem_total=CASE WHEN excluded.mem_total IS NOT NULL THEN (COALESCE(mem_total,0)*cnt+excluded.mem_total)/(cnt+1) ELSE mem_total END,
-              power=CASE WHEN excluded.power IS NOT NULL THEN (COALESCE(power,0)*cnt+excluded.power)/(cnt+1) ELSE power END,
-              temp=CASE WHEN excluded.temp IS NOT NULL THEN (COALESCE(temp,0)*cnt+excluded.temp)/(cnt+1) ELSE temp END,
-              cpu=CASE WHEN excluded.cpu IS NOT NULL THEN (COALESCE(cpu,0)*cnt+excluded.cpu)/(cnt+1) ELSE cpu END,
-              ram_used=CASE WHEN excluded.ram_used IS NOT NULL THEN (COALESCE(ram_used,0)*cnt+excluded.ram_used)/(cnt+1) ELSE ram_used END,
-              ram_total=CASE WHEN excluded.ram_total IS NOT NULL THEN (COALESCE(ram_total,0)*cnt+excluded.ram_total)/(cnt+1) ELSE ram_total END,
-              load1=CASE WHEN excluded.load1 IS NOT NULL THEN (COALESCE(load1,0)*cnt+excluded.load1)/(cnt+1) ELSE load1 END,
-              ctemp=CASE WHEN excluded.ctemp IS NOT NULL THEN (COALESCE(ctemp,0)*cnt+excluded.ctemp)/(cnt+1) ELSE ctemp END,
-              cpu_power=CASE WHEN excluded.cpu_power IS NOT NULL THEN (COALESCE(cpu_power,0)*cnt+excluded.cpu_power)/(cnt+1) ELSE cpu_power END,
-              dram_power=CASE WHEN excluded.dram_power IS NOT NULL THEN (COALESCE(dram_power,0)*cnt+excluded.dram_power)/(cnt+1) ELSE dram_power END,
-              cnt=cnt+1
-        """, (bucket, util, mem_used, mem_total, power, temp,
-              cpu, ram_used, ram_total, load1, ctemp, cpu_power, dram_power))
-
-
-def _rollup_net_now(conn, ts, net_rows):
-    """Upsert the current minute and hour rollup buckets for net_samples."""
-    if not net_rows:
-        return
-    m = (ts // 60) * 60
-    h = (ts // 3600) * 3600
-    # Aggregate across all ifaces for this tick
-    total_in  = sum(r[2] or 0 for r in net_rows)
-    total_out = sum(r[3] or 0 for r in net_rows)
-    for bucket, tbl in ((m, "net_samples_1m"), (h, "net_samples_1h")):
-        conn.execute(f"""
-            INSERT INTO {tbl}(ts,bytes_in,bytes_out,cnt)
-            VALUES(?,?,?,1)
-            ON CONFLICT(ts) DO UPDATE SET
-              bytes_in=(bytes_in*cnt+excluded.bytes_in)/(cnt+1),
-              bytes_out=(bytes_out*cnt+excluded.bytes_out)/(cnt+1),
-              cnt=cnt+1
-        """, (bucket, total_in, total_out))
+from backend.db.repos.samples import rollup_now as _rollup_now
+from backend.db.repos.samples import rollup_net_now as _rollup_net_now
 
 
 # ── Background workers ───────────────────────────────────────────────────────
@@ -243,32 +195,32 @@ def sample_once():
     ts = int(time.time())
     if _app._DB_MAINTENANCE:
         return
+    from backend.db.repos import system as system_repo
+    from backend.db.repos import experiments as exp_repo
     with _app.LOCK:
         # When the GPU is absent/failed, store NULL for the GPU columns (not 0) so
         # history charts skip the gap via AVG() instead of showing a fake 0 dip;
         # the host columns are always real.
         gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
-        _app.DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)"
-                   " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (ts, *gcols, host["cpu"], host["ram_used"],
-                    host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power))
-        for svc, mem in procs.items():
-            _app.DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
+        _app.DB.executemany(
+            "INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(ts, *gcols, host["cpu"], host["ram_used"],
+              host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power)])
+        _app.DB.executemany("INSERT INTO proc VALUES(?,?,?)", [(ts, svc, mem) for svc, mem in procs.items()])
         pp_rows = _app._attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
-        for svc, mdl, vram in models:
-            if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
-                _app.DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in _app.LATEST only
-        for (caller, server), n in edges.items():
-            _app.DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
+        _app.DB.executemany("INSERT INTO models VALUES(?,?,?,?)",
+                            [(ts, svc, mdl, vram) for svc, mdl, vram in models if vram is not None])
+        _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
+                            [(ts, caller, server, n) for (caller, server), n in edges.items()])
         # Per-GPU history only when there's more than one card (single-GPU rigs are
         # already covered by the aggregate `samples` table) — keeps storage lean.
         if gpu_avail and len(gpus) > 1:
-            for g in gpus:
-                _app.DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
-                           "VALUES(?,?,?,?,?,?,?)",
-                           (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
+            _app.DB.executemany(
+                "INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) VALUES(?,?,?,?,?,?,?)",
+                [(ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]) for g in gpus])
         _cur_net_rows = list(_app._net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         _app.DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
                        _cur_net_rows)
@@ -279,11 +231,10 @@ def sample_once():
         if ts % 45 < _app.INTERVAL:
             dio = _app.HEALTH.get("disk_io") or {}
             if dio.get("available"):
-                for it in (dio.get("items") or []):
-                    _app.DB.execute("INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) "
-                               "VALUES(?,?,?,?,?)",
-                               (ts, it["device"], it.get("read_mb_s"),
-                                it.get("write_mb_s"), it.get("util_pct")))
+                _app.DB.executemany(
+                    "INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) VALUES(?,?,?,?,?)",
+                    [(ts, it["device"], it.get("read_mb_s"), it.get("write_mb_s"), it.get("util_pct"))
+                     for it in (dio.get("items") or [])])
             # Persist a BOUNDED per-process I/O ring: only the top-few writers +
             # top-few readers from the attribution already computed (comm only,
             # never argv). Deduped by pid -> at most ~6 rows/poll, not all ~20
@@ -306,13 +257,14 @@ def sample_once():
                                    "VALUES(?,?,?,?,?)", _pio_rows)
         if ts % 360 < _app.INTERVAL:
             for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
-                _app.DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - _app.RETENTION,))
-            _app.DB.execute("DELETE FROM disk_io_samples WHERE ts<?", (ts - _app._DISK_IO_RETENTION,))
-            _app.DB.execute("DELETE FROM proc_io_samples WHERE ts<?", (ts - _app._PROC_IO_RETENTION,))
+                _app.DB.executemany(f"DELETE FROM {t} WHERE ts<?", [(ts - _app.RETENTION,)])
+            _app.DB.executemany("DELETE FROM disk_io_samples WHERE ts<?", [(ts - _app._DISK_IO_RETENTION,)])
+            _app.DB.executemany("DELETE FROM proc_io_samples WHERE ts<?", [(ts - _app._PROC_IO_RETENTION,)])
         if ts % 60 < _app.INTERVAL:   # stale-run janitor: a crashed/disconnected push run -> killed
-            _app.DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
-                       "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
-                       (ts, ts - 180))
+            _app.DB.executemany(
+                "UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
+                "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
+                [(ts, ts - 180)])
         # Phase 1.2a: keep rollup tables current after each raw insert
         _app._rollup_now(_app.DB, ts, *gcols,
                     cpu=host["cpu"], ram_used=host["ram_used"], ram_total=host["ram_total"],

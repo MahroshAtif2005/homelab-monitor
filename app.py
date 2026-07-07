@@ -264,69 +264,17 @@ def _data_dir_writable():
         return False
     return os.access(d, os.W_OK)
 
-def _open_db_connection(path):
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+from backend.db.repos.schema import (
+    open_db_connection as _open_db_connection,
+    apply_schema_migrations as _apply_schema_migrations_impl,
+    record_baseline_if_needed as _record_baseline_if_needed,
+)
 
 def _apply_schema_migrations(conn):
-    conn.executescript(_DB_SCHEMA)
-    for col in _SAMPLE_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _HOST_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE hosts ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _RUNS_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _UPTIME_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE uptime_results ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _UPTIME_CHECK_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE uptime_checks ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    # Migrate a legacy single instance-wide api_key (the previous design) into the
-    # api_keys table as a named key, then clear the setting — so existing clients
-    # keep working under the new multi-key model.
-    try:
-        row = conn.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()
-        legacy = (row[0] if row else "") or ""
-        if legacy:
-            h = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
-            if not conn.execute("SELECT 1 FROM api_keys WHERE key_hash=?", (h,)).fetchone():
-                conn.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
-                             "VALUES(?,?,?,?,?,?,?)",
-                             (uuid.uuid4().hex, "default (migrated)", h, legacy[:12], int(time.time()), None, None))
-            conn.execute("UPDATE settings SET value='' WHERE key='api_key'")
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    _record_baseline_if_needed(conn)
-
-def _record_baseline_if_needed(conn):
-    """Stamp migration 0001 on any DB that already has the baseline schema applied."""
-    try:
-        applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
-        if "0001" not in applied:
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)",
-                ("0001", int(time.time()))
-            )
-            conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    _apply_schema_migrations_impl(conn, _DB_SCHEMA,
+                                  _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
+                                  _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
+                                  _UPTIME_CHECK_MIGRATIONS)
 
 def _backfill_rollups(conn):
     """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
@@ -2978,9 +2926,9 @@ def _parse_ssh_target(t):
     return g["user"], g["host"], port
 
 def list_hosts():
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json, "
-                          "poll_timeout, poll_calibrated_at FROM hosts ORDER BY added_at").fetchall()
+        rows = _hosts_repo.list_all(conn=DB)
     out = []
     for name, target, tags, added, checked, blob, ptimeout, pcal in rows:
         try:
@@ -2996,29 +2944,29 @@ def list_hosts():
     return out
 
 def add_host(name, ssh_target, tags=""):
+    from backend.db.repos import hosts as _hosts_repo
     if not _HOST_NAME_RE.match(name or ""):
         return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
     if _parse_ssh_target(ssh_target) is None:
         return None, "SSH target must look like user@host or user@host:port."
     with LOCK:
         try:
-            DB.execute("INSERT INTO hosts(name, ssh_target, tags, added_at) VALUES(?,?,?,?)",
-                       (name, ssh_target.strip(), (tags or "").strip(), int(time.time())))
-            DB.commit()
+            _hosts_repo.insert(name, ssh_target.strip(), (tags or "").strip(), int(time.time()), conn=DB)
         except sqlite3.IntegrityError:
             return None, f"A host named '{name}' already exists."
     return {"name": name, "ssh_target": ssh_target.strip()}, None
 
 def delete_host(name):
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        cur = DB.execute("DELETE FROM hosts WHERE name=?", (name,))
-        DB.commit()
-    return cur.rowcount > 0
+        rowcount = _hosts_repo.delete(name, conn=DB)
+    return rowcount > 0
 
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
     new target."""
+    from backend.db.repos import hosts as _hosts_repo
     fields, params = [], []
     if ssh_target is not None:
         if _parse_ssh_target(ssh_target) is None:
@@ -3033,13 +2981,11 @@ def update_host(name, ssh_target=None, tags=None):
         fields += ["last_check_at=NULL", "last_check_json=NULL"]
     params.append(name)
     with LOCK:
-        cur = DB.execute(f"UPDATE hosts SET {','.join(fields)} WHERE name=?", params)
-        DB.commit()
-    if cur.rowcount == 0:
+        rowcount = _hosts_repo.update(','.join(fields), params, conn=DB)
+    if rowcount == 0:
         return None, f"No host named '{name}'."
     with LOCK:
-        row = DB.execute("SELECT name, ssh_target, tags FROM hosts WHERE name=?",
-                         (name,)).fetchone()
+        row = _hosts_repo.get(name, conn=DB)
     return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
 
 # ── LAN discovery (suggest hosts instead of asking the user to type) ───────────
@@ -3165,10 +3111,9 @@ def discover_lan(port=22, timeout=0.4, max_workers=64):
     return out
 
 def _record_check(name, result):
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        DB.execute("UPDATE hosts SET last_check_at=?, last_check_json=? WHERE name=?",
-                   (int(time.time()), json.dumps(result), name))
-        DB.commit()
+        _hosts_repo.update_check(name, int(time.time()), json.dumps(result), conn=DB)
 
 # ── Per-host metric polling (Issue #35 slice 2) ───────────────────────────────
 # Every INTERVAL seconds the background poller pipes probe.py into
@@ -3258,15 +3203,17 @@ def _local_now_snapshot():
 # ── Adaptive per-host poll timeout (issue #99) ────────────────────────────────
 def _host_poll_state(name):
     """(timeout, fails) for a host — timeout falls back to the global default."""
+    from backend.db.repos import hosts as _hosts_repo
     try:
         with LOCK:
-            row = DB.execute("SELECT poll_timeout, poll_fails FROM hosts WHERE name=?", (name,)).fetchone()
+            row = _hosts_repo.get_poll_state(name, conn=DB)
     except Exception:
         return HOST_POLL_TIMEOUT, 0
     t = row[0] if row and row[0] else None
     return (int(t) if t else HOST_POLL_TIMEOUT), (int(row[1]) if row and row[1] else 0)
 
 def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
+    from backend.db.repos import hosts as _hosts_repo
     sets, params = [], []
     if timeout is not None:   sets.append("poll_timeout=?");       params.append(int(timeout))
     if fails is not None:      sets.append("poll_fails=?");          params.append(int(fails))
@@ -3276,8 +3223,7 @@ def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
     params.append(name)
     try:
         with LOCK:
-            DB.execute(f"UPDATE hosts SET {','.join(sets)} WHERE name=?", params)
-            DB.commit()
+            _hosts_repo.save_poll_state(','.join(sets), params, conn=DB)
     except Exception as e:
         print("host poll-state save error:", e, flush=True)
 
@@ -3623,11 +3569,12 @@ def run_on_host(name, cmd, sudo_password=None):
     is piped via stdin to sudo on the remote — it never appears in argv on
     either the local or remote side, and we never log it. Returns:
     {ok, exit_code, stdout, stderr, ms}."""
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
-    if not row:
+        ssh_target = _hosts_repo.get_ssh_target(name, conn=DB)
+    if not ssh_target:
         return None
-    parsed = _parse_ssh_target(row[0])
+    parsed = _parse_ssh_target(ssh_target)
     if not parsed:
         return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
     user, host, port = parsed
@@ -3692,10 +3639,11 @@ SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "s
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
+    from backend.db.repos import settings as _settings_repo
     out = dict(SETTING_DEFAULTS)
     try:
         with LOCK:
-            rows = DB.execute("SELECT key, value FROM settings").fetchall()
+            rows = _settings_repo.get_all(conn=DB)
         for k, v in rows:
             if k in SETTING_DEFAULTS:
                 out[k] = v
@@ -3817,11 +3765,9 @@ def _redact_target(s):
     return _CRED_RE.sub(r"\1***:***@", s or "")
 
 def list_uptime_checks():
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute(
-            "SELECT id,label,type,target,interval_sec,timeout_sec,expected_status,"
-            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public "
-            "FROM uptime_checks ORDER BY created_at").fetchall()
+        rows = _uptime_repo.list_checks_full(conn=DB)
     return [_uptime_row_to_dict(r) for r in rows]
 
 def _parse_host_port(target):
@@ -3932,26 +3878,24 @@ def _validate_uptime_check(body):
             "public": 1 if body.get("public") else 0}, None
 
 def create_uptime_check(body):
+    from backend.db.repos import uptime as _uptime_repo
     clean, err = _validate_uptime_check(body)
     if err:
         return None, err
     cid = uuid.uuid4().hex
     with LOCK:
-        DB.execute(
-            "INSERT INTO uptime_checks(id,label,type,target,interval_sec,timeout_sec,"
-            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
-             clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
-             clean["public"]))
-        DB.commit()
+        _uptime_repo.insert_check_full(
+            cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
+            clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
+            clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
+            clean["public"], conn=DB)
     _uptime_due.pop(cid, None)   # probe promptly on next scheduler pass
     return cid, None
 
 def update_uptime_check(cid, body):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        exists = DB.execute("SELECT 1 FROM uptime_checks WHERE id=?", (cid,)).fetchone()
+        exists = _uptime_repo.check_exists(cid, conn=DB)
     if not exists:
         return False, "not found"
     if not body:
@@ -3965,31 +3909,27 @@ def update_uptime_check(cid, body):
         if "public" in body:
             sets.append("public=?"); vals.append(1 if body.get("public") else 0)
         with LOCK:
-            DB.execute(f"UPDATE uptime_checks SET {','.join(sets)} WHERE id=?", (*vals, cid))
-            DB.commit()
+            _uptime_repo.update_check_fields(','.join(sets), vals, cid, conn=DB)
         return True, None
     clean, err = _validate_uptime_check(body)
     if err:
         return False, err
     with LOCK:
-        DB.execute(
-            "UPDATE uptime_checks SET label=?,type=?,target=?,interval_sec=?,timeout_sec=?,"
-            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=?,public=? WHERE id=?",
-            (clean["label"], clean["type"], clean["target"], clean["interval_sec"],
-             clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"], cid))
-        DB.commit()
+        _uptime_repo.update_check_full(
+            cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
+            clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
+            clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"],
+            conn=DB)
     _uptime_due.pop(cid, None)   # re-probe with new config promptly
     return True, None
 
 def delete_uptime_check(cid):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        cur = DB.execute("DELETE FROM uptime_checks WHERE id=?", (cid,))
-        DB.execute("DELETE FROM uptime_results WHERE check_id=?", (cid,))
-        DB.commit()
+        rowcount = _uptime_repo.delete_check_and_results(cid, conn=DB)
     _uptime_due.pop(cid, None)
     _uptime_down_since.pop(cid, None)
-    return cur.rowcount > 0
+    return rowcount > 0
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface redirects as HTTPError so probe_http counts/bounds them itself."""
@@ -4078,20 +4018,12 @@ def run_uptime_check(check):
         return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 
     try:
+        from backend.db.repos import uptime as _uptime_repo
         with LOCK:
-            DB.execute(
-                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
-            )
-
-            DB.execute(
-                "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
-                "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
-                (check["id"], check["id"], _UPTIME_RESULT_CAP)
-            )
-
-            DB.commit()
+            _uptime_repo.insert_result_full(
+                check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at,
+                conn=DB)
+            _uptime_repo.trim_results(check["id"], _UPTIME_RESULT_CAP, conn=DB)
     except Exception as e:
         print("run_uptime_check DB error:", e, flush=True)
 
@@ -4100,17 +4032,12 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
     """Read-only summary for one check: current state (up/down/unknown), last latency,
     uptime% over `window` (24h) and `window2` (7d), last_checked, last_err, and a
     coarse heartbeat strip. Caller must NOT hold LOCK (this takes it briefly)."""
+    from backend.db.repos import uptime as _uptime_repo
     since, since2 = now - window, now - window2
     with LOCK:
-        rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? AND ts>=? "
-            "ORDER BY ts", (check_id, since)).fetchall()
-        agg2 = DB.execute(
-            "SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
-            (check_id, since2)).fetchone()
-        last = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? "
-            "ORDER BY ts DESC LIMIT 1", (check_id,)).fetchone()
+        rows = _uptime_repo.results_since_full(check_id, since, conn=DB)
+        agg2 = _uptime_repo.results_window_agg(check_id, since2, conn=DB)
+        last = _uptime_repo.results_last_one(check_id, conn=DB)
     total = len(rows)
     up_n = sum(1 for r in rows if r[1])
     uptime = round(100.0 * up_n / total, 2) if total else None
@@ -4368,8 +4295,9 @@ def _apply_rules(key, level, rules):
     return channels if channels else None
 
 def get_notification_rules():
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        rows = DB.execute("SELECT id, match_kind, match_pattern, channel, min_level, enabled FROM notification_rules ORDER BY id").fetchall()
+        rows = _notify_repo.list_rules(conn=DB)
     return [{"id": r[0], "match_kind": r[1], "match_pattern": r[2], "channel": r[3], "min_level": r[4], "enabled": bool(r[5])} for r in rows]
 
 def _emit(s, key, level, title, detail, rules=None):
@@ -4399,11 +4327,10 @@ def _clear(key):
 
 def _in_maintenance(kind, name):
     """Return True if kind:name is currently covered by an active maintenance window."""
+    from backend.db.repos import notify as _notify_repo
     now = int(time.time())
     with LOCK:
-        rows = DB.execute(
-            "SELECT kind, pattern, start_ts, end_ts, recurrence FROM maintenance_windows"
-        ).fetchall()
+        rows = _notify_repo.get_active_windows(conn=DB)
     for row_kind, pattern, start_ts, end_ts, recurrence in rows:
         # kind must match or be wildcard
         if row_kind != "*" and row_kind != kind:
@@ -4427,31 +4354,26 @@ def _in_maintenance(kind, name):
     return False
 
 def list_maintenance_windows():
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        rows = DB.execute(
-            "SELECT id, label, kind, pattern, start_ts, end_ts, recurrence, note, created_at "
-            "FROM maintenance_windows ORDER BY start_ts"
-        ).fetchall()
+        rows = _notify_repo.list_windows(conn=DB)
     return [{"id": r[0], "label": r[1], "kind": r[2], "pattern": r[3],
              "start_ts": r[4], "end_ts": r[5], "recurrence": r[6],
              "note": r[7], "created_at": r[8]} for r in rows]
 
 def create_maintenance_window(label, kind, pattern, start_ts, end_ts, recurrence=None, note=None):
+    from backend.db.repos import notify as _notify_repo
     wid = uuid.uuid4().hex
     with LOCK:
-        DB.execute(
-            "INSERT INTO maintenance_windows(id,label,kind,pattern,start_ts,end_ts,recurrence,note,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (wid, label, kind or "*", pattern or "*", int(start_ts), int(end_ts),
-             recurrence or None, note or None, int(time.time()))
-        )
-        DB.commit()
+        _notify_repo.insert_window(
+            wid, label, kind or "*", pattern or "*", int(start_ts), int(end_ts),
+            recurrence or None, note or None, int(time.time()), conn=DB)
     return wid
 
 def delete_maintenance_window(wid):
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        DB.execute("DELETE FROM maintenance_windows WHERE id=?", (wid,))
-        DB.commit()
+        _notify_repo.delete_window(wid, conn=DB)
 
 # Phase 3.3: moved to backend/notify/ — re-exported for backward compat
 from backend.notify import notify_scan
@@ -4467,17 +4389,17 @@ def _uptime_down_reason(st):
 def _uptime_confirmed_down(cid, threshold):
     """True once the most recent `threshold` results are ALL failures (and we have at
     least that many). This is the anti-flap gate — one dropped packet never pages."""
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute("SELECT up FROM uptime_results WHERE check_id=? ORDER BY ts DESC LIMIT ?",
-                          (cid, threshold)).fetchall()
+        rows = _uptime_repo.results_last_n(cid, threshold, conn=DB)
     return len(rows) >= threshold and all(r[0] == 0 for r in rows)
 
 def _uptime_streak_start(cid, now):
     """Wall-clock ts the current DOWN streak began (walk recent results back while
     they're failures), so a recovery message can quote the real downtime."""
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute("SELECT ts,up FROM uptime_results WHERE check_id=? ORDER BY ts DESC LIMIT 500",
-                          (cid,)).fetchall()
+        rows = _uptime_repo.results_last_500(cid, conn=DB)
     start = None
     for ts, up in rows:
         if up == 0:
@@ -4839,12 +4761,11 @@ def _disk_io_anomaly_items(cur, now):
     excluding the latest point), same maths style as the rest of the monitor's
     threshold checks. Returns a list of {device, value, baseline, z, direction,
     magnitude} dicts — only devices that actually fired. Never raises."""
+    from backend.db.repos import system as _sys_repo2
     since = now - _DISKIO_ANOM_WINDOW
     by_dev = {}
     try:
-        for dev, r, w in cur.execute(
-                "SELECT device, read_mb_s, write_mb_s FROM disk_io_samples "
-                "WHERE ts>=? ORDER BY ts", (since,)):
+        for dev, r, w in _sys_repo2.query_disk_io_for_anomaly(since, conn=cur):
             by_dev.setdefault(dev, []).append((r or 0.0) + (w or 0.0))
     except Exception:
         return []
@@ -4878,6 +4799,7 @@ def diskio_scan():
     disk can't spam the Insight Feed. Writes into the same `events` table as OOM
     (kind='diskio_spike'), so it rides the existing events->insights plumbing for
     free — no new alert/incident system needed."""
+    from backend.db.repos import system as _sys_repo
     if _DB_MAINTENANCE:
         return
     now = int(time.time())
@@ -4888,8 +4810,7 @@ def diskio_scan():
         for it in newly:
             detail = (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
                       f"{it['z']:+.1f}σ)")[:300]
-            DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)",
-                      (now, it["device"], "diskio_spike", detail))
+            _sys_repo.insert_event(now, it["device"], "diskio_spike", detail, conn=DB)
         if newly:
             DB.commit()
         _diskio_anom_active.clear()
@@ -4915,9 +4836,9 @@ def oom_scan():
                 ets = int(time.time())
             if _DB_MAINTENANCE:
                 continue
+            from backend.db.repos import system as _sys_repo
             with LOCK:
-                DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)", (ets, svc, "oom", line.strip()[:300]))
-                DB.commit()
+                _sys_repo.insert_event(ets, svc, "oom", line.strip()[:300], conn=DB)
         _scan_since[svc] = int(time.time())
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
@@ -5036,13 +4957,12 @@ def _hash_key(k):
 def _create_api_key(name, expires_in_days=None):
     """Mint a key: persist its hash + metadata, return (id, plaintext). The plaintext
     is the only time it's available."""
+    from backend.db.repos import auth as _auth_repo
     key = "hlm_" + secrets.token_urlsafe(32)
     kid, now = uuid.uuid4().hex, int(time.time())
     exp = (now + int(expires_in_days) * 86400) if expires_in_days else None
     with LOCK:
-        DB.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
-                   "VALUES(?,?,?,?,?,?,?)", (kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None))
-        DB.commit()
+        _auth_repo.insert(kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None, conn=DB)
     return kid, key
 
 def _gen_api_key(name="default", expires_in_days=None):
@@ -5072,14 +4992,13 @@ def _safe_json(txt):
 def _run_cost_window(cur, started, ended, ctx):
     """Integrate samples.power over [started, ended] -> (energy_kwh, cost, avg_w,
     peak_util), priced exactly like the cost card (dual-tariff aware)."""
+    from backend.db.repos import experiments as _exp_repo
     end = ended or int(time.time())
     kwh_per = INTERVAL / 3_600_000.0
     e_kwh = cost = sum_p = 0.0
     n = 0
     peak_u = 0.0
-    for ts, util, power in cur.execute(
-            "SELECT ts,util,power FROM samples WHERE ts>=? AND ts<=? AND power IS NOT NULL",
-            (started, end)):
+    for ts, util, power in _exp_repo.get_run_cost_samples(started, end, conn=cur):
         p = power or 0.0
         sum_p += p; n += 1; peak_u = max(peak_u, util or 0)
         e_kwh += p * kwh_per
@@ -5321,19 +5240,14 @@ def sync_mlflow():
             status = _MLF_STATUS.get(info.get("status"), "running")
             params = {p["key"]: p["value"] for p in data.get("params", [])}
             tags = {k: v for k, v in tagd.items() if not k.startswith("mlflow.")}
+            from backend.db.repos import experiments as _exp_repo
             with LOCK:
-                row = DB.execute("SELECT id FROM runs WHERE source='mlflow' AND ext_id=?", (ext,)).fetchone()
-                rid = row[0] if row else uuid.uuid4().hex
-                DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,"
-                           "notes,heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                           "ON CONFLICT(source,ext_id) DO UPDATE SET status=excluded.status, "
-                           "ended_at=excluded.ended_at, name=excluded.name, params=excluded.params, "
-                           "tags=excluded.tags, heartbeat_at=excluded.heartbeat_at",
-                           (rid, name, "mlflow", status, started, ended, "mlflow",
-                            json.dumps(params, separators=(",", ":")),
-                            json.dumps(tags, separators=(",", ":")), "", now, ext, now))
-                DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
-                DB.commit()
+                rid = _exp_repo.get_mlflow_run_id(ext, conn=DB) or uuid.uuid4().hex
+                _exp_repo.upsert_mlflow_run(
+                    rid, name, status, started, ended, ext,
+                    json.dumps(params, separators=(",", ":")),
+                    json.dumps(tags, separators=(",", ":")), now, conn=DB)
+                _exp_repo.delete_run_metrics(rid, conn=DB)
             for m in data.get("metrics", []):
                 hist = _mlf("GET", "/api/2.0/mlflow/metrics/get-history",
                             params={"run_id": ext, "metric_key": m["key"]}) or {}
@@ -5580,8 +5494,9 @@ def _brief_yesterday_cost():
     kwh_per = INTERVAL / 3_600_000.0
     cost = kwh = 0.0
     try:
+        from backend.db.repos import system as _sys_repo
         with LOCK:
-            for ts, w in DB.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? AND ts<?", (y0, today0)):
+            for ts, w in _sys_repo.query_samples_for_cost(y0, today0, _TOTAL_W_EXPR, conn=DB):
                 cost += (w or 0) * kwh_per * _price_at(ctx, ts)
                 kwh  += (w or 0) * kwh_per
     except Exception:
@@ -5639,11 +5554,11 @@ def _brief_checks():
 
 def _brief_events(window=86400, limit=8):
     """Recent rows from the events log (OOM/down/recovery, etc.) over the window."""
+    from backend.db.repos import system as _sys_repo
     now = int(time.time())
     try:
         with LOCK:
-            rows = DB.execute("SELECT ts, service, kind, detail FROM events "
-                              "WHERE ts>=? ORDER BY ts DESC LIMIT ?", (now - window, limit)).fetchall()
+            rows = _sys_repo.query_events_since(now - window, order_desc=True, limit=limit, conn=DB)
     except Exception:
         rows = []
     return [{"ts": r[0], "service": r[1], "kind": r[2], "detail": r[3]} for r in rows]
@@ -5981,12 +5896,10 @@ def _public_monitor(check, now):
     everything the Statuspage-style row needs: current state, 24h/7d/90d uptime,
     a day-by-day bar, the recent heartbeat, cert status, and recent incidents.
     No raw target (host only)."""
+    from backend.db.repos import uptime as _uptime_repo
     cid = check["id"]
     with LOCK:
-        rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at "
-            "FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
-            (cid, now - 7776000)).fetchall()        # 90 days
+        rows = _uptime_repo.results_90d(cid, now - 7776000, conn=DB)  # 90 days
     def win(w):
         sub = [r for r in rows if r[0] >= now - w]
         return round(100.0 * sum(1 for r in sub if r[1]) / len(sub), 2) if sub else None
@@ -6032,9 +5945,9 @@ def _public_incident_feed(monitors, now, days=14, cap=25):
     return feed[:cap]
 
 def _uptime_window_pct(check_id, now, window):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        agg = DB.execute("SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
-                         (check_id, now - window)).fetchone()
+        agg = _uptime_repo.results_window_agg(check_id, now - window, conn=DB)
     tot = (agg[0] or 0) if agg else 0
     return round(100.0 * (agg[1] or 0) / tot, 2) if tot else None
 
@@ -6098,10 +6011,9 @@ def _public_status_detail(cid, now):
     if not check or not (check.get("public") and check.get("enabled")):
         return None
     s = _uptime_state(check["id"], now)
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows90 = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
-            (check["id"], now - 7776000)).fetchall()         # 90 days
+        rows90 = _uptime_repo.results_since_full(check["id"], now - 7776000, conn=DB)  # 90 days
     rows24 = [r for r in rows90 if r[0] >= now - 86400]
     return {
         "id": check["id"], "label": check["label"], "type": check["type"],

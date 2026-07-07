@@ -1,6 +1,8 @@
 """backend/api/integrations.py — integrations routes (Phase 3.4)."""
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 
+from backend.db.repos import notify as notify_repo
+
 bp = Blueprint('integrations', __name__)
 
 
@@ -49,28 +51,25 @@ def api_notify_rules():
         action = body.get("action", "add")
         if action == "add":
             with _app.LOCK:
-                _app.DB.execute("INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) VALUES (?, ?, ?, ?, ?)",
-                           (body.get("match_kind", "container"), body.get("match_pattern", "*"),
-                            body.get("channel", "all"), body.get("min_level", "warning"),
-                            1 if body.get("enabled", True) else 0))
-                _app.DB.commit()
+                notify_repo.insert_rule(
+                    body.get("match_kind", "container"), body.get("match_pattern", "*"),
+                    body.get("channel", "all"), body.get("min_level", "warning"),
+                    1 if body.get("enabled", True) else 0, conn=_app.DB)
         elif action == "update":
             rule_id = body.get("id")
             if not rule_id:
                 return jsonify({"ok": False, "error": "id required"}), 400
             with _app.LOCK:
-                _app.DB.execute("UPDATE notification_rules SET match_kind=?, match_pattern=?, channel=?, min_level=?, enabled=? WHERE id=?",
-                           (body.get("match_kind"), body.get("match_pattern"),
-                            body.get("channel"), body.get("min_level"),
-                            1 if body.get("enabled", True) else 0, rule_id))
-                _app.DB.commit()
+                notify_repo.update_rule(
+                    rule_id, body.get("match_kind"), body.get("match_pattern"),
+                    body.get("channel"), body.get("min_level"),
+                    1 if body.get("enabled", True) else 0, conn=_app.DB)
         elif action == "delete":
             rule_id = body.get("id")
             if not rule_id:
                 return jsonify({"ok": False, "error": "id required"}), 400
             with _app.LOCK:
-                _app.DB.execute("DELETE FROM notification_rules WHERE id=?", (rule_id,))
-                _app.DB.commit()
+                notify_repo.delete_rule(rule_id, conn=_app.DB)
         else:
             return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
         return jsonify({"ok": True, "rules": _app.get_notification_rules()})

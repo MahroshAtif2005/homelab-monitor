@@ -2,6 +2,8 @@
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import time
 
+from backend.db.repos import costs as costs_repo
+
 bp = Blueprint('costs', __name__)
 
 
@@ -41,16 +43,15 @@ def api_cost():
     kwh_per_wsample = _app.INTERVAL / 3_600_000.0   # one power sample -> kWh
 
     with _app.LOCK:
-        cur = _app.DB.cursor()
         def avg_w(since):
-            return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
+            return round(costs_repo.avg_power_since(since, conn=_app.DB) or 0)
         def total_kwh(since):
-            tot = cur.execute("SELECT SUM(power*cnt) FROM samples_1h WHERE ts>=?", (since,)).fetchone()[0] or 0
+            tot = costs_repo.sum_power_cnt_since(since, conn=_app.DB) or 0
             return tot * kwh_per_wsample
         def split_kwh(since):
             """One pass over (ts,power,cnt) >= since -> (day_kwh, night_kwh)."""
             day_w = night_w = 0.0
-            for ts, p, c in cur.execute("SELECT ts,power,cnt FROM samples_1h WHERE ts>=? AND power IS NOT NULL", (since,)):
+            for ts, p, c in costs_repo.samples_1h_power_cnt_since(since, conn=_app.DB):
                 if is_night(ts):
                     night_w += (p or 0) * (c or 1)
                 else:
@@ -73,12 +74,12 @@ def api_cost():
                         "day_cost": round(dc, 2), "night_cost": round(nc, 2)}
 
         # Cumulative-cost series across the selected range (mirrors api_data buckets).
-        since = (cur.execute("SELECT MIN(ts) FROM samples_1h").fetchone()[0] or now) if span is None else now - span
+        since = (costs_repo.min_ts_samples_1h(conn=_app.DB) or now) if span is None else now - span
         bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
         labels, cost_cum, running = [], [], 0.0
         if mode == "dual":                            # stream + classify per bucket (one pass)
             acc = {}
-            for ts, p, c in cur.execute("SELECT ts,power,cnt FROM samples_1h WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
+            for ts, p, c in costs_repo.samples_1h_power_cnt_since_ordered(since, conn=_app.DB):
                 b = (ts // bk) * bk
                 price = night_price if is_night(ts) else day_price
                 acc[b] = acc.get(b, 0.0) + (p or 0) * (c or 1) * kwh_per_wsample * price
@@ -86,8 +87,7 @@ def api_cost():
                 running += acc[b]
                 labels.append(int(b)); cost_cum.append(round(running, 4))
         else:                                         # single: cheap SQL-bucketed path
-            rows = cur.execute("SELECT (ts/?)*? b, SUM(power*cnt) FROM samples_1h WHERE ts>=? GROUP BY b ORDER BY b",
-                               (bk, bk, since)).fetchall()
+            rows = costs_repo.samples_1h_bucketed_power(since, bk, conn=_app.DB)
             for b, p in rows:
                 running += (p or 0) * kwh_per_wsample * day_price
                 labels.append(int(b)); cost_cum.append(round(running, 4))
@@ -119,16 +119,14 @@ def api_costs():
     now = int(time.time())
     kwh_per = _app.INTERVAL / 3_600_000.0
     with _app.LOCK:
-        c = _app.DB.cursor()
-        since = (c.execute("SELECT MIN(ts) FROM samples_1h").fetchone()[0] or now) if span is None else now - span
+        since = (costs_repo.min_ts_samples_1h(conn=_app.DB) or now) if span is None else now - span
         bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
-        comp = c.execute(f"SELECT (ts/?)*? b, AVG(power), AVG(cpu_power), AVG(dram_power) "
-                         f"FROM samples_1h WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
+        comp = costs_repo.samples_1h_comp_bucketed(since, bk, conn=_app.DB)
         # component energy + cost over the range (tariff-aware, one streaming pass)
         comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
         cost_range = 0.0
         nticks = 0
-        for ts, p, cp, dp, cnt_ in c.execute("SELECT ts,power,cpu_power,dram_power,cnt FROM samples_1h WHERE ts>=?", (since,)):
+        for ts, p, cp, dp, cnt_ in costs_repo.samples_1h_full_since(since, conn=_app.DB):
             nticks += cnt_ or 1
             price = _app._price_at(ctx, ts)
             n = cnt_ or 1
@@ -140,7 +138,7 @@ def api_costs():
         # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
         def win_cost(start):
             tot = 0.0
-            for ts, w, cnt_ in c.execute(f"SELECT ts, {_app._TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=?", (start,)):
+            for ts, w, cnt_ in costs_repo.samples_1h_total_w_since(start, _app._TOTAL_W_EXPR, conn=_app.DB):
                 tot += (w or 0) * (cnt_ or 1) * kwh_per * _app._price_at(ctx, ts)
             return round(tot, 2)
         lt = time.localtime(now)
@@ -148,7 +146,7 @@ def api_costs():
         cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
         # ranked per-entity breakdown from power_proc (tariff-aware day/night split)
         acc = {}
-        for ts, kind, name, watts in c.execute("SELECT ts,kind,name,watts FROM power_proc WHERE ts>=?", (since,)):
+        for ts, kind, name, watts in costs_repo.power_proc_since(since, conn=_app.DB):
             a = acc.setdefault((kind, name), [0.0, 0.0])
             if ctx["mode"] == "dual" and ctx["is_night"](ts):
                 a[1] += watts
@@ -227,10 +225,7 @@ def api_cost_heatmap():
     span_min = span_max = None
     try:
         with _app.LOCK:
-            c = _app.DB.cursor()
-            rows = c.execute(
-                f"SELECT ts, {_app._TOTAL_W_EXPR} w, cnt FROM samples_1h WHERE ts>=? ORDER BY ts",
-                (since,)).fetchall()
+            rows = costs_repo.samples_1h_heatmap(since, _app._TOTAL_W_EXPR, conn=_app.DB)
         # aggregate OUTSIDE the lock — pure Python, no _app.DB calls below
         for ts, w, row_cnt in rows:
             lt = time.localtime(ts)
@@ -346,19 +341,13 @@ def api_costs_entity():
     now = int(time.time())
     kwh_per = _app.INTERVAL / 3_600_000.0
     with _app.LOCK:
-        c = _app.DB.cursor()
-        since = (c.execute("SELECT MIN(ts) FROM power_proc").fetchone()[0] or now) if span is None else now - span
+        since = (costs_repo.min_ts_power_proc(conn=_app.DB) or now) if span is None else now - span
         bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
-        q = "SELECT (ts/?)*? b, AVG(watts), MAX(watts) FROM power_proc WHERE name=? AND ts>=?"
-        args = [bk, bk, name, since]
-        if kind:
-            q += " AND kind=?"; args.append(kind)
-        q += " GROUP BY b ORDER BY b"
-        rows = c.execute(q, args).fetchall()
+        rows = costs_repo.power_proc_entity(name, since, bk, kind=kind, conn=_app.DB)
         # cumulative tariff-aware cost needs per-bucket price; classify by bucket start ts
         vram_peak = None
         if kind != "cpu":
-            vram_peak = c.execute("SELECT MAX(mem) FROM proc WHERE service=? AND ts>=?", (name, since)).fetchone()[0]
+            vram_peak = costs_repo.max_vram_for_service(name, since, conn=_app.DB)
     labels, watts, cost_cum, running, energy = [], [], [], 0.0, 0.0
     peak = 0.0
     for b, avgw, maxw in rows:
