@@ -2,6 +2,8 @@
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import time
 import socket
+import re
+import shlex
 
 bp = Blueprint('hosts_api', __name__)
 
@@ -129,6 +131,53 @@ def api_hosts_run(name):
     # Drop the password reference ASAP — Python keeps the string object until
     # GC, but at least we don't hold our own reference past this point.
     sudo_password = None
+    body = None
+    if result is None:
+        return jsonify({"ok": False, "error": "no such host"}), 404
+    return jsonify(result)
+
+
+_SERVICE_ACTIONS = ("start", "stop", "restart")
+_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$")
+_WIN_SERVICE_PS = {
+    "start":   "Start-Service",
+    "stop":    "Stop-Service -Force",
+    "restart": "Restart-Service -Force",
+}
+
+
+@bp.route("/api/services/<name>/action", methods=["POST"])
+def api_service_action(name):
+    """Start/stop/restart a service — local systemd unit (D-Bus) or, given
+    `host`, a registered remote's systemd unit (SSH + systemctl, same
+    sudo-password plumbing as api_hosts_run) or Windows service (SSH +
+    PowerShell). Body: {action, host?, sudo_password?}. Gated by ENABLE_CONTROLS."""
+    import app as _app
+    if not _app.ENABLE_CONTROLS:
+        return jsonify({"ok": False, "error": "Service controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
+    if not _UNIT_NAME_RE.match(name or ""):
+        return jsonify({"ok": False, "error": "invalid unit/service name"}), 400
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").strip()
+    host = (body.get("host") or "local").strip()
+    if action not in _SERVICE_ACTIONS:
+        return jsonify({"ok": False, "error": "action must be one of: %s" % ", ".join(_SERVICE_ACTIONS)}), 400
+
+    if host == "local":
+        ok, err = _app.systemd_unit_action(name, action)
+        return jsonify({"ok": ok} if ok else {"ok": False, "error": err})
+
+    with _app.HOST_DATA_LOCK:
+        entry = _app.HOST_DATA.get(host) or {}
+    family = (((entry.get("data") or {}).get("host") or {}).get("os") or {}).get("family") or "linux"
+    if family == "windows":
+        script = "%s -Name %s" % (_WIN_SERVICE_PS[action], _app._ps_single_quote(name))
+        result = _app.run_on_host_windows(host, script)
+    else:
+        sudo_password = body.get("sudo_password") or None
+        result = _app.run_on_host(host, "systemctl %s -- %s" % (action, shlex.quote(name)),
+                                  sudo_password=sudo_password)
+        sudo_password = None
     body = None
     if result is None:
         return jsonify({"ok": False, "error": "no such host"}), 404

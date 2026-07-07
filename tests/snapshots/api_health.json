@@ -12,6 +12,7 @@
   "docker": {
     "available": true,
     "containers": [],
+    "controls_enabled": true,
     "summary": {
       "problems": 0,
       "running": 0,
@@ -75,13 +76,14 @@
   "processes": null,
   "systemd": {
     "available": true,
+    "controls_enabled": true,
     "services": [],
     "summary": {}
   },
   "update": {
     "available": false,
     "current": "0.23.0",
-    "self_update_enabled": false
+    "self_update_enabled": true
   },
   "updated": 1735689600,
   "version": "0.23.0"

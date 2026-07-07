@@ -52,12 +52,22 @@ CHECK_UPDATES = os.environ.get("CHECK_UPDATES", "true").strip().lower() not in (
 # this network lookup and keep the offline package counts.
 CHECK_OS_UPDATES = os.environ.get("CHECK_OS_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
 UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
-# Opt-in one-click self-update button. OFF by default: this is the first action
-# that *writes* (it recreates this very container via a detached docker:cli helper
-# and restarts the app). Needs the docker socket mounted read-write. See
-# start_self_update() and website/configuration.md.
-ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "").strip().lower() in ("1", "true", "yes", "on")
+# One-click self-update button. ON by default (recreates this very container
+# via a detached docker:cli helper and restarts the app) — set
+# ALLOW_SELF_UPDATE=0 to turn it off. Needs the docker socket mounted
+# read-write, which the shipped docker-compose.yml now does by default too.
+# See start_self_update() and website/configuration.md.
+ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
 SELF_UPDATE_HELPER_IMAGE = os.environ.get("SELF_UPDATE_HELPER_IMAGE", "docker:cli")
+# Container/service controls (start/stop/restart, restart policy). ON by
+# default alongside self-update — set ENABLE_CONTROLS=0 to turn it off (see
+# docker-compose.readonly.yml for restoring the old fully-read-only posture,
+# sockets included). Local container/service control needs the docker socket
+# and the systemd D-Bus socket mounted read-write, which the shipped
+# docker-compose.yml now does by default. Gates every mutating route in this
+# section; read-only collection (collect_docker/collect_systemd) is unaffected.
+# See website/configuration.md.
+ENABLE_CONTROLS = os.environ.get("ENABLE_CONTROLS", "1").strip().lower() not in ("0", "false", "no", "off")
 # Split cache: once we know there's an update, the answer won't change for hours
 # so we can cache it long. But "no update found" / network errors should expire
 # sooner — otherwise a release published right after deploy stays invisible for
@@ -1523,6 +1533,30 @@ def _refresh_docker_enrich(running_ids):
                 out.setdefault(cid, {})["mem_bytes"] = mem
     return out
 
+# Restart policy isn't in the /containers/json list payload — only a full
+# inspect has it. That's an extra round-trip per container, so it's only ever
+# fetched when ENABLE_CONTROLS is on (nothing in the read-only path pays for it).
+_docker_policy = {"data": {}, "at": 0}
+
+def _container_restart_policy(cid):
+    try:
+        d = json.loads(_docker(f"/containers/{cid}/json"))
+    except Exception:
+        return None
+    rp = (d.get("HostConfig") or {}).get("RestartPolicy") or {}
+    return {"name": rp.get("Name") or "no", "max_retry": rp.get("MaximumRetryCount") or 0}
+
+def _refresh_docker_policies(ids):
+    """Restart policy for every known container (stopped ones too — you may
+    want to fix a policy before ever starting it), parallel like _refresh_docker_enrich."""
+    out = {}
+    if ids:
+        with ThreadPoolExecutor(max_workers=min(8, len(ids))) as ex:
+            for cid, rp in zip(ids, ex.map(_container_restart_policy, ids)):
+                if rp is not None:
+                    out[cid] = rp
+    return out
+
 def _dir_size(host_path, timeout=120):
     """Apparent size (bytes) of a host path, read through the read-only HOST_ROOT
     bind mount — i.e. `du -sb` as the host would see it. Returns None when the
@@ -1652,17 +1686,25 @@ def collect_docker():
         _docker_enrich["data"] = _refresh_docker_enrich(running_ids)
         _docker_enrich["at"] = time.time()
     _maybe_refresh_docker_disk()   # background; first pass leaves disk_bytes None until it lands
+    # Restart policy only matters to the (opt-in) controls UI — skip the extra
+    # inspect round-trip entirely when controls are off.
+    if ENABLE_CONTROLS and time.time() - _docker_policy["at"] > _DOCKER_ENRICH_TTL:
+        _docker_policy["data"] = _refresh_docker_policies([c["id"] for c in items])
+        _docker_policy["at"] = time.time()
     # Per-container GPU VRAM, attributed by the GPU sampler (nvidia-smi
     # compute-apps → /proc/<pid>/cgroup → container name). procs is in MB and
     # keyed by service name (== container name for container-owned PIDs); host /
     # unattributed PIDs use "host:"/"pid:" keys that never match a container.
     vram_mb = {p.get("service"): p.get("mem") for p in (LATEST.get("procs") or [])}
+    self_id = (os.environ.get("HOSTNAME") or "")[:12]
     for c in items:
         e = _docker_enrich["data"].get(c["id"]) or {}
         c["mem_bytes"]  = e.get("mem_bytes")
         vmb = vram_mb.get(c["name"])
         c["vram_bytes"] = round(vmb * 1048576) if vmb else None
         c["disk_bytes"] = _docker_disk["data"].get(c["id"])
+        c["restart_policy"] = _docker_policy["data"].get(c["id"]) if ENABLE_CONTROLS else None
+        c["is_self"] = bool(self_id) and c["id"] == self_id
     rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
     items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
     return {"available": True, "containers": items,
@@ -1887,6 +1929,34 @@ def collect_systemd():
     return {"available": True, "services": shown,
             "summary": {"loaded": len(services), "running": running,
                         "failed": failed, "admin": len(admin)}}
+
+_SYSTEMD_UNIT_METHODS = {"start": "StartUnit", "stop": "StopUnit", "restart": "RestartUnit"}
+
+def systemd_unit_action(unit, action):
+    """Start/stop/restart a *local* systemd unit over the same D-Bus socket
+    collect_systemd() reads from — a fresh short-lived connection per call.
+    Returns (ok, error). The container runs as root (no USER in the Dockerfile),
+    so this either works outright (root is implicitly privileged on the system
+    bus, no polkit prompt) or fails with the D-Bus/systemd's own error text —
+    there's no "are we allowed" pre-check worth doing, the attempt IS the check."""
+    try:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
+    except Exception:
+        return False, "jeepney not installed in the image."
+    try:
+        conn = open_dbus_connection(bus="SYSTEM")
+    except Exception as e:
+        return False, f"Host D-Bus socket not reachable: {e}"
+    try:
+        mgr = DBusAddress("/org/freedesktop/systemd1", bus_name="org.freedesktop.systemd1",
+                          interface="org.freedesktop.systemd1.Manager")
+        conn.send_and_get_reply(new_method_call(mgr, _SYSTEMD_UNIT_METHODS[action], "ss", (unit, "replace")))
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
 
 def build_overview(now, docker, systemd):
     """One status card per subsystem for the Overview tab. New monitors append here."""
@@ -3605,6 +3675,33 @@ def run_on_host(name, cmd, sudo_password=None):
     if err:
         err = "\n".join(ln for ln in err.splitlines()
                         if "incorrect password" not in ln.lower() or True)
+    return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
+
+def _ps_single_quote(s):
+    """Escape a value for embedding in a single-quoted PowerShell string —
+    doubling an embedded `'` is the whole rule (single-quoted PS strings don't
+    interpret $ or backticks), same idea as shlex.quote for POSIX shells."""
+    return "'" + (s or "").replace("'", "''") + "'"
+
+def run_on_host_windows(name, ps_script):
+    """Execute a PowerShell script on a registered Windows host, piped over SSH
+    stdin exactly like the probe.ps1 fetch (_WIN_PS_CMD) — just a different
+    script. There's no sudo/elevation concept here: whether the command
+    succeeds depends on which authorized_keys file got the hub's pubkey during
+    onboarding (a plain user's vs. administrators_authorized_keys) — that's a
+    Windows OpenSSH behaviour we don't control, so an elevation failure just
+    surfaces as the remote's own 'Access is denied' in stderr rather than
+    something we predict up front. Returns {ok, exit_code, stdout, stderr, ms}."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
+    user, host, port = parsed
+    rc, out, err, ms = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                       ps_script.encode("utf-8"), timeout=30)
     return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
 
 # Generate the hub keypair eagerly so /api/hub/pubkey is instant on first hit.

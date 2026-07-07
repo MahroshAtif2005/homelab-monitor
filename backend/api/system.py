@@ -263,6 +263,11 @@ def api_health():
     # Set here (not baked into the cached _app.collect_update payload) so toggling the
     # env flag takes effect on restart without waiting for the update cache.
     update["self_update_enabled"] = _app.ALLOW_SELF_UPDATE
+    # Same "toggle takes effect without waiting for cache" reasoning as above —
+    # controls_enabled drives whether the Containers/Services tabs show action
+    # buttons at all (see ENABLE_CONTROLS).
+    docker = dict(docker); docker["controls_enabled"] = _app.ENABLE_CONTROLS
+    systemd = dict(systemd); systemd["controls_enabled"] = _app.ENABLE_CONTROLS
     disk_io = dict(_app.HEALTH.get("disk_io") or {"available": False, "warming_up": True,
                                               "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
                                               "items": []})

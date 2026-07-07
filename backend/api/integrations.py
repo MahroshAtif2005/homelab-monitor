@@ -1,7 +1,10 @@
 """backend/api/integrations.py — integrations routes (Phase 3.4)."""
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
+import logging
 
 from backend.db.repos import notify as notify_repo
+
+_log = logging.getLogger(__name__)
 
 bp = Blueprint('integrations', __name__)
 
@@ -22,6 +25,81 @@ def api_container_logs(name):
                     mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                              "Connection": "keep-alive"})
+
+
+_CONTAINER_ACTIONS = ("start", "stop", "restart")
+_RESTART_POLICIES = ("no", "on-failure", "unless-stopped", "always")
+
+
+def _docker_err_message(raw):
+    """Docker's error body is `{"message": "..."}` on a well-formed failure;
+    fall back to the raw bytes for anything else (a proxy timeout, empty body)."""
+    try:
+        import json
+        msg = (json.loads(raw) or {}).get("message")
+        if msg:
+            return msg[:300]
+    except (ValueError, KeyError, TypeError):
+        pass
+    try:
+        return raw.decode("utf-8", "replace")[:300] if isinstance(raw, bytes) else str(raw)[:300]
+    except (AttributeError, UnicodeDecodeError):
+        return "unknown Docker error"
+
+
+@bp.route("/api/containers/<name>/action", methods=["POST"])
+def api_container_action(name):
+    """Start/stop/restart a container on the *local* host only — the Containers
+    tab has no remote inventory yet (see website/multi-host.md), so there's
+    nothing to control on a remote host. Gated by ENABLE_CONTROLS."""
+    import urllib.parse
+    import app as _app
+    if not _app.ENABLE_CONTROLS:
+        return jsonify({"ok": False, "error": "Container controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
+    if not _app._CT_NAME_RE.match(name or ""):
+        return jsonify({"ok": False, "error": "invalid container name"}), 400
+    action = ((request.get_json(silent=True) or {}).get("action") or "").strip()
+    if action not in _CONTAINER_ACTIONS:
+        return jsonify({"ok": False, "error": "action must be one of: %s" % ", ".join(_CONTAINER_ACTIONS)}), 400
+    try:
+        code, raw = _app._docker_req("POST", "/containers/%s/%s" % (urllib.parse.quote(name), action))
+    except Exception as e:
+        _log.warning("Docker socket error for container %s/%s: %s", name, action, e)
+        return jsonify({"ok": False, "error": "Could not reach the Docker socket: %s" % e}), 500
+    # No cache to invalidate: collect_docker() re-lists containers live on every
+    # call (the state field is never stale) — the Containers tab picks this up
+    # on its next poll, same as everything else on the dashboard.
+    if code in (204, 304):
+        return jsonify({"ok": True})
+    if code == 404:
+        return jsonify({"ok": False, "error": "No such container."}), 404
+    return jsonify({"ok": False, "error": _docker_err_message(raw)}), 400
+
+
+@bp.route("/api/containers/<name>/restart-policy", methods=["POST"])
+def api_container_restart_policy(name):
+    """Change a container's restart policy (local host only — see api_container_action)."""
+    import urllib.parse
+    import app as _app
+    if not _app.ENABLE_CONTROLS:
+        return jsonify({"ok": False, "error": "Container controls are disabled (ENABLE_CONTROLS=0). Unset it, or drop docker-compose.readonly.yml, to enable them (see website/configuration.md)."}), 403
+    if not _app._CT_NAME_RE.match(name or ""):
+        return jsonify({"ok": False, "error": "invalid container name"}), 400
+    policy = ((request.get_json(silent=True) or {}).get("policy") or "").strip()
+    if policy not in _RESTART_POLICIES:
+        return jsonify({"ok": False, "error": "policy must be one of: %s" % ", ".join(_RESTART_POLICIES)}), 400
+    try:
+        code, raw = _app._docker_req("POST", "/containers/%s/update" % urllib.parse.quote(name),
+                                      body={"RestartPolicy": {"Name": policy}})
+    except Exception as e:
+        _log.warning("Docker socket error for container %s restart-policy: %s", name, e)
+        return jsonify({"ok": False, "error": "Could not reach the Docker socket: %s" % e}), 500
+    _app._docker_policy["at"] = 0
+    if code == 200:
+        return jsonify({"ok": True})
+    if code == 404:
+        return jsonify({"ok": False, "error": "No such container."}), 404
+    return jsonify({"ok": False, "error": _docker_err_message(raw)}), 400
 
 
 @bp.route("/api/notify/test", methods=["POST"])
