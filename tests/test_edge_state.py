@@ -1,17 +1,13 @@
 import sqlite3
 import pytest
 from backend.db.repos import edge_state as repo
-
-SCHEMA = """
-CREATE TABLE notified_keys (key TEXT PRIMARY KEY, armed_at INTEGER NOT NULL);
-CREATE TABLE uptime_down_since (check_id TEXT PRIMARY KEY, since_ts INTEGER NOT NULL);
-"""
+from app import _EDGE_STATE_MIGRATION
 
 
 @pytest.fixture
 def db():
     conn = sqlite3.connect(":memory:")
-    conn.executescript(SCHEMA)
+    conn.executescript(_EDGE_STATE_MIGRATION)
     return conn
 
 

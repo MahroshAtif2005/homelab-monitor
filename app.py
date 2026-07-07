@@ -345,7 +345,7 @@ LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "te
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
-HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0, "_loading": True}
+HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
 WATCH_SERVICES = [s.strip() for s in os.environ.get("WATCH_SERVICES", "").split(",") if s.strip()]
 SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authored (vs vendor)
 _ct_cache = {"list": [], "at": 0}
@@ -2877,7 +2877,6 @@ def health_scan():
     # jiffy deltas across two cadences and corrupt both. Reuse the cached value.
     collect_os_releases()
     HEALTH["at"]      = int(time.time())
-    HEALTH.pop("_loading", None)
 
 # ── Settings (UI-managed; persisted in SQLite, no env required) ───────────────
 # Everything the notifier needs is configured from the dashboard's Settings tab
@@ -3944,6 +3943,9 @@ def delete_uptime_check(cid):
         rowcount = _uptime_repo.delete_check_and_results(cid, conn=DB)
     _uptime_due.pop(cid, None)
     _uptime_down_since.pop(cid, None)
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
+    _edge_state_repo.clear_down_since(cid, conn=_app.DB)
     return rowcount > 0
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -4326,13 +4328,16 @@ def _emit(s, key, level, title, detail, rules=None):
     _parts = key.split(":", 1)
     if len(_parts) == 2 and _in_maintenance(_parts[0], _parts[1]):
         return
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
     with _NOTIFIER_LOCK:
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
-        from backend.db.repos import edge_state as _edge_state_repo
-        import app as _app
+    try:
         _edge_state_repo.arm_key(key, int(time.time()), conn=_app.DB)
+    except Exception as e:
+        print(f"edge_state arm_key error: {e}", flush=True)
     channels = _apply_rules(key, level, rules)
     if channels is not None:
         _dispatch_to_channels(s, level, title, detail, channels)
@@ -4342,11 +4347,16 @@ def _emit(s, key, level, title, detail, rules=None):
                 print(f"notifier {ch} error:", err, flush=True)
 
 def _clear(key):
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
     with _NOTIFIER_LOCK:
+        was_armed = key in _NOTIFIED
         _NOTIFIED.pop(key, None)
-        from backend.db.repos import edge_state as _edge_state_repo
-        import app as _app
-        _edge_state_repo.disarm_key(key, conn=_app.DB)
+    if was_armed:
+        try:
+            _edge_state_repo.disarm_key(key, conn=_app.DB)
+        except Exception as e:
+            print(f"edge_state disarm_key error: {e}", flush=True)
 
 def _in_maintenance(kind, name):
     """Return True if kind:name is currently covered by an active maintenance window."""
@@ -4459,11 +4469,17 @@ def notify_uptime(s):
         down_key, slow_key, rec_key = f"uptime:down:{cid}", f"uptime:slow:{cid}", f"uptime:rec:{cid}"
         if not c["enabled"] or not c["alerts_enabled"]:
             _clear(down_key); _clear(slow_key); _uptime_down_since.pop(cid, None)
+            from backend.db.repos import edge_state as _edge_state_repo
+            import app as _app
+            _edge_state_repo.clear_down_since(cid, conn=_app.DB)
             continue
         # Skip alerting entirely while this check is in a maintenance window.
         if _in_maintenance("uptime", cid) or _in_maintenance("uptime", c.get("label", "")):
             _clear(down_key); _clear(slow_key); _clear(cert_key if "cert_key" in dir() else f"uptime:cert:{cid}")
             _uptime_down_since.pop(cid, None)
+            from backend.db.repos import edge_state as _edge_state_repo
+            import app as _app
+            _edge_state_repo.clear_down_since(cid, conn=_app.DB)
             continue
         thr = max(1, int(c.get("fail_threshold") or 2))
         st = _uptime_state(cid, now)
