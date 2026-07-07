@@ -270,11 +270,23 @@ from backend.db.repos.schema import (
     record_baseline_if_needed as _record_baseline_if_needed,
 )
 
+_EDGE_STATE_MIGRATION = """
+CREATE TABLE IF NOT EXISTS notified_keys (
+    key TEXT PRIMARY KEY,
+    armed_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS uptime_down_since (
+    check_id TEXT PRIMARY KEY,
+    since_ts INTEGER NOT NULL
+);
+"""
+
 def _apply_schema_migrations(conn):
     _apply_schema_migrations_impl(conn, _DB_SCHEMA,
                                   _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
                                   _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
                                   _UPTIME_CHECK_MIGRATIONS)
+    conn.executescript(_EDGE_STATE_MIGRATION)
 
 def _backfill_rollups(conn):
     """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
@@ -333,7 +345,7 @@ LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "te
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
-HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
+HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0, "_loading": True}
 WATCH_SERVICES = [s.strip() for s in os.environ.get("WATCH_SERVICES", "").split(",") if s.strip()]
 SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authored (vs vendor)
 _ct_cache = {"list": [], "at": 0}
@@ -2865,6 +2877,7 @@ def health_scan():
     # jiffy deltas across two cadences and corrupt both. Reuse the cached value.
     collect_os_releases()
     HEALTH["at"]      = int(time.time())
+    HEALTH.pop("_loading", None)
 
 # ── Settings (UI-managed; persisted in SQLite, no env required) ───────────────
 # Everything the notifier needs is configured from the dashboard's Settings tab
@@ -3745,6 +3758,8 @@ _UPTIME_FAIL_MAX     = 10      # cap on the confirm-after threshold
 _UPTIME_UA = "HomeLab-Monitor uptime check"
 _uptime_due = {}               # check_id -> next monotonic due time (scheduler state)
 _uptime_down_since = {}        # check_id -> wall-clock ts the current DOWN streak began
+from backend.db.repos import edge_state as _edge_state_repo
+_uptime_down_since.update({row[0]: row[1] for row in _edge_state_repo.load_down_since(conn=DB)})
 
 def _uptime_row_to_dict(r):
     cols = ("id", "label", "type", "target", "interval_sec", "timeout_sec",
@@ -4134,6 +4149,8 @@ def _uptime_tick(now=None):
 from backend.collectors import uptime_worker
 
 _NOTIFIED = {}            # key -> 1, "armed" alerts pending recovery
+from backend.db.repos import edge_state as _edge_state_repo
+_NOTIFIED.update({row[0]: 1 for row in _edge_state_repo.load_notified_keys(conn=DB)})
 _NOTIFIER_LOCK = threading.Lock()
 LEVELS  = {"info": 0, "warning": 1, "critical": 2}
 _COLORS = {"info": 0x58A6FF, "warning": 0xD29922, "critical": 0xF85149}
@@ -4313,6 +4330,9 @@ def _emit(s, key, level, title, detail, rules=None):
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
+        from backend.db.repos import edge_state as _edge_state_repo
+        import app as _app
+        _edge_state_repo.arm_key(key, int(time.time()), conn=_app.DB)
     channels = _apply_rules(key, level, rules)
     if channels is not None:
         _dispatch_to_channels(s, level, title, detail, channels)
@@ -4324,6 +4344,9 @@ def _emit(s, key, level, title, detail, rules=None):
 def _clear(key):
     with _NOTIFIER_LOCK:
         _NOTIFIED.pop(key, None)
+        from backend.db.repos import edge_state as _edge_state_repo
+        import app as _app
+        _edge_state_repo.disarm_key(key, conn=_app.DB)
 
 def _in_maintenance(kind, name):
     """Return True if kind:name is currently covered by an active maintenance window."""
@@ -4450,6 +4473,9 @@ def notify_uptime(s):
                 first = down_key not in _NOTIFIED
             if first:
                 _uptime_down_since[cid] = _uptime_streak_start(cid, now)
+                from backend.db.repos import edge_state as _edge_state_repo
+                import app as _app
+                _edge_state_repo.set_down_since(cid, _uptime_down_since[cid], conn=_app.DB)
             _clear(rec_key)   # re-arm recovery so the eventual comeback fires once
             _emit(s, down_key, "critical", f"🔴 {c['label']} is DOWN",
                   f"{tgt} — {_uptime_down_reason(st)}", rules=rules)
@@ -4459,6 +4485,9 @@ def notify_uptime(s):
                 was_down = down_key in _NOTIFIED
             if was_down:
                 since = _uptime_down_since.pop(cid, None)
+                from backend.db.repos import edge_state as _edge_state_repo
+                import app as _app
+                _edge_state_repo.clear_down_since(cid, conn=_app.DB)
                 dur = _fmt_dur(now - since) if since else "?"
                 _clear(down_key)
                 # Recovery is good news → emitted at "warning" so it survives the
