@@ -10,11 +10,11 @@
       "avg_power": 130,
       "cost": 0.0,
       "duration": 30,
-      "end": 1735689590,
+      "end": 1735689630,
       "energy_kwh": 0.0011,
       "peak_util": 42,
       "peak_vram": 8000,
-      "start": 1735689570
+      "start": 1735689610
     }
   ],
   "totals": {

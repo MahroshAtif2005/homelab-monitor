@@ -38,10 +38,16 @@ def _clean_db():
 
 
 def _seed_samples(n=3):
-    """Insert n deterministic rows into the samples table."""
+    """Insert n deterministic rows into the samples table.
+
+    Seeded AFTER FROZEN_TS (not before) so they fall within the 'today' window
+    on UTC CI where midnight == FROZEN_TS exactly.  The 1h-range query uses
+    since = now - 3600 = FROZEN_TS - 3600, so these timestamps are still
+    well inside every range window.
+    """
     with app.LOCK:
         for i in range(n):
-            ts = FROZEN_TS - (n - i) * app.INTERVAL
+            ts = FROZEN_TS + (i + 1) * app.INTERVAL
             app.DB.execute(
                 "INSERT INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",

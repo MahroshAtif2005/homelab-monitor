@@ -1,8 +1,10 @@
 # Snapshot helper: write/compare JSON endpoint responses.
 # Run with UPDATE_SNAPSHOTS=1 pytest to regenerate all snapshots.
+import calendar as _calendar
 import json
 import os
 import pathlib
+import time as _time
 import unittest
 import datetime as _dt
 from unittest.mock import patch
@@ -45,9 +47,18 @@ class _MultiPatch:
 
 
 def frozen_time():
-    """Context manager: freeze time.time() in app module and all blueprint modules."""
-    targets = [
-        "app.time.time",
-        "backend.api.costs.time.time",
-    ]
-    return _MultiPatch(*[patch(t, return_value=FROZEN_TS) for t in targets])
+    """Freeze time deterministically across all modules and timezones.
+
+    Patches:
+    - time.time()      → FROZEN_TS (via app.time so the mock.patch traversal
+                          resolves to the stdlib time module globally)
+    - time.localtime() → time.gmtime (UTC) so heatmap day/hour bucketing is
+                          the same on any CI runner regardless of system timezone
+    - time.mktime()    → calendar.timegm (UTC inverse of gmtime) so midnight
+                          calculations are also timezone-independent
+    """
+    return _MultiPatch(
+        patch("app.time.time", return_value=FROZEN_TS),
+        patch("app.time.localtime", side_effect=_time.gmtime),
+        patch("app.time.mktime", side_effect=_calendar.timegm),
+    )
