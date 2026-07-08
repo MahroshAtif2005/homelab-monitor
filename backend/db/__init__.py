@@ -10,14 +10,19 @@ Concurrency model (conn-per-thread vs. the legacy global DB + LOCK):
 - `busy_timeout=5000` retries automatically on SQLITE_BUSY (up to 5 s).
 - The legacy `app.LOCK` + `app.DB` pair is preserved until Phase 4.
 """
+import os
 import threading
 import time as _time
 
-import app as _app
 from backend.db.repos.schema import open_db_connection as _open_db_connection
 
 # Module-level name so tests can patch it: patch.object(backend.db, 'DB_PATH', ...)
-DB_PATH = _app.DB_PATH
+# Mirrors app.py's own DB_PATH default — read directly from the env instead of
+# `import app`, which deadlocks: when app.py runs as __main__ (the container's
+# actual entrypoint, `python /app/app.py`), 'app' isn't yet in sys.modules under
+# that name, so `import app` here re-executes app.py from scratch mid-import,
+# looping back into this same module before it has finished defining `bp`.
+DB_PATH = os.environ.get("DB_PATH", "/data/gpu.db")
 
 _local = threading.local()
 
