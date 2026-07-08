@@ -29,6 +29,25 @@ def assert_snapshot(test_case, name: str, data: dict):
     )
 
 
+class _MultiPatch:
+    """Context manager that applies multiple patches simultaneously."""
+    def __init__(self, *patches):
+        self._patches = patches
+        self._mocks = []
+
+    def __enter__(self):
+        self._mocks = [p.start() for p in self._patches]
+        return self._mocks[0] if len(self._mocks) == 1 else self._mocks
+
+    def __exit__(self, *args):
+        for p in reversed(self._patches):
+            p.stop()
+
+
 def frozen_time():
-    """Context manager: freeze time.time() in the app module."""
-    return patch("app.time.time", return_value=FROZEN_TS)
+    """Context manager: freeze time.time() in app module and all blueprint modules."""
+    targets = [
+        "app.time.time",
+        "backend.api.costs.time.time",
+    ]
+    return _MultiPatch(*[patch(t, return_value=FROZEN_TS) for t in targets])
