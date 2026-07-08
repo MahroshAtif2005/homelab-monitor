@@ -107,20 +107,28 @@ app.register_blueprint(_hosts_api_bp)
 app.register_blueprint(_integrations_bp)
 
 # ── Prometheus gauges (defined once at module level) ──────────────────────────
+def _make_gauge(name, doc, labels=None):
+    """Create a Gauge, reusing the existing one if already registered (safe for multi-import)."""
+    try:
+        return Gauge(name, doc, labels or [])
+    except ValueError:
+        from prometheus_client import REGISTRY
+        return REGISTRY._names_to_collectors.get(name) or REGISTRY._names_to_collectors.get(name + "_total")
+
 if _PROM_OK:
     _G = {
-        "gpu_vram_used":     Gauge("homelab_gpu_vram_used_mb",    "GPU VRAM used (MB)",                ["gpu"]),
-        "gpu_vram_total":    Gauge("homelab_gpu_vram_total_mb",   "GPU VRAM total (MB)",               ["gpu"]),
-        "gpu_util":          Gauge("homelab_gpu_util_pct",        "GPU utilisation (%)",               ["gpu"]),
-        "gpu_temp":          Gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
-        "gpu_power":         Gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
-        "host_cpu":          Gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
-        "host_mem_used":     Gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
-        "host_disk_used":    Gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
-        "container_state":   Gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
-        "systemd_unit":      Gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
-        "model_vram":        Gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
-        "models_installed":  Gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
+        "gpu_vram_used":     _make_gauge("homelab_gpu_vram_used_mb",    "GPU VRAM used (MB)",                ["gpu"]),
+        "gpu_vram_total":    _make_gauge("homelab_gpu_vram_total_mb",   "GPU VRAM total (MB)",               ["gpu"]),
+        "gpu_util":          _make_gauge("homelab_gpu_util_pct",        "GPU utilisation (%)",               ["gpu"]),
+        "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
+        "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
+        "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
+        "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
+        "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
+        "systemd_unit":      _make_gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
+        "model_vram":        _make_gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
+        "models_installed":  _make_gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
     }
 LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
