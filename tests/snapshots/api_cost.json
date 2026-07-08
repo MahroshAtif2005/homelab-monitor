@@ -1,0 +1,55 @@
+{
+  "avg_24h_w": 130,
+  "avg_7d_w": 130,
+  "bucket_sec": 10,
+  "cost": {
+    "d30": 0.0,
+    "d7": 0.0,
+    "today": 0.0
+  },
+  "currency": "$",
+  "current_w": 130,
+  "enabled": false,
+  "kwh": {
+    "d30": 0.001,
+    "d7": 0.001,
+    "today": 0.001
+  },
+  "kwh_price": 0.0,
+  "range": "1h",
+  "series": {
+    "cost_cum": [
+      0.0
+    ],
+    "labels": [
+      1735689600
+    ]
+  },
+  "split": {
+    "d30": {
+      "day_cost": 0.0,
+      "day_kwh": 0.001,
+      "night_cost": 0.0,
+      "night_kwh": 0.0
+    },
+    "d7": {
+      "day_cost": 0.0,
+      "day_kwh": 0.001,
+      "night_cost": 0.0,
+      "night_kwh": 0.0
+    },
+    "today": {
+      "day_cost": 0.0,
+      "day_kwh": 0.001,
+      "night_cost": 0.0,
+      "night_kwh": 0.0
+    }
+  },
+  "tariff": {
+    "mode": "single",
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "price_day": 0.0,
+    "price_night": null
+  }
+}

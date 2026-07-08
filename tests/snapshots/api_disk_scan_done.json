@@ -1,0 +1,15 @@
+{
+  "at": 1735689600,
+  "entries": [
+    {
+      "name": "foo",
+      "size": 512,
+      "type": "file"
+    }
+  ],
+  "error": null,
+  "free": 512,
+  "path": "/tmp",
+  "state": "done",
+  "total": 1024
+}

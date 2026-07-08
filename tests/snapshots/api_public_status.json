@@ -1,0 +1,35 @@
+{
+  "incidents": [],
+  "lab_emoji": "\ud83c\udfe0",
+  "lab_name": "My HomeLab",
+  "monitors": [],
+  "monitors_summary": {
+    "down": 0,
+    "total": 0,
+    "up": 0
+  },
+  "overview": [
+    {
+      "detail": "50% RAM \u00b7 0% disk",
+      "key": "host",
+      "label": "Host",
+      "metric": "35% CPU",
+      "status": "ok"
+    },
+    {
+      "detail": "all healthy",
+      "key": "containers",
+      "label": "Containers",
+      "metric": "0/0 up",
+      "status": "ok"
+    },
+    {
+      "detail": "none failed",
+      "key": "services",
+      "label": "Services",
+      "metric": "0 running",
+      "status": "ok"
+    }
+  ],
+  "status": "ok"
+}

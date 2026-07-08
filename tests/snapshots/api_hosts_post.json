@@ -1,0 +1,7 @@
+{
+  "host": {
+    "name": "snap-host",
+    "ssh_target": "user@192.168.1.100"
+  },
+  "ok": true
+}

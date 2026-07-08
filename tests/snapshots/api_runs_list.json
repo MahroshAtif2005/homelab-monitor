@@ -1,0 +1,27 @@
+{
+  "currency": "$",
+  "range": "1h",
+  "runs": [
+    {
+      "avg_w": 0,
+      "cost": 0.0,
+      "duration": 3600,
+      "ended_at": 1735689600,
+      "energy_kwh": 0.0,
+      "host": null,
+      "id": "run6666666666666666666666666666",
+      "key_id": null,
+      "key_name": null,
+      "metrics_latest": {},
+      "name": "list-run",
+      "notes": null,
+      "params": null,
+      "peak_util": 0,
+      "source": "api",
+      "started_at": 1735686000,
+      "status": "finished",
+      "tags": null
+    }
+  ],
+  "tariff_mode": "single"
+}

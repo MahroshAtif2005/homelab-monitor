@@ -24,6 +24,30 @@ permissions:
   contents: read
 
 jobs:
+  # ── snapshot gate ─────────────────────────────────────────────────────────────
+  # Required on every PR. Runs the deterministic endpoint snapshot suite
+  # (Phase 0.1 of the refactor plan). A failing snapshot means a refactor PR
+  # changed observable API behavior — either fix the regression or explicitly
+  # rebaseline with UPDATE_SNAPSHOTS=1.
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install flask pytest prometheus_client
+
+      - name: Run snapshot tests (determinism check)
+        run: python -m pytest tests/test_snapshots.py -v --tb=short
+
+      - name: Verify snapshots are byte-identical on second run
+        run: python -m pytest tests/test_snapshots.py -q
+
   smoke:
     runs-on: ubuntu-latest
     steps:
@@ -60,7 +84,7 @@ jobs:
   # release.yml publishes on `v*` tags. A Watchtower-followed staging instance on
   # the hub (deploy/docker-compose.next.yml) redeploys whenever `:next` moves.
   publish-next:
-    needs: smoke
+    needs: [snapshot, smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/next'
     runs-on: ubuntu-latest
     steps:

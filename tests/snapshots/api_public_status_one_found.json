@@ -1,0 +1,23 @@
+{
+  "cert_days_remaining": null,
+  "cert_expires_at": null,
+  "cert_status": null,
+  "daily": [],
+  "host": "example.com",
+  "id": "check-snap-001",
+  "incidents": [],
+  "interval_sec": 60,
+  "label": "Snap Service",
+  "last_checked": 1735689600,
+  "last_latency_ms": 42,
+  "response_series": [],
+  "state": "up",
+  "type": "http",
+  "up_since": 1735686000,
+  "uptime": {
+    "24h": 100.0,
+    "30d": 99.8,
+    "7d": 99.9,
+    "90d": 99.7
+  }
+}

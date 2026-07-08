@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "rules": [
+    {
+      "channel": "all",
+      "enabled": true,
+      "id": 1,
+      "match_kind": "container",
+      "match_pattern": "myapp",
+      "min_level": "warning"
+    }
+  ]
+}

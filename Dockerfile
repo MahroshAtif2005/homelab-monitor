@@ -23,6 +23,10 @@ COPY app.py /app/app.py
 COPY db_backup.py /app/db_backup.py
 COPY mcp_status.py /app/mcp_status.py
 COPY probe.py /app/probe.py
+# backend/ is the module tree app.py's blueprints, collectors, probes, notify
+# and db repos were extracted into (refactor/app-extraction) — must ship as a
+# package alongside app.py or the import at boot fails.
+COPY backend/ /app/backend/
 # probe.ps1 is the Windows-host probe: the hub pipes it over SSH to Windows
 # remotes (PowerShell, no install) and gets back the same JSON probe.py emits.
 COPY probe.ps1 /app/probe.ps1
