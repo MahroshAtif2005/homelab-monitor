@@ -64,6 +64,7 @@ class TestApiCosts(unittest.TestCase):
         self.now = int(time.time())
         with app.LOCK:
             app.DB.execute("DELETE FROM samples")
+            app.DB.execute("DELETE FROM samples_1h")
             app.DB.execute("DELETE FROM power_proc")
             for i in range(6):
                 ts = self.now - 100 + i * 10
@@ -73,6 +74,15 @@ class TestApiCosts(unittest.TestCase):
                     (ts, 50, 8000, 24000, 200, 60, 30, 1000, 2000, 1.0, 50, 60, 8))
                 app.DB.execute("INSERT INTO power_proc VALUES(?,?,?,?)", (ts, "gpu", "ollama", 150))
                 app.DB.execute("INSERT INTO power_proc VALUES(?,?,?,?)", (ts, "cpu", "python", 20))
+            app.DB.commit()
+            app.DB.executescript("""
+                INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,
+                    cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power,cnt)
+                SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp),
+                    AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp),
+                    AVG(cpu_power), AVG(dram_power), COUNT(*)
+                FROM samples GROUP BY (ts/3600)*3600;
+            """)
             app.DB.commit()
         app.save_settings({"kwh_price": "0.30", "currency": "$", "tariff_mode": "single",
                            "system_idle_watts": ""})

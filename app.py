@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.23.0"
+VERSION      = "0.24.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -52,12 +52,22 @@ CHECK_UPDATES = os.environ.get("CHECK_UPDATES", "true").strip().lower() not in (
 # this network lookup and keep the offline package counts.
 CHECK_OS_UPDATES = os.environ.get("CHECK_OS_UPDATES", "true").strip().lower() not in ("0", "false", "no", "off")
 UPDATE_REPO   = os.environ.get("UPDATE_REPO", "SikamikanikoBG/homelab-monitor")
-# Opt-in one-click self-update button. OFF by default: this is the first action
-# that *writes* (it recreates this very container via a detached docker:cli helper
-# and restarts the app). Needs the docker socket mounted read-write. See
-# start_self_update() and website/configuration.md.
-ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "").strip().lower() in ("1", "true", "yes", "on")
+# One-click self-update button. ON by default (recreates this very container
+# via a detached docker:cli helper and restarts the app) — set
+# ALLOW_SELF_UPDATE=0 to turn it off. Needs the docker socket mounted
+# read-write, which the shipped docker-compose.yml now does by default too.
+# See start_self_update() and website/configuration.md.
+ALLOW_SELF_UPDATE = os.environ.get("ALLOW_SELF_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
 SELF_UPDATE_HELPER_IMAGE = os.environ.get("SELF_UPDATE_HELPER_IMAGE", "docker:cli")
+# Container/service controls (start/stop/restart, restart policy). ON by
+# default alongside self-update — set ENABLE_CONTROLS=0 to turn it off (see
+# docker-compose.readonly.yml for restoring the old fully-read-only posture,
+# sockets included). Local container/service control needs the docker socket
+# and the systemd D-Bus socket mounted read-write, which the shipped
+# docker-compose.yml now does by default. Gates every mutating route in this
+# section; read-only collection (collect_docker/collect_systemd) is unaffected.
+# See website/configuration.md.
+ENABLE_CONTROLS = os.environ.get("ENABLE_CONTROLS", "1").strip().lower() not in ("0", "false", "no", "off")
 # Split cache: once we know there's an update, the answer won't change for hours
 # so we can cache it long. But "no update found" / network errors should expire
 # sooner — otherwise a release published right after deploy stays invisible for
@@ -80,21 +90,45 @@ REAL_FS      = {"ext4", "ext3", "xfs", "btrfs", "zfs", "vfat"}
 
 app = Flask(__name__, static_url_path="/static", static_folder="static")
 
+# Phase 3.4: register API blueprints (in original @app.route declaration order)
+from backend.api.system import bp as _system_bp
+from backend.api.gpu import bp as _gpu_bp
+from backend.api.costs import bp as _costs_bp
+from backend.api.experiments import bp as _experiments_bp
+from backend.api.uptime_api import bp as _uptime_api_bp
+from backend.api.hosts_api import bp as _hosts_api_bp
+from backend.api.integrations import bp as _integrations_bp
+app.register_blueprint(_system_bp)
+app.register_blueprint(_gpu_bp)
+app.register_blueprint(_costs_bp)
+app.register_blueprint(_experiments_bp)
+app.register_blueprint(_uptime_api_bp)
+app.register_blueprint(_hosts_api_bp)
+app.register_blueprint(_integrations_bp)
+
 # ── Prometheus gauges (defined once at module level) ──────────────────────────
+def _make_gauge(name, doc, labels=None):
+    """Create a Gauge, reusing the existing one if already registered (safe for multi-import)."""
+    try:
+        return Gauge(name, doc, labels or [])
+    except ValueError:
+        from prometheus_client import REGISTRY
+        return REGISTRY._names_to_collectors.get(name) or REGISTRY._names_to_collectors.get(name + "_total")
+
 if _PROM_OK:
     _G = {
-        "gpu_vram_used":     Gauge("homelab_gpu_vram_used_mb",    "GPU VRAM used (MB)",                ["gpu"]),
-        "gpu_vram_total":    Gauge("homelab_gpu_vram_total_mb",   "GPU VRAM total (MB)",               ["gpu"]),
-        "gpu_util":          Gauge("homelab_gpu_util_pct",        "GPU utilisation (%)",               ["gpu"]),
-        "gpu_temp":          Gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
-        "gpu_power":         Gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
-        "host_cpu":          Gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
-        "host_mem_used":     Gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
-        "host_disk_used":    Gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
-        "container_state":   Gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
-        "systemd_unit":      Gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
-        "model_vram":        Gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
-        "models_installed":  Gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
+        "gpu_vram_used":     _make_gauge("homelab_gpu_vram_used_mb",    "GPU VRAM used (MB)",                ["gpu"]),
+        "gpu_vram_total":    _make_gauge("homelab_gpu_vram_total_mb",   "GPU VRAM total (MB)",               ["gpu"]),
+        "gpu_util":          _make_gauge("homelab_gpu_util_pct",        "GPU utilisation (%)",               ["gpu"]),
+        "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
+        "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
+        "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
+        "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
+        "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
+        "systemd_unit":      _make_gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
+        "model_vram":        _make_gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
+        "models_installed":  _make_gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
     }
 LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
@@ -172,6 +206,59 @@ CREATE TABLE IF NOT EXISTS maintenance_windows(
   kind TEXT NOT NULL DEFAULT '*', pattern TEXT NOT NULL DEFAULT '*',
   start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL,
   recurrence TEXT, note TEXT, created_at INTEGER NOT NULL);
+-- Phase 1.2a: per-minute and per-hour rollup tables (additive; raw tables unchanged)
+CREATE TABLE IF NOT EXISTS samples_1m (
+  ts        INTEGER PRIMARY KEY,
+  util      REAL,
+  mem_used  REAL,
+  mem_total REAL,
+  power     REAL,
+  temp      REAL,
+  cnt       INTEGER DEFAULT 1,
+  cpu       REAL,
+  ram_used  REAL,
+  ram_total REAL,
+  load1     REAL,
+  ctemp     REAL,
+  cpu_power REAL,
+  dram_power REAL
+);
+CREATE TABLE IF NOT EXISTS samples_1h (
+  ts        INTEGER PRIMARY KEY,
+  util      REAL,
+  mem_used  REAL,
+  mem_total REAL,
+  power     REAL,
+  temp      REAL,
+  cnt       INTEGER DEFAULT 1,
+  cpu       REAL,
+  ram_used  REAL,
+  ram_total REAL,
+  load1     REAL,
+  ctemp     REAL,
+  cpu_power REAL,
+  dram_power REAL
+);
+CREATE TABLE IF NOT EXISTS net_samples_1m (
+  ts        INTEGER PRIMARY KEY,
+  bytes_in  REAL,
+  bytes_out REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS net_samples_1h (
+  ts        INTEGER PRIMARY KEY,
+  bytes_in  REAL,
+  bytes_out REAL,
+  cnt       INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
+CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
+CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
+CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
@@ -195,53 +282,51 @@ def _data_dir_writable():
         return False
     return os.access(d, os.W_OK)
 
-def _open_db_connection(path):
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+from backend.db.repos.schema import (
+    open_db_connection as _open_db_connection,
+    apply_schema_migrations as _apply_schema_migrations_impl,
+    record_baseline_if_needed as _record_baseline_if_needed,
+)
+
+_EDGE_STATE_MIGRATION = """
+CREATE TABLE IF NOT EXISTS notified_keys (
+    key TEXT PRIMARY KEY,
+    armed_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS uptime_down_since (
+    check_id TEXT PRIMARY KEY,
+    since_ts INTEGER NOT NULL
+);
+"""
 
 def _apply_schema_migrations(conn):
-    conn.executescript(_DB_SCHEMA)
-    for col in _SAMPLE_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _HOST_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE hosts ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _RUNS_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _UPTIME_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE uptime_results ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    for col in _UPTIME_CHECK_MIGRATIONS:
-        try:
-            conn.execute(f"ALTER TABLE uptime_checks ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    # Migrate a legacy single instance-wide api_key (the previous design) into the
-    # api_keys table as a named key, then clear the setting — so existing clients
-    # keep working under the new multi-key model.
-    try:
-        row = conn.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()
-        legacy = (row[0] if row else "") or ""
-        if legacy:
-            h = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
-            if not conn.execute("SELECT 1 FROM api_keys WHERE key_hash=?", (h,)).fetchone():
-                conn.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
-                             "VALUES(?,?,?,?,?,?,?)",
-                             (uuid.uuid4().hex, "default (migrated)", h, legacy[:12], int(time.time()), None, None))
-            conn.execute("UPDATE settings SET value='' WHERE key='api_key'")
-    except sqlite3.OperationalError:
-        pass
+    _apply_schema_migrations_impl(conn, _DB_SCHEMA,
+                                  _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
+                                  _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
+                                  _UPTIME_CHECK_MIGRATIONS)
+    conn.executescript(_EDGE_STATE_MIGRATION)
+
+def _backfill_rollups(conn):
+    """Populate rollup tables from existing raw data (idempotent: INSERT OR IGNORE)."""
+    conn.executescript("""
+        INSERT OR IGNORE INTO samples_1m(ts,util,mem_used,mem_total,power,temp,cnt,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
+        SELECT (ts/60)*60, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*),
+               AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp), AVG(cpu_power), AVG(dram_power)
+        FROM samples GROUP BY (ts/60)*60;
+
+        INSERT OR IGNORE INTO samples_1h(ts,util,mem_used,mem_total,power,temp,cnt,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)
+        SELECT (ts/3600)*3600, AVG(util), AVG(mem_used), AVG(mem_total), AVG(power), AVG(temp), COUNT(*),
+               AVG(cpu), AVG(ram_used), AVG(ram_total), AVG(load1), AVG(ctemp), AVG(cpu_power), AVG(dram_power)
+        FROM samples GROUP BY (ts/3600)*3600;
+
+        INSERT OR IGNORE INTO net_samples_1m(ts,bytes_in,bytes_out,cnt)
+        SELECT (ts/60)*60, AVG(bytes_in), AVG(bytes_out), COUNT(*)
+        FROM net_samples GROUP BY (ts/60)*60;
+
+        INSERT OR IGNORE INTO net_samples_1h(ts,bytes_in,bytes_out,cnt)
+        SELECT (ts/3600)*3600, AVG(bytes_in), AVG(bytes_out), COUNT(*)
+        FROM net_samples GROUP BY (ts/3600)*3600;
+    """)
     conn.commit()
 
 def reopen_db():
@@ -254,6 +339,7 @@ def reopen_db():
     os.makedirs(_data_dir(), exist_ok=True)
     DB = _open_db_connection(DB_PATH)
     _apply_schema_migrations(DB)
+    _backfill_rollups(DB)
     DB_EPHEMERAL = False
 
 # Open the history DB, but never let a missing/unwritable /data mount kill the
@@ -270,6 +356,7 @@ except sqlite3.OperationalError as e:
     DB = _open_db_connection(":memory:")
     DB_EPHEMERAL = True
 _apply_schema_migrations(DB)
+_backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
@@ -343,232 +430,13 @@ def logs_since(cid, since):
         raw = b"".join(out)
     return raw.decode("utf-8", "replace")
 
-# ── Model-server probes (agnostic: append to PROBES to support a new server) ───
-def _http_json(ip, port, path, timeout=2):
-    # try/finally so a down/slow model server (common: idle servers, wrong port
-    # guesses) can't leak the TCP socket fd when request/read raises.
-    c = http.client.HTTPConnection(ip, port, timeout=timeout)
-    try:
-        c.request("GET", path); r = c.getresponse(); body = r.read()
-        status = r.status
-    finally:
-        c.close()
-    return json.loads(body) if status < 400 else None
-
-def probe_ollama(ip):
-    """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
-    fall back to the pulled catalogue (/api/tags) so the server still shows as Idle."""
-    ps = _http_json(ip, 11434, "/api/ps")
-    loaded = [(m["name"], (m.get("size_vram") or 0) / 1048576 or None)
-              for m in (ps or {}).get("models", []) if m.get("name")]
-    if loaded:
-        return loaded
-    tags = _http_json(ip, 11434, "/api/tags")
-    return [(m["name"], None) for m in (tags or {}).get("models", []) if m.get("name")]
-
-def _openai_models(*ports):
-    """Factory for the OpenAI-compatible `GET /v1/models` shape (`data[].id`), shared by
-    vLLM, llama.cpp/llama-server, LocalAI, faster-whisper-server/Speaches, koboldcpp,
-    tabbyAPI, text-generation-webui, LM Studio, xinference, … — they differ only by port.
-    Tries each candidate port until one answers with a non-empty model list."""
-    def fn(ip):
-        for p in ports:
-            d = _http_json(ip, p, "/v1/models")
-            data = (d or {}).get("data")
-            if data:
-                return [(m.get("id"), None) for m in data if m.get("id")]
-        return []
-    return fn
-
-def probe_tgi(ip):
-    """HF Text-Generation-Inference / Text-Embeddings-Inference: `GET /info` → model_id."""
-    d = _http_json(ip, 80, "/info") or _http_json(ip, 3000, "/info") or _http_json(ip, 8080, "/info")
-    return [(d["model_id"], None)] if d and d.get("model_id") else []
-
-def probe_koboldcpp(ip):
-    d = _http_json(ip, 5001, "/api/v1/model")
-    if d and d.get("result"):
-        return [(d["result"], None)]
-    return _openai_models(5001)(ip)
-
-def probe_invokeai(ip):
-    """InvokeAI v4+: `GET /api/v2/models/` → models[].name (its installed catalogue)."""
-    d = _http_json(ip, 9090, "/api/v2/models/")
-    return [(m.get("name"), None) for m in (d or {}).get("models", []) if m.get("name")]
-
-def probe_a1111(ip):
-    """AUTOMATIC1111 / SD.Next / Forge: the currently-loaded checkpoint. Kept to a single
-    entry so the server's GPU VRAM (from nvidia-smi) attributes cleanly to it."""
-    m = (_http_json(ip, 7860, "/sdapi/v1/options") or {}).get("sd_model_checkpoint")
-    return [(m, None)] if m else []
-
-def probe_whisper_asr(ip):
-    """ahmetoner/whisper-asr-webservice (Whisper / WhisperX / faster-whisper
-    engines). It has no model-list endpoint — just `/asr` — so we confirm it's up
-    via `/openapi.json` and show one Idle entry; its GPU VRAM (nvidia-smi)
-    attributes to it while it's transcribing. If something else answers here with
-    the OpenAI shape, fall back to listing its models so we don't hide it."""
-    for port in (9000, 8000):
-        info = (_http_json(ip, port, "/openapi.json") or {}).get("info") or {}
-        if "whisper" in (info.get("title", "") + " " + info.get("description", "")).lower():
-            return [("Whisper ASR webservice", None)]
-    return _openai_models(9000, 8000, 8080)(ip)
-
-def probe_triton(ip):
-    """NVIDIA Triton Inference Server: `GET /v2` returns server metadata. The live
-    model list is a POST (/v2/repository/index), so we show a single Idle entry
-    and let nvidia-smi VRAM attribute to it."""
-    d = _http_json(ip, 8000, "/v2")
-    if d and "triton" in (d.get("name", "") or "").lower():
-        return [("Triton Inference Server", None)]
-    return []
-
-def probe_wyoming(ip):
-    """Wyoming-protocol voice services (Home Assistant: wyoming-faster-whisper /
-    -whisper ASR, -piper TTS, -openwakeword). Plain TCP + JSONL, not HTTP: send a
-    `describe` event and read the `info` reply for the program/model names."""
-    for port in (10300, 10200, 10400, 10500, 10700):
-        try:
-            with socket.create_connection((ip, port), timeout=2) as sk:
-                sk.settimeout(2)
-                sk.sendall(b'{"type": "describe"}\n')
-                buf = b""
-                while b"\n" not in buf and len(buf) < 65536:
-                    chunk = sk.recv(4096)
-                    if not chunk:
-                        break
-                    buf += chunk
-                header, _, rest = buf.partition(b"\n")
-                evt = json.loads(header.decode("utf-8", "replace") or "{}")
-                if evt.get("type") != "info":
-                    continue
-                need = evt.get("data_length") or 0
-                while len(rest) < need:
-                    chunk = sk.recv(4096)
-                    if not chunk:
-                        break
-                    rest += chunk
-                data = json.loads(rest[:need].decode("utf-8", "replace")) if need else {}
-        except Exception:
-            continue
-        names = []
-        for grp in ("asr", "tts", "wake", "handle", "intent"):
-            for prog in (data.get(grp) or []):
-                got = [m.get("name") for m in (prog.get("models") or []) if m.get("name")]
-                names += got or ([prog["name"]] if prog.get("name") else [])
-        return [(n, None) for n in names] or [("Wyoming service", None)]
-    return []
-
-def probe_comfy(ip):
-    """ComfyUI: list installed checkpoints from /object_info (real model names). It has no
-    'currently loaded' concept, so checkpoints show Idle and the server's GPU VRAM
-    (nvidia-smi) attributes to the card. Falls back to a sentinel if it's up but bare."""
-    if _http_json(ip, 8188, "/system_stats") is None:
-        return []
-    info = _http_json(ip, 8188, "/object_info/CheckpointLoaderSimple") or {}
-    try:
-        names = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
-    except Exception:
-        names = []
-    return [(n, None) for n in names] or [("ComfyUI (no checkpoints)", None)]
-
-# (key-substring → probe). The key is matched against the container's image AND name,
-# first match wins, so order specific→generic. Most servers speak the OpenAI
-# /v1/models shape and differ only by their default internal port.
-PROBES = [
-    ("ollama",                     probe_ollama),
-    ("vllm",                       _openai_models(8000)),
-    ("text-generation-inference",  probe_tgi),
-    ("text-embeddings-inference",  probe_tgi),
-    ("lorax",                      probe_tgi),
-    # ASR / speech — keep the specific whisper-asr-webservice + WhisperX keys ahead
-    # of the generic "whisper" so they don't fall through to the OpenAI probe.
-    ("whisper-asr-webservice",     probe_whisper_asr),
-    ("asr-webservice",             probe_whisper_asr),
-    ("whisperx",                   probe_whisper_asr),
-    ("whisper-asr",                probe_whisper_asr),
-    ("faster-whisper",             _openai_models(8000)),
-    ("speaches",                   _openai_models(8000)),
-    ("whisper",                    _openai_models(8000, 9000)),
-    ("wyoming",                    probe_wyoming),
-    ("openedai-speech",            _openai_models(8000)),
-    ("localai",                    _openai_models(8080)),
-    ("local-ai",                   _openai_models(8080)),
-    ("llama.cpp",                  _openai_models(8080, 8000)),
-    ("llama-server",               _openai_models(8080, 8000)),
-    ("llamacpp",                   _openai_models(8080, 8000)),
-    ("ggml",                       _openai_models(8080, 8000)),
-    ("koboldcpp",                  probe_koboldcpp),
-    ("tabbyapi",                   _openai_models(5000)),
-    ("exllama",                    _openai_models(5000)),
-    ("text-generation-webui",      _openai_models(5000)),
-    ("oobabooga",                  _openai_models(5000)),
-    ("lmstudio",                   _openai_models(1234)),
-    ("lm-studio",                  _openai_models(1234)),
-    ("xinference",                 _openai_models(9997)),
-    ("xorbits",                    _openai_models(9997)),
-    ("aphrodite",                  _openai_models(2242)),
-    ("mistral-rs",                 _openai_models(1234, 8080)),
-    ("sglang",                     _openai_models(30000, 8000)),
-    ("ramalama",                   _openai_models(8080, 8000)),
-    ("nexa",                       _openai_models(8000)),
-    ("openllm",                    _openai_models(3000, 8000)),
-    ("litellm",                    _openai_models(4000)),
-    ("gpustack",                   _openai_models(80, 8080)),
-    ("cortex",                     _openai_models(39281, 1337)),
-    ("janhq",                      _openai_models(1337)),
-    ("triton",                     probe_triton),
-    ("infinity",                   _openai_models(7997)),
-    ("invokeai",                   probe_invokeai),
-    ("invoke-ai",                  probe_invokeai),
-    ("automatic1111",              probe_a1111),
-    ("stable-diffusion-webui",     probe_a1111),
-    ("sd-webui",                   probe_a1111),
-    ("sdnext",                     probe_a1111),
-    ("comfyui",                    probe_comfy),
-]
-
-def _match_probe(ct):
-    """Return the probe fn for a container whose image/name matches a known server, else None."""
-    img, name = ct.get("image", "").lower(), ct.get("name", "").lower()
-    for key, fn in PROBES:
-        if key in img or key in name:
-            return fn
-    return None
-
-def _match_probe_key(ct):
-    """Return the PROBES key (provider id, e.g. 'ollama', 'vllm', 'lmstudio') for a
-    container whose image/name matches a known server, else None. Same match order
-    as _match_probe — kept as a separate lookup so callers that only need the
-    provider label don't have to carry the fn around."""
-    img, name = ct.get("image", "").lower(), ct.get("name", "").lower()
-    for key, fn in PROBES:
-        if key in img or key in name:
-            return key
-    return None
-
-CATALOG_MAX = 15   # max idle "available" models listed per server before collapsing to a count
-
-def probe_models(ct):
-    fn = _match_probe(ct)
-    if not fn:
-        return []
-    # Host-networked servers have no per-container IP; the hub shares the host net
-    # namespace, so localhost reaches them on their published/default port.
-    ip = ct.get("ip") or "127.0.0.1"
-    try:
-        found = [(m, v) for m, v in fn(ip) if m]
-    except Exception:
-        return []
-    loaded = [x for x in found if x[1] is not None]
-    idle   = [x for x in found if x[1] is None]
-    # Collapse an oversized idle catalogue (faster-whisper, for one, exposes its full
-    # upstream registry of 400+ models) into a single summary row so it can't flood
-    # the panel. Loaded models and small catalogues (e.g. your pulled Ollama models)
-    # are kept verbatim.
-    if len(idle) > CATALOG_MAX:
-        idle = [(f"{len(idle)} models available", None)]
-    return loaded + idle
+# Phase 3.1: model-server probes moved to backend/probes/ — re-exported for backward compat
+from backend.probes import (
+    _http_json, _openai_models,
+    probe_ollama, probe_tgi, probe_koboldcpp, probe_invokeai, probe_a1111,
+    probe_whisper_asr, probe_triton, probe_wyoming, probe_comfy,
+    PROBES, _match_probe, _match_probe_key, CATALOG_MAX, probe_models,
+)
 
 # ── Model intelligence: per-model metadata + live serving telemetry ───────────
 # Two passive, no-dep enrichments that make the AI Models tab authoritative:
@@ -1673,6 +1541,30 @@ def _refresh_docker_enrich(running_ids):
                 out.setdefault(cid, {})["mem_bytes"] = mem
     return out
 
+# Restart policy isn't in the /containers/json list payload — only a full
+# inspect has it. That's an extra round-trip per container, so it's only ever
+# fetched when ENABLE_CONTROLS is on (nothing in the read-only path pays for it).
+_docker_policy = {"data": {}, "at": 0}
+
+def _container_restart_policy(cid):
+    try:
+        d = json.loads(_docker(f"/containers/{cid}/json"))
+    except Exception:
+        return None
+    rp = (d.get("HostConfig") or {}).get("RestartPolicy") or {}
+    return {"name": rp.get("Name") or "no", "max_retry": rp.get("MaximumRetryCount") or 0}
+
+def _refresh_docker_policies(ids):
+    """Restart policy for every known container (stopped ones too — you may
+    want to fix a policy before ever starting it), parallel like _refresh_docker_enrich."""
+    out = {}
+    if ids:
+        with ThreadPoolExecutor(max_workers=min(8, len(ids))) as ex:
+            for cid, rp in zip(ids, ex.map(_container_restart_policy, ids)):
+                if rp is not None:
+                    out[cid] = rp
+    return out
+
 def _dir_size(host_path, timeout=120):
     """Apparent size (bytes) of a host path, read through the read-only HOST_ROOT
     bind mount — i.e. `du -sb` as the host would see it. Returns None when the
@@ -1802,17 +1694,25 @@ def collect_docker():
         _docker_enrich["data"] = _refresh_docker_enrich(running_ids)
         _docker_enrich["at"] = time.time()
     _maybe_refresh_docker_disk()   # background; first pass leaves disk_bytes None until it lands
+    # Restart policy only matters to the (opt-in) controls UI — skip the extra
+    # inspect round-trip entirely when controls are off.
+    if ENABLE_CONTROLS and time.time() - _docker_policy["at"] > _DOCKER_ENRICH_TTL:
+        _docker_policy["data"] = _refresh_docker_policies([c["id"] for c in items])
+        _docker_policy["at"] = time.time()
     # Per-container GPU VRAM, attributed by the GPU sampler (nvidia-smi
     # compute-apps → /proc/<pid>/cgroup → container name). procs is in MB and
     # keyed by service name (== container name for container-owned PIDs); host /
     # unattributed PIDs use "host:"/"pid:" keys that never match a container.
     vram_mb = {p.get("service"): p.get("mem") for p in (LATEST.get("procs") or [])}
+    self_id = (os.environ.get("HOSTNAME") or "")[:12]
     for c in items:
         e = _docker_enrich["data"].get(c["id"]) or {}
         c["mem_bytes"]  = e.get("mem_bytes")
         vmb = vram_mb.get(c["name"])
         c["vram_bytes"] = round(vmb * 1048576) if vmb else None
         c["disk_bytes"] = _docker_disk["data"].get(c["id"])
+        c["restart_policy"] = _docker_policy["data"].get(c["id"]) if ENABLE_CONTROLS else None
+        c["is_self"] = bool(self_id) and c["id"] == self_id
     rank = {"crit": 0, "warn": 1, "ok": 2, "info": 3}
     items.sort(key=lambda c: (rank.get(c["status"], 9), c["name"].lower()))
     return {"available": True, "containers": items,
@@ -2037,6 +1937,34 @@ def collect_systemd():
     return {"available": True, "services": shown,
             "summary": {"loaded": len(services), "running": running,
                         "failed": failed, "admin": len(admin)}}
+
+_SYSTEMD_UNIT_METHODS = {"start": "StartUnit", "stop": "StopUnit", "restart": "RestartUnit"}
+
+def systemd_unit_action(unit, action):
+    """Start/stop/restart a *local* systemd unit over the same D-Bus socket
+    collect_systemd() reads from — a fresh short-lived connection per call.
+    Returns (ok, error). The container runs as root (no USER in the Dockerfile),
+    so this either works outright (root is implicitly privileged on the system
+    bus, no polkit prompt) or fails with the D-Bus/systemd's own error text —
+    there's no "are we allowed" pre-check worth doing, the attempt IS the check."""
+    try:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
+    except Exception:
+        return False, "jeepney not installed in the image."
+    try:
+        conn = open_dbus_connection(bus="SYSTEM")
+    except Exception as e:
+        return False, f"Host D-Bus socket not reachable: {e}"
+    try:
+        mgr = DBusAddress("/org/freedesktop/systemd1", bus_name="org.freedesktop.systemd1",
+                          interface="org.freedesktop.systemd1.Manager")
+        conn.send_and_get_reply(new_method_call(mgr, _SYSTEMD_UNIT_METHODS[action], "ss", (unit, "replace")))
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
 
 def build_overview(now, docker, systemd):
     """One status card per subsystem for the Overview tab. New monitors append here."""
@@ -3088,9 +3016,9 @@ def _parse_ssh_target(t):
     return g["user"], g["host"], port
 
 def list_hosts():
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        rows = DB.execute("SELECT name, ssh_target, tags, added_at, last_check_at, last_check_json, "
-                          "poll_timeout, poll_calibrated_at FROM hosts ORDER BY added_at").fetchall()
+        rows = _hosts_repo.list_all(conn=DB)
     out = []
     for name, target, tags, added, checked, blob, ptimeout, pcal in rows:
         try:
@@ -3106,29 +3034,29 @@ def list_hosts():
     return out
 
 def add_host(name, ssh_target, tags=""):
+    from backend.db.repos import hosts as _hosts_repo
     if not _HOST_NAME_RE.match(name or ""):
         return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
     if _parse_ssh_target(ssh_target) is None:
         return None, "SSH target must look like user@host or user@host:port."
     with LOCK:
         try:
-            DB.execute("INSERT INTO hosts(name, ssh_target, tags, added_at) VALUES(?,?,?,?)",
-                       (name, ssh_target.strip(), (tags or "").strip(), int(time.time())))
-            DB.commit()
+            _hosts_repo.insert(name, ssh_target.strip(), (tags or "").strip(), int(time.time()), conn=DB)
         except sqlite3.IntegrityError:
             return None, f"A host named '{name}' already exists."
     return {"name": name, "ssh_target": ssh_target.strip()}, None
 
 def delete_host(name):
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        cur = DB.execute("DELETE FROM hosts WHERE name=?", (name,))
-        DB.commit()
-    return cur.rowcount > 0
+        rowcount = _hosts_repo.delete(name, conn=DB)
+    return rowcount > 0
 
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
     new target."""
+    from backend.db.repos import hosts as _hosts_repo
     fields, params = [], []
     if ssh_target is not None:
         if _parse_ssh_target(ssh_target) is None:
@@ -3143,13 +3071,11 @@ def update_host(name, ssh_target=None, tags=None):
         fields += ["last_check_at=NULL", "last_check_json=NULL"]
     params.append(name)
     with LOCK:
-        cur = DB.execute(f"UPDATE hosts SET {','.join(fields)} WHERE name=?", params)
-        DB.commit()
-    if cur.rowcount == 0:
+        rowcount = _hosts_repo.update(','.join(fields), params, conn=DB)
+    if rowcount == 0:
         return None, f"No host named '{name}'."
     with LOCK:
-        row = DB.execute("SELECT name, ssh_target, tags FROM hosts WHERE name=?",
-                         (name,)).fetchone()
+        row = _hosts_repo.get(name, conn=DB)
     return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
 
 # ── LAN discovery (suggest hosts instead of asking the user to type) ───────────
@@ -3275,10 +3201,9 @@ def discover_lan(port=22, timeout=0.4, max_workers=64):
     return out
 
 def _record_check(name, result):
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        DB.execute("UPDATE hosts SET last_check_at=?, last_check_json=? WHERE name=?",
-                   (int(time.time()), json.dumps(result), name))
-        DB.commit()
+        _hosts_repo.update_check(name, int(time.time()), json.dumps(result), conn=DB)
 
 # ── Per-host metric polling (Issue #35 slice 2) ───────────────────────────────
 # Every INTERVAL seconds the background poller pipes probe.py into
@@ -3324,34 +3249,8 @@ POLL_CALIBRATION_CEILING = 120   # safety ceiling for the learning probe (second
 POLL_TIMEOUT_MAX        = 90      # cap on any learned budget
 POLL_TIMEOUT_HEADROOM   = 1.5     # learned = measured * headroom (+ a few seconds)
 
-def probe_host_metrics(user, host, port, family="linux", timeout=HOST_POLL_TIMEOUT):
-    """Run the right probe on the remote via SSH stdin. Returns
-    (data, error, elapsed_ms, timed_out). Windows hosts get the PowerShell probe;
-    everything else gets probe.py — both emit the same JSON shape, so the caller
-    and the UI don't branch on OS. `timed_out` is True only when ssh hit the
-    timeout (rc 124), which is what the adaptive calibration keys off (#99)."""
-    if family == "windows":
-        if not _PROBE_PS_SCRIPT:
-            return None, "probe.ps1 not packaged in this image", 0, False
-        rc, out, err, ms = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-                                           _PROBE_PS_SCRIPT, timeout=timeout)
-    else:
-        if not _PROBE_SCRIPT:
-            return None, "probe.py not packaged in this image", 0, False
-        rc, out, err, ms = _ssh_with_stdin(user, host, port, "python3 -",
-                                           _PROBE_SCRIPT, timeout=timeout)
-    if rc != 0:
-        return None, _clean_ssh_err(err, out, rc), ms, rc == 124
-    # lstrip a UTF-8 BOM: PowerShell over SSH can prepend one, which str.strip()
-    # won't remove and which would otherwise make json.loads choke on char 0.
-    out = (out or "").lstrip("﻿").strip()
-    if not out:
-        return None, "empty response from probe", ms, False
-    try:
-        return json.loads(out), None, ms, False
-    except Exception as e:
-        return None, f"bad JSON from probe: {e}", ms, False
-
+# Phase 3.1: moved to backend/probes/ — re-exported for backward compat
+from backend.probes import probe_host_metrics
 def _local_now_snapshot():
     """Build a 'host' block for the hub itself, matching the probe shape so
     the All-hosts table and the per-host Host tab can render local and remote
@@ -3394,15 +3293,17 @@ def _local_now_snapshot():
 # ── Adaptive per-host poll timeout (issue #99) ────────────────────────────────
 def _host_poll_state(name):
     """(timeout, fails) for a host — timeout falls back to the global default."""
+    from backend.db.repos import hosts as _hosts_repo
     try:
         with LOCK:
-            row = DB.execute("SELECT poll_timeout, poll_fails FROM hosts WHERE name=?", (name,)).fetchone()
+            row = _hosts_repo.get_poll_state(name, conn=DB)
     except Exception:
         return HOST_POLL_TIMEOUT, 0
     t = row[0] if row and row[0] else None
     return (int(t) if t else HOST_POLL_TIMEOUT), (int(row[1]) if row and row[1] else 0)
 
 def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
+    from backend.db.repos import hosts as _hosts_repo
     sets, params = [], []
     if timeout is not None:   sets.append("poll_timeout=?");       params.append(int(timeout))
     if fails is not None:      sets.append("poll_fails=?");          params.append(int(fails))
@@ -3412,8 +3313,7 @@ def _host_poll_save(name, timeout=None, fails=None, calibrated=False):
     params.append(name)
     try:
         with LOCK:
-            DB.execute(f"UPDATE hosts SET {','.join(sets)} WHERE name=?", params)
-            DB.commit()
+            _hosts_repo.save_poll_state(','.join(sets), params, conn=DB)
     except Exception as e:
         print("host poll-state save error:", e, flush=True)
 
@@ -3501,26 +3401,8 @@ def _poll_one_host(h):
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
 
-def host_poller():
-    """Loop: probe every registered host whose last Test was healthy. Hosts are
-    polled *concurrently* so one slow/timing-out remote can't delay the others and
-    age their rows out to a false 'offline' (the flapping bug). A per-host adaptive
-    timeout (issue #99) still isolates slow remotes — they self-calibrate to a
-    working budget instead of going permanently dark, while fast hosts stay at the
-    15s default. Errors are kept on the cache row so the UI can show a last error."""
-    # Stagger the first run a touch so we don't fire before the app is fully up.
-    time.sleep(2)
-    while True:
-        try:
-            hosts = list_hosts()
-            if hosts:
-                # Each host gets its own thread for the cycle, so the wall-clock
-                # period is the slowest single probe, not the sum of all of them.
-                with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as ex:
-                    list(ex.map(_poll_one_host, hosts))
-        except Exception as e:
-            print("host_poller error:", e, flush=True)
-        time.sleep(INTERVAL)
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import host_poller
 
 _SSH_BASE_ARGS = [
     "-i", SSH_KEY,
@@ -3769,221 +3651,20 @@ def _summarize(checks):
     else:            overall = "ok"
     return {"overall": overall, **by}
 
-def probe_host(name):
-    """Run the capability checklist against a registered host. Each check returns
-    {id, label, status: ok|warn|fail|info, detail, remedy?}. The full result is
-    cached on the host row so the UI can show the last-known state even when
-    the user hasn't re-tested."""
-    with LOCK:
-        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
-    if not row:
-        return None
-    parsed = _parse_ssh_target(row[0])
-    if not parsed:
-        result = {"checks": [{"id": "parse", "label": "SSH target", "status": "fail",
-                              "detail": f"could not parse '{row[0]}'"}]}
-        result["summary"] = _summarize(result["checks"])
-        _record_check(name, result)
-        return result
-    user, host, port = parsed
-    _ensure_ssh_keypair()
-    checks = []
-    os_info = {}
-
-    # 1) SSH connect.  Pre-probe TCP-22 so we can give a clear "port closed"
-    # answer instead of letting ssh time out cryptically.
-    tcp_ok, tcp_err = _tcp_probe(host, port)
-    if not tcp_ok:
-        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
-                "detail": f"port {port} not reachable: {tcp_err}",
-                "debug": tcp_err,
-                "remedy": _remedy_sshd_check()}
-        checks.append(item)
-        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
-        _record_check(name, result)
-        return result
-
-    rc, out, err, ms = _ssh(user, host, port, "echo ok", timeout=SSH_CONNECT_TIMEOUT + 2)
-    if rc == 0 and out == "ok":
-        checks.append({"id": "connect", "label": "SSH reachable",
-                       "status": "ok", "detail": f"port {port}, {ms} ms"})
-    else:
-        msg = _clean_ssh_err(err, out, rc)
-        hint = None
-        e = (err or "")
-        if "Permission denied" in e:
-            hint = _remedy_pubkey(user)
-        elif "Host key verification failed" in e:
-            hint = {"where": "on the hub (this container)",
-                    "cmd": f"# Clear the saved host key and re-test:\nrm {SSH_KNOWN_HOSTS}"}
-        elif "Could not resolve hostname" in e or "Name or service not known" in e:
-            hint = {"where": "on the hub (this container)",
-                    "cmd": "# Hostname did not resolve. Try the IP, or check the container's DNS."}
-        elif rc == 124:
-            hint = _remedy_sshd_down(None)
-        item = {"id": "connect", "label": "SSH reachable", "status": "fail",
-                "detail": msg, "debug": (err or "")[:2000]}
-        if hint: item["remedy"] = hint
-        checks.append(item)
-        result = {"checks": checks, "summary": _summarize(checks), "os": {}}
-        _record_check(name, result)
-        return result
-
-    # SSH connected — detect the remote OS so the rest of the checklist can
-    # produce remedies that match the actual distro (and so the UI can show an
-    # OS badge per host).
-    os_info = _detect_os(user, host, port)
-    if (os_info.get("family") or "") == "macos":
-        # Be honest about limitations: macOS doesn't expose /proc, doesn't have
-        # systemd, doesn't expose the Docker socket the same way, and has no
-        # nvidia-smi. We still record the OS but mark the rest as info.
-        checks.append({"id": "os", "label": "Detected OS", "status": "info",
-                       "detail": os_info.get("label") or "macOS"})
-        checks.append({"id": "proc",   "label": "/proc readable",   "status": "info",
-                       "detail": "Linux-only — macOS doesn't expose /proc"})
-        checks.append({"id": "docker", "label": "Docker socket",    "status": "info",
-                       "detail": "macOS Docker socket flow not supported in v0"})
-        checks.append({"id": "dbus",   "label": "systemd D-Bus",    "status": "info",
-                       "detail": "macOS uses launchd, not systemd"})
-        checks.append({"id": "nvidia", "label": "nvidia-smi",       "status": "info",
-                       "detail": "no NVIDIA driver path on macOS"})
-        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
-        _record_check(name, result)
-        return result
-
-    if (os_info.get("family") or "") == "windows":
-        # Windows host: same checklist, Windows-native checks. All run through
-        # PowerShell-over-stdin so cmd.exe quoting can't bite us. The probe is the
-        # PowerShell one (probe.ps1); these checks just gate it and drive the UI.
-        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
-                       "detail": os_info.get("label") or "Windows"})
-        # /proc analogue: can we read host state via WMI/CIM?
-        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-            b"\"up=$([int]((Get-Date)-(Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds)\"",
-            timeout=10)
-        if out and "up=" in out:
-            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "ok",
-                           "detail": f"uptime {out.strip().split('up=')[-1][:12]}s"})
-        else:
-            checks.append({"id": "proc", "label": "Host readable (WMI)", "status": "warn",
-                           "detail": (err or "no reply from PowerShell")[:160]})
-        # Docker on Windows: first check the CLI is even on PATH — only THEN run
-        # it. Previously we ran `docker version` straight away and treated any
-        # failure (missing CLI *or* a daemon-side error) as "not installed".
-        # But Docker Desktop's client/engine API-version handshake can itself
-        # fail with a message like "request returned 500 Internal Server Error
-        # ... check if the server supports the requested API version" — that
-        # text contains the word "error", so it used to get misclassified as
-        # "CLI not on PATH" even though Docker is very much installed, just
-        # unhealthy. Split "CLI absent" (info) from "CLI present but the
-        # daemon didn't respond cleanly" (warn) like the Linux path already
-        # does for permission-denied vs. not-installed.
-        _, out, err, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-            b"if(-not (Get-Command docker -EA SilentlyContinue)){Write-Output 'DOCKER_ABSENT'}else{"
-            b"$v=(docker version --format '{{.Server.Version}}' 2>&1);"
-            b"if($LASTEXITCODE -eq 0){Write-Output \"DOCKER_OK:$v\"}else{Write-Output \"DOCKER_ERR:$v\"}}",
-            timeout=12)
-        line = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
-        if line.startswith("DOCKER_OK:") and "." in line:
-            checks.append({"id": "docker", "label": "Docker", "status": "ok",
-                           "detail": f"server v{line.split(':', 1)[1].strip()}"})
-        elif line.startswith("DOCKER_ERR:"):
-            checks.append({"id": "docker", "label": "Docker", "status": "warn",
-                           "detail": f"Docker is installed on {name} but the daemon didn't respond cleanly: "
-                                     f"{line.split(':', 1)[1].strip()[:160]}",
-                           "remedy": _remedy_docker_windows_daemon()})
-        else:
-            checks.append({"id": "docker", "label": "Docker", "status": "info",
-                           "detail": "Docker CLI not found on PATH — container panel hidden for this host"})
-        # systemd D-Bus analogue: Windows services are always queryable.
-        checks.append({"id": "dbus", "label": "Windows services", "status": "ok",
-                       "detail": "Get-Service available"})
-        # nvidia-smi works on Windows too when the driver is installed.
-        _, out, _, _ = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
-            b"if(Get-Command nvidia-smi -EA SilentlyContinue){(nvidia-smi --query-gpu=name --format=csv,noheader -i 0)}else{'missing'}",
-            timeout=10)
-        nv = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
-        if nv and nv != "missing":
-            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": nv[:120]})
-        else:
-            checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
-                           "detail": "not found — GPU panel will be hidden for this host"})
-        result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
-        _record_check(name, result)
-        return result
-
-    if os_info.get("label"):
-        checks.append({"id": "os", "label": "Detected OS", "status": "ok",
-                       "detail": os_info["label"]})
-
-    # 2) /proc readable
-    rc, out, err, _ = _ssh(user, host, port, "head -n1 /proc/uptime 2>&1")
-    if rc == 0 and out:
-        try:
-            up = float(out.split()[0])
-            detail = f"uptime {int(up)}s"
-        except Exception:
-            detail = out[:60]
-        checks.append({"id": "proc", "label": "/proc readable", "status": "ok", "detail": detail})
-    else:
-        checks.append({"id": "proc", "label": "/proc readable", "status": "warn",
-                       "detail": (err or "unexpected reply")[:160]})
-
-    # 3) Docker socket
-    rc, out, err, _ = _ssh(user, host, port,
-                           "docker version --format '{{.Server.Version}}' 2>&1 || true")
-    out_l = (out or "").lower()
-    err_l = (err or "").lower()
-    if rc == 0 and out and not any(s in out_l for s in
-                                   ("permission denied", "cannot connect", "error", "command not found")):
-        checks.append({"id": "docker", "label": "Docker socket", "status": "ok",
-                       "detail": f"server v{out}"})
-    elif "permission denied" in out_l or "permission denied" in err_l:
-        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
-                       "detail": f"permission denied — '{user}' not in the docker group",
-                       "remedy": _remedy_docker_group(user, os_info)})
-    elif "command not found" in out_l or "command not found" in err_l or out_l == "":
-        checks.append({"id": "docker", "label": "Docker socket", "status": "info",
-                       "detail": "Docker not installed — container panel will be hidden for this host"})
-    else:
-        checks.append({"id": "docker", "label": "Docker socket", "status": "warn",
-                       "detail": (out or err or "unknown error")[:160]})
-
-    # 4) systemd D-Bus
-    _, out, _, _ = _ssh(user, host, port,
-                        "[ -S /run/dbus/system_bus_socket ] && echo ok || echo missing")
-    if out == "ok":
-        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "ok",
-                       "detail": "/run/dbus/system_bus_socket present"})
-    else:
-        checks.append({"id": "dbus", "label": "systemd D-Bus", "status": "info",
-                       "detail": "not present — services panel will be hidden for this host"})
-
-    # 5) nvidia-smi
-    _, out, _, _ = _ssh(user, host, port,
-                        "command -v nvidia-smi >/dev/null && "
-                        "nvidia-smi --query-gpu=name --format=csv,noheader -i 0 2>/dev/null | head -1 || echo missing")
-    if out and out != "missing":
-        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "ok", "detail": out[:120]})
-    else:
-        checks.append({"id": "nvidia", "label": "nvidia-smi", "status": "info",
-                       "detail": "not found — GPU panel will be hidden for this host"})
-
-    result = {"checks": checks, "summary": _summarize(checks), "os": os_info}
-    _record_check(name, result)
-    return result
-
+# Phase 3.1: moved to backend/probes/ — re-exported for backward compat
+from backend.probes import probe_host
 def run_on_host(name, cmd, sudo_password=None):
     """Execute `cmd` on a registered host. If `sudo_password` is provided, the
     whole command is wrapped in `sudo -S -p '' bash -c <cmd>` and the password
     is piped via stdin to sudo on the remote — it never appears in argv on
     either the local or remote side, and we never log it. Returns:
     {ok, exit_code, stdout, stderr, ms}."""
+    from backend.db.repos import hosts as _hosts_repo
     with LOCK:
-        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
-    if not row:
+        ssh_target = _hosts_repo.get_ssh_target(name, conn=DB)
+    if not ssh_target:
         return None
-    parsed = _parse_ssh_target(row[0])
+    parsed = _parse_ssh_target(ssh_target)
     if not parsed:
         return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
     user, host, port = parsed
@@ -4002,6 +3683,33 @@ def run_on_host(name, cmd, sudo_password=None):
     if err:
         err = "\n".join(ln for ln in err.splitlines()
                         if "incorrect password" not in ln.lower() or True)
+    return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
+
+def _ps_single_quote(s):
+    """Escape a value for embedding in a single-quoted PowerShell string —
+    doubling an embedded `'` is the whole rule (single-quoted PS strings don't
+    interpret $ or backticks), same idea as shlex.quote for POSIX shells."""
+    return "'" + (s or "").replace("'", "''") + "'"
+
+def run_on_host_windows(name, ps_script):
+    """Execute a PowerShell script on a registered Windows host, piped over SSH
+    stdin exactly like the probe.ps1 fetch (_WIN_PS_CMD) — just a different
+    script. There's no sudo/elevation concept here: whether the command
+    succeeds depends on which authorized_keys file got the hub's pubkey during
+    onboarding (a plain user's vs. administrators_authorized_keys) — that's a
+    Windows OpenSSH behaviour we don't control, so an elevation failure just
+    surfaces as the remote's own 'Access is denied' in stderr rather than
+    something we predict up front. Returns {ok, exit_code, stdout, stderr, ms}."""
+    with LOCK:
+        row = DB.execute("SELECT ssh_target FROM hosts WHERE name=?", (name,)).fetchone()
+    if not row:
+        return None
+    parsed = _parse_ssh_target(row[0])
+    if not parsed:
+        return {"ok": False, "exit_code": -1, "stdout": "", "stderr": "Bad SSH target.", "ms": 0}
+    user, host, port = parsed
+    rc, out, err, ms = _ssh_with_stdin(user, host, port, _WIN_PS_CMD,
+                                       ps_script.encode("utf-8"), timeout=30)
     return {"ok": rc == 0, "exit_code": rc, "stdout": out, "stderr": err, "ms": ms}
 
 # Generate the hub keypair eagerly so /api/hub/pubkey is instant on first hit.
@@ -4048,10 +3756,11 @@ SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "s
 
 def get_settings():
     """Return the full settings dict (defaults + persisted overrides)."""
+    from backend.db.repos import settings as _settings_repo
     out = dict(SETTING_DEFAULTS)
     try:
         with LOCK:
-            rows = DB.execute("SELECT key, value FROM settings").fetchall()
+            rows = _settings_repo.get_all(conn=DB)
         for k, v in rows:
             if k in SETTING_DEFAULTS:
                 out[k] = v
@@ -4153,6 +3862,8 @@ _UPTIME_FAIL_MAX     = 10      # cap on the confirm-after threshold
 _UPTIME_UA = "HomeLab-Monitor uptime check"
 _uptime_due = {}               # check_id -> next monotonic due time (scheduler state)
 _uptime_down_since = {}        # check_id -> wall-clock ts the current DOWN streak began
+from backend.db.repos import edge_state as _edge_state_repo
+_uptime_down_since.update({row[0]: row[1] for row in _edge_state_repo.load_down_since(conn=DB)})
 
 def _uptime_row_to_dict(r):
     cols = ("id", "label", "type", "target", "interval_sec", "timeout_sec",
@@ -4173,11 +3884,9 @@ def _redact_target(s):
     return _CRED_RE.sub(r"\1***:***@", s or "")
 
 def list_uptime_checks():
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute(
-            "SELECT id,label,type,target,interval_sec,timeout_sec,expected_status,"
-            "alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public "
-            "FROM uptime_checks ORDER BY created_at").fetchall()
+        rows = _uptime_repo.list_checks_full(conn=DB)
     return [_uptime_row_to_dict(r) for r in rows]
 
 def _parse_host_port(target):
@@ -4288,26 +3997,24 @@ def _validate_uptime_check(body):
             "public": 1 if body.get("public") else 0}, None
 
 def create_uptime_check(body):
+    from backend.db.repos import uptime as _uptime_repo
     clean, err = _validate_uptime_check(body)
     if err:
         return None, err
     cid = uuid.uuid4().hex
     with LOCK:
-        DB.execute(
-            "INSERT INTO uptime_checks(id,label,type,target,interval_sec,timeout_sec,"
-            "expected_status,alerts_enabled,fail_threshold,latency_warn_ms,enabled,created_at,public) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
-             clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
-             clean["public"]))
-        DB.commit()
+        _uptime_repo.insert_check_full(
+            cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
+            clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
+            clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], int(time.time()),
+            clean["public"], conn=DB)
     _uptime_due.pop(cid, None)   # probe promptly on next scheduler pass
     return cid, None
 
 def update_uptime_check(cid, body):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        exists = DB.execute("SELECT 1 FROM uptime_checks WHERE id=?", (cid,)).fetchone()
+        exists = _uptime_repo.check_exists(cid, conn=DB)
     if not exists:
         return False, "not found"
     if not body:
@@ -4321,31 +4028,30 @@ def update_uptime_check(cid, body):
         if "public" in body:
             sets.append("public=?"); vals.append(1 if body.get("public") else 0)
         with LOCK:
-            DB.execute(f"UPDATE uptime_checks SET {','.join(sets)} WHERE id=?", (*vals, cid))
-            DB.commit()
+            _uptime_repo.update_check_fields(','.join(sets), vals, cid, conn=DB)
         return True, None
     clean, err = _validate_uptime_check(body)
     if err:
         return False, err
     with LOCK:
-        DB.execute(
-            "UPDATE uptime_checks SET label=?,type=?,target=?,interval_sec=?,timeout_sec=?,"
-            "expected_status=?,alerts_enabled=?,fail_threshold=?,latency_warn_ms=?,enabled=?,public=? WHERE id=?",
-            (clean["label"], clean["type"], clean["target"], clean["interval_sec"],
-             clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
-             clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"], cid))
-        DB.commit()
+        _uptime_repo.update_check_full(
+            cid, clean["label"], clean["type"], clean["target"], clean["interval_sec"],
+            clean["timeout_sec"], clean["expected_status"], clean["alerts_enabled"],
+            clean["fail_threshold"], clean["latency_warn_ms"], clean["enabled"], clean["public"],
+            conn=DB)
     _uptime_due.pop(cid, None)   # re-probe with new config promptly
     return True, None
 
 def delete_uptime_check(cid):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        cur = DB.execute("DELETE FROM uptime_checks WHERE id=?", (cid,))
-        DB.execute("DELETE FROM uptime_results WHERE check_id=?", (cid,))
-        DB.commit()
+        rowcount = _uptime_repo.delete_check_and_results(cid, conn=DB)
     _uptime_due.pop(cid, None)
     _uptime_down_since.pop(cid, None)
-    return cur.rowcount > 0
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
+    _edge_state_repo.clear_down_since(cid, conn=_app.DB)
+    return rowcount > 0
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface redirects as HTTPError so probe_http counts/bounds them itself."""
@@ -4377,7 +4083,6 @@ def _http_probe_once(target, timeout, method):
     return last_code
 
 
-
 def _tls_cert_days(host, port, timeout):
     """Return (days_remaining, expires_at_ts) or (None, None)."""
     import ssl, datetime, socket
@@ -4407,43 +4112,8 @@ def _tls_cert_days(host, port, timeout):
         return None, None
 
 
-def probe_http(target, timeout, expected=None):
-    """GET the URL, following ≤ _UPTIME_MAX_REDIRECTS redirects. Returns
-    (up, latency_ms, code, err). up = connected AND status matches expected (or any
-    2xx/3xx if expected unset). Never raises; bounded by `timeout`. The error string
-    is redacted of any embedded credentials before it leaves here."""
-    start = time.monotonic()
-    try:
-        try:
-            code = _http_probe_once(target, timeout, "GET")
-        except urllib.error.HTTPError as he:
-            code = he.code            # a 4xx/5xx still answered — that's a real status
-        latency = round((time.monotonic() - start) * 1000, 1)
-        if expected is not None:
-            up = (code == expected)
-        else:
-            up = (200 <= code < 400)
-        return up, latency, code, (None if up else f"HTTP {code}")
-    except Exception as e:
-        latency = round((time.monotonic() - start) * 1000, 1)
-        return False, latency, None, _redact_target(str(e))[:200]
-
-def probe_tcp(target, timeout):
-    """socket.create_connection to host:port, bounded by `timeout`. up = connects.
-    Returns (up, latency_ms, None, err). Never raises."""
-    start = time.monotonic()
-    host, port = _parse_host_port(target)
-    if host is None:
-        return False, None, None, "bad host:port"
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            latency = round((time.monotonic() - start) * 1000, 1)
-            return True, latency, None, None
-    except Exception as e:
-        latency = round((time.monotonic() - start) * 1000, 1)
-        return False, latency, None, _redact_target(str(e))[:200]
-
-
+# Phase 3.1: moved to backend/probes/ — re-exported for backward compat
+from backend.probes import probe_http, probe_tcp
 def run_uptime_check(check):
     ctype = check["type"]
     timeout = min(int(check.get("timeout_sec") or 10), _UPTIME_MAX_TIMEOUT)
@@ -4470,20 +4140,12 @@ def run_uptime_check(check):
         return {"ts": ts, "up": up, "latency_ms": latency, "code": code, "err": err}
 
     try:
+        from backend.db.repos import uptime as _uptime_repo
         with LOCK:
-            DB.execute(
-                "INSERT INTO uptime_results(check_id,ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (check["id"], ts, 1 if up else 0, latency, code, err, cert_days, cert_expires_at)
-            )
-
-            DB.execute(
-                "DELETE FROM uptime_results WHERE check_id=? AND rowid NOT IN "
-                "(SELECT rowid FROM uptime_results WHERE check_id=? ORDER BY rowid DESC LIMIT ?)",
-                (check["id"], check["id"], _UPTIME_RESULT_CAP)
-            )
-
-            DB.commit()
+            _uptime_repo.insert_result_and_trim(
+                check["id"], ts, 1 if up else 0, latency, cert_days, _UPTIME_RESULT_CAP,
+                code=code, err=err, cert_expires_at=cert_expires_at,
+                conn=DB)
     except Exception as e:
         print("run_uptime_check DB error:", e, flush=True)
 
@@ -4492,17 +4154,12 @@ def _uptime_state(check_id, now, window=86400, window2=604800):
     """Read-only summary for one check: current state (up/down/unknown), last latency,
     uptime% over `window` (24h) and `window2` (7d), last_checked, last_err, and a
     coarse heartbeat strip. Caller must NOT hold LOCK (this takes it briefly)."""
+    from backend.db.repos import uptime as _uptime_repo
     since, since2 = now - window, now - window2
     with LOCK:
-        rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? AND ts>=? "
-            "ORDER BY ts", (check_id, since)).fetchall()
-        agg2 = DB.execute(
-            "SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
-            (check_id, since2)).fetchone()
-        last = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at FROM uptime_results WHERE check_id=? "
-            "ORDER BY ts DESC LIMIT 1", (check_id,)).fetchone()
+        rows = _uptime_repo.results_since_full(check_id, since, conn=DB)
+        agg2 = _uptime_repo.results_window_agg(check_id, since2, conn=DB)
+        last = _uptime_repo.results_last_one(check_id, conn=DB)
     total = len(rows)
     up_n = sum(1 for r in rows if r[1])
     uptime = round(100.0 * up_n / total, 2) if total else None
@@ -4595,23 +4252,12 @@ def _uptime_tick(now=None):
         probed.append(c["id"])
     return probed
 
-def uptime_worker():
-    """Dedicated daemon loop: wakes every few seconds, probes due checks. Kept off the
-    collector thread so a slow/hanging probe never delays metric sampling. Inert (zero
-    outbound) when no checks are configured/enabled."""
-    while True:
-        try:
-            _uptime_tick()
-        except Exception as e:
-            print("uptime_worker error:", e, flush=True)
-        time.sleep(5)
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import uptime_worker
 
-# ── Notifier: Discord webhook + ntfy.sh + Telegram ─────────────────────────
-# Edge-triggered: each alert key is remembered in _NOTIFIED so a flapping state
-# doesn't spam the channel. A key clears when the underlying condition recovers
-# (container becomes healthy again, disk drops below threshold, etc.), so the
-# next failure re-fires exactly once.
 _NOTIFIED = {}            # key -> 1, "armed" alerts pending recovery
+from backend.db.repos import edge_state as _edge_state_repo
+_NOTIFIED.update({row[0]: 1 for row in _edge_state_repo.load_notified_keys(conn=DB)})
 _NOTIFIER_LOCK = threading.Lock()
 LEVELS  = {"info": 0, "warning": 1, "critical": 2}
 _COLORS = {"info": 0x58A6FF, "warning": 0xD29922, "critical": 0xF85149}
@@ -4623,19 +4269,11 @@ _NTFY_T = {"info": "information_source", "warning": "warning", "critical": "rota
 # also mandated by Discord's API rules, so every outbound POST carries one.
 NOTIFY_USER_AGENT = f"homelab-monitor/{VERSION} (+https://github.com/SikamikanikoBG/homelab-monitor)"
 
-def _post_json(url, payload, timeout=5):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json",
-                                          "User-Agent": NOTIFY_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read()
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _post_json
 
-def _post_text(url, text, headers=None, timeout=5):
-    hdr = dict(headers or {"Content-Type": "text/plain"})
-    hdr.setdefault("User-Agent", NOTIFY_USER_AGENT)
-    req = urllib.request.Request(url, data=text.encode("utf-8"), headers=hdr)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, r.read()
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _post_text
 
 def _post_multipart(url, payload_json, filename, file_bytes,
                     file_ctype="text/html; charset=utf-8", timeout=10):
@@ -4691,10 +4329,8 @@ def send_ntfy(server, topic, level, title, detail):
               "Tags":     _NTFY_T.get(level, "information_source")}
     return _post_text(url, detail, hdr)
 
-def _tg_escape(text):
-    """Escape Telegram legacy-Markdown metacharacters in user-supplied text."""
-    return (text or "").replace("\\", "\\\\").replace("_", "\\_").replace("*", "\\*") \
-                       .replace("`", "\\`").replace("[", "\\[")
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _tg_escape
 
 def _post_to_telegram(token, chat_id, level, title, body):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -4738,92 +4374,14 @@ def send_webhook(url, level, title, detail, host):
     payload = {"level": level, "title": title, "detail": detail, "host": host}
     return _post_json(url, payload)
 
-def _alert_host_label():
-    """Machine name to stamp on every alert so a notification says *where* the
-    problem is. Alerts are raised from the hub's own docker/systemd/disk/GPU
-    snapshots, so this is the hub host: prefer the probe-reported hostname (the
-    same name the dashboard's host tab shows), fall back to the OS hostname, and
-    finally to "" so a label-less environment degrades to the old behaviour."""
-    try:
-        name = ((LATEST or {}).get("host") or {}).get("hostname")
-        if name:
-            return str(name).strip()
-    except Exception:
-        pass
-    try:
-        return socket.gethostname()
-    except Exception:
-        return ""
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _alert_host_label
 
-def dispatch_alert(s, level, title, detail, host=None):
-    """Send to whichever channels are configured. Returns list of (channel, ok, err).
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import dispatch_alert
 
-    `title` is prefixed with the machine name (`[host] …`) so every channel —
-    Discord, ntfy, Telegram, email, Slack and generic webhook alike — names
-    which machine the alert is about.
-    Pass host="" to opt out (e.g. a generic message that isn't host-specific)."""
-    if host is None:
-        host = _alert_host_label()
-    if host:
-        title = f"[{host}] {title}"
-    out = []
-    if s.get("discord_webhook_url"):
-        try: send_discord(s["discord_webhook_url"], level, title, detail); out.append(("discord", True, None))
-        except Exception as e: out.append(("discord", False, str(e)))
-    if s.get("ntfy_topic"):
-        try: send_ntfy(s.get("ntfy_server") or "https://ntfy.sh",
-                       s["ntfy_topic"], level, title, detail); out.append(("ntfy", True, None))
-        except Exception as e: out.append(("ntfy", False, str(e)))
-    if s.get("telegram_token") and s.get("telegram_chat_id"):
-        try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
-                               level, title, detail); out.append(("telegram", True, None))
-        except Exception as e: out.append(("telegram", False, str(e)))
-    # Email via SMTP
-    if s.get("email_host") and s.get("email_from") and s.get("email_to"):
-        try:
-            _send_email(s["email_host"], s.get("email_port", "587"),
-                        s.get("email_use_tls", "1") == "1",
-                        s.get("email_username", ""), s.get("email_password", ""),
-                        s["email_from"], s["email_to"],
-                        level, title, detail)
-            out.append(("email", True, None))
-        except Exception as e:
-            out.append(("email", False, str(e)))
-    # Slack incoming webhook
-    if s.get("slack_webhook_url"):
-        try: send_slack(s["slack_webhook_url"], level, title, detail); out.append(("slack", True, None))
-        except Exception as e: out.append(("slack", False, str(e)))
-    # Generic webhook
-    if s.get("webhook_url"):
-        try: send_webhook(s["webhook_url"], level, title, detail, host or ""); out.append(("webhook", True, None))
-        except Exception as e: out.append(("webhook", False, str(e)))
-    return out
-
-def _dispatch_to_channels(s, level, title, detail, channels):
-    """Dispatch to a specific set of channels only."""
-    if "discord" in channels and s.get("discord_webhook_url"):
-        try: send_discord(s["discord_webhook_url"], level, title, detail)
-        except Exception as e: print("notifier discord error:", e, flush=True)
-    if "ntfy" in channels and s.get("ntfy_topic"):
-        try: send_ntfy(s.get("ntfy_server") or "https://ntfy.sh",
-                       s["ntfy_topic"], level, title, detail)
-        except Exception as e: print("notifier ntfy error:", e, flush=True)
-    if "telegram" in channels and s.get("telegram_token") and s.get("telegram_chat_id"):
-        try: _post_to_telegram(s["telegram_token"], s["telegram_chat_id"],
-                               level, title, detail)
-        except Exception as e: print("notifier telegram error:", e, flush=True)
-    if "email" in channels and s.get("email_host") and s.get("email_from") and s.get("email_to"):
-        try: _send_email(s["email_host"], s.get("email_port", "587"),
-                         s.get("email_use_tls", "1") == "1",
-                         s.get("email_username", ""), s.get("email_password", ""),
-                         s["email_from"], s["email_to"], level, title, detail)
-        except Exception as e: print("notifier email error:", e, flush=True)
-    if "slack" in channels and s.get("slack_webhook_url"):
-        try: send_slack(s["slack_webhook_url"], level, title, detail)
-        except Exception as e: print("notifier slack error:", e, flush=True)
-    if "webhook" in channels and s.get("webhook_url"):
-        try: send_webhook(s["webhook_url"], level, title, detail, _alert_host_label() or "")
-        except Exception as e: print("notifier webhook error:", e, flush=True)
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _dispatch_to_channels
 
 def _match_kind(key):
     prefix = key.split(":")[0] if ":" in key else key
@@ -4835,9 +4393,8 @@ def _match_kind(key):
         return "host"
     return "host"
 
-def _alert_name(key):
-    parts = key.split(":")
-    return ":".join(parts[1:]) if len(parts) > 1 else key
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import _alert_name
 
 def _apply_rules(key, level, rules):
     """Return set of channels if rules match, or None for default behavior."""
@@ -4862,8 +4419,9 @@ def _apply_rules(key, level, rules):
     return channels if channels else None
 
 def get_notification_rules():
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        rows = DB.execute("SELECT id, match_kind, match_pattern, channel, min_level, enabled FROM notification_rules ORDER BY id").fetchall()
+        rows = _notify_repo.list_rules(conn=DB)
     return [{"id": r[0], "match_kind": r[1], "match_pattern": r[2], "channel": r[3], "min_level": r[4], "enabled": bool(r[5])} for r in rows]
 
 def _emit(s, key, level, title, detail, rules=None):
@@ -4875,10 +4433,17 @@ def _emit(s, key, level, title, detail, rules=None):
     _parts = key.split(":", 1)
     if len(_parts) == 2 and _in_maintenance(_parts[0], _parts[1]):
         return
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
     with _NOTIFIER_LOCK:
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
+    with LOCK:
+        try:
+            _edge_state_repo.arm_key(key, int(time.time()), conn=_app.DB)
+        except Exception as e:
+            print(f"edge_state arm_key error: {e}", flush=True)
     channels = _apply_rules(key, level, rules)
     if channels is not None:
         _dispatch_to_channels(s, level, title, detail, channels)
@@ -4888,16 +4453,24 @@ def _emit(s, key, level, title, detail, rules=None):
                 print(f"notifier {ch} error:", err, flush=True)
 
 def _clear(key):
+    from backend.db.repos import edge_state as _edge_state_repo
+    import app as _app
     with _NOTIFIER_LOCK:
+        was_armed = key in _NOTIFIED
         _NOTIFIED.pop(key, None)
+    if was_armed:
+        with LOCK:
+            try:
+                _edge_state_repo.disarm_key(key, conn=_app.DB)
+            except Exception as e:
+                print(f"edge_state disarm_key error: {e}", flush=True)
 
 def _in_maintenance(kind, name):
     """Return True if kind:name is currently covered by an active maintenance window."""
+    from backend.db.repos import notify as _notify_repo
     now = int(time.time())
     with LOCK:
-        rows = DB.execute(
-            "SELECT kind, pattern, start_ts, end_ts, recurrence FROM maintenance_windows"
-        ).fetchall()
+        rows = _notify_repo.get_active_windows(conn=DB)
     for row_kind, pattern, start_ts, end_ts, recurrence in rows:
         # kind must match or be wildcard
         if row_kind != "*" and row_kind != kind:
@@ -4921,135 +4494,29 @@ def _in_maintenance(kind, name):
     return False
 
 def list_maintenance_windows():
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        rows = DB.execute(
-            "SELECT id, label, kind, pattern, start_ts, end_ts, recurrence, note, created_at "
-            "FROM maintenance_windows ORDER BY start_ts"
-        ).fetchall()
+        rows = _notify_repo.list_windows(conn=DB)
     return [{"id": r[0], "label": r[1], "kind": r[2], "pattern": r[3],
              "start_ts": r[4], "end_ts": r[5], "recurrence": r[6],
              "note": r[7], "created_at": r[8]} for r in rows]
 
 def create_maintenance_window(label, kind, pattern, start_ts, end_ts, recurrence=None, note=None):
+    from backend.db.repos import notify as _notify_repo
     wid = uuid.uuid4().hex
     with LOCK:
-        DB.execute(
-            "INSERT INTO maintenance_windows(id,label,kind,pattern,start_ts,end_ts,recurrence,note,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (wid, label, kind or "*", pattern or "*", int(start_ts), int(end_ts),
-             recurrence or None, note or None, int(time.time()))
-        )
-        DB.commit()
+        _notify_repo.insert_window(
+            wid, label, kind or "*", pattern or "*", int(start_ts), int(end_ts),
+            recurrence or None, note or None, int(time.time()), conn=DB)
     return wid
 
 def delete_maintenance_window(wid):
+    from backend.db.repos import notify as _notify_repo
     with LOCK:
-        DB.execute("DELETE FROM maintenance_windows WHERE id=?", (wid,))
-        DB.commit()
+        _notify_repo.delete_window(wid, conn=DB)
 
-def notify_scan():
-    s = get_settings()
-    if s.get("alerts_enabled") != "1":
-        return
-    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))
-            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
-            or s.get("slack_webhook_url")
-            or s.get("webhook_url")):
-        return
-    rules = get_notification_rules()
-
-    # ── Docker containers: edge-trigger on crit/warn, clear on ok ─────────────
-    docker = HEALTH.get("docker") or {}
-    if docker.get("available"):
-        for ct in docker.get("containers", []):
-            name = ct.get("name", "?")
-            key  = f"container:{name}"
-            st   = ct.get("status")
-            if st == "crit":
-                _emit(s, key, "critical", f"🔴 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}", rules=rules)
-            elif st == "warn":
-                _emit(s, key, "warning", f"🟠 Container {name} {ct.get('label','')}".strip(),
-                      f"{name}: {ct.get('status_text','')}", rules=rules)
-            elif st == "ok":
-                _clear(key)
-
-    # ── systemd units: edge-trigger on failed ─────────────────────────────────
-    systemd = HEALTH.get("systemd") or {}
-    if systemd.get("available"):
-        for svc in systemd.get("services", []):
-            name = svc.get("name", "?")
-            key  = f"systemd:{name}"
-            if svc.get("status") == "crit":
-                _emit(s, key, "critical", f"🔴 systemd unit failed: {name}",
-                      f"{name} — {svc.get('desc','')} (active={svc.get('active')}, sub={svc.get('sub')})",
-                      rules=rules)
-            elif svc.get("status") == "ok":
-                _clear(key)
-
-    # ── GPU VRAM pressure ────────────────────────────────────────────────────
-    mem_total = LATEST.get("mem_total") or 0
-    mem_used  = LATEST.get("mem_used")  or 0
-    if mem_total:
-        free = mem_total - mem_used
-        key  = "gpu:vram_pressure"
-        if free < PRESSURE_MB:
-            _emit(s, key, "warning", "🟠 GPU VRAM pressure",
-                  f"Only {round(free)} MB free of {round(mem_total)} MB "
-                  f"({round(100*mem_used/mem_total)}% used).", rules=rules)
-        else:
-            _clear(key)
-
-    # ── Disks crossing the configured threshold ───────────────────────────────
-    try: disk_thr = int(s.get("disk_alert_pct") or 90)
-    except ValueError: disk_thr = 90
-    host = LATEST.get("host") or {}
-    seen_disks = set()
-    for dk in (host.get("disks") or []):
-        mp   = dk.get("mount", "?")
-        seen_disks.add(mp)
-        key  = f"disk:{mp}"
-        pct  = dk.get("pct", 0)
-        if pct >= disk_thr:
-            level = "critical" if pct >= 95 else "warning"
-            _emit(s, key, level, f"{'🔴' if level=='critical' else '🟠'} Disk {mp} at {pct}%",
-                  f"{mp}: {dk.get('used',0)} GB / {dk.get('total',0)} GB used ({pct}%).",
-                  rules=rules)
-        else:
-            _clear(key)
-
-    # ── GPU OOM events from the DB (each event_ts notified at most once) ─────
-    try:
-        cutoff = int(time.time()) - 3600
-        with LOCK:
-            rows = DB.execute("SELECT ts, service, detail FROM events "
-                              "WHERE kind='oom' AND ts>=? ORDER BY ts", (cutoff,)).fetchall()
-        for ets, svc, detail in rows:
-            key = f"oom:{svc}:{ets}"
-            with _NOTIFIER_LOCK:
-                already = key in _NOTIFIED
-                if not already:
-                    _NOTIFIED[key] = 1
-            if already:
-                continue
-            if LEVELS["critical"] < LEVELS.get(s.get("alert_min_level", "warning"), 1):
-                continue
-            channels = _apply_rules(key, "critical", rules)
-            if channels is not None:
-                _dispatch_to_channels(s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500], channels)
-            else:
-                for ch, ok, err in dispatch_alert(
-                        s, "critical", f"🔴 GPU OOM in {svc}", (detail or "")[:1500]):
-                    if not ok: print(f"notifier {ch} error:", err, flush=True)
-    except Exception as e:
-        print("notify_scan oom error:", e, flush=True)
-
-    # ── Uptime checks: per-check smart alerting (down / recovery / slow) ──────
-    try:
-        notify_uptime(s)
-    except Exception as e:
-        print("notify_scan uptime error:", e, flush=True)
+# Phase 3.3: moved to backend/notify/ — re-exported for backward compat
+from backend.notify import notify_scan
 
 def _uptime_down_reason(st):
     """Short, credential-safe reason for a DOWN check, taken from its last result."""
@@ -5062,17 +4529,17 @@ def _uptime_down_reason(st):
 def _uptime_confirmed_down(cid, threshold):
     """True once the most recent `threshold` results are ALL failures (and we have at
     least that many). This is the anti-flap gate — one dropped packet never pages."""
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute("SELECT up FROM uptime_results WHERE check_id=? ORDER BY ts DESC LIMIT ?",
-                          (cid, threshold)).fetchall()
+        rows = _uptime_repo.results_last_n(cid, threshold, conn=DB)
     return len(rows) >= threshold and all(r[0] == 0 for r in rows)
 
 def _uptime_streak_start(cid, now):
     """Wall-clock ts the current DOWN streak began (walk recent results back while
     they're failures), so a recovery message can quote the real downtime."""
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows = DB.execute("SELECT ts,up FROM uptime_results WHERE check_id=? ORDER BY ts DESC LIMIT 500",
-                          (cid,)).fetchall()
+        rows = _uptime_repo.results_last_500(cid, conn=DB)
     start = None
     for ts, up in rows:
         if up == 0:
@@ -5109,11 +4576,17 @@ def notify_uptime(s):
         down_key, slow_key, rec_key = f"uptime:down:{cid}", f"uptime:slow:{cid}", f"uptime:rec:{cid}"
         if not c["enabled"] or not c["alerts_enabled"]:
             _clear(down_key); _clear(slow_key); _uptime_down_since.pop(cid, None)
+            from backend.db.repos import edge_state as _edge_state_repo
+            import app as _app
+            _edge_state_repo.clear_down_since(cid, conn=_app.DB)
             continue
         # Skip alerting entirely while this check is in a maintenance window.
         if _in_maintenance("uptime", cid) or _in_maintenance("uptime", c.get("label", "")):
             _clear(down_key); _clear(slow_key); _clear(cert_key if "cert_key" in dir() else f"uptime:cert:{cid}")
             _uptime_down_since.pop(cid, None)
+            from backend.db.repos import edge_state as _edge_state_repo
+            import app as _app
+            _edge_state_repo.clear_down_since(cid, conn=_app.DB)
             continue
         thr = max(1, int(c.get("fail_threshold") or 2))
         st = _uptime_state(cid, now)
@@ -5123,6 +4596,9 @@ def notify_uptime(s):
                 first = down_key not in _NOTIFIED
             if first:
                 _uptime_down_since[cid] = _uptime_streak_start(cid, now)
+                from backend.db.repos import edge_state as _edge_state_repo
+                import app as _app
+                _edge_state_repo.set_down_since(cid, _uptime_down_since[cid], conn=_app.DB)
             _clear(rec_key)   # re-arm recovery so the eventual comeback fires once
             _emit(s, down_key, "critical", f"🔴 {c['label']} is DOWN",
                   f"{tgt} — {_uptime_down_reason(st)}", rules=rules)
@@ -5132,6 +4608,9 @@ def notify_uptime(s):
                 was_down = down_key in _NOTIFIED
             if was_down:
                 since = _uptime_down_since.pop(cid, None)
+                from backend.db.repos import edge_state as _edge_state_repo
+                import app as _app
+                _edge_state_repo.clear_down_since(cid, conn=_app.DB)
                 dur = _fmt_dur(now - since) if since else "?"
                 _clear(down_key)
                 # Recovery is good news → emitted at "warning" so it survives the
@@ -5417,230 +4896,8 @@ def sample_callers(conts, ai_names):
                 edges[(name, srv)] = edges.get((name, srv), 0) + 1
     return edges
 
-def sample_once():
-    conts = containers()
-    nm = {c["id"]: c["name"] for c in conts}
-
-    # ── GPU half ──────────────────────────────────────────────────────────────
-    # Isolated in its own try/except so a flaky, missing or slow nvidia-smi can
-    # NEVER block the host metrics below. Before this, an exception here aborted
-    # the whole sample, freezing CPU/RAM/temperature on every poll (and forever on
-    # a GPU-less host). Now a GPU failure just degrades the GPU panel to "absent"
-    # while temperature & friends keep refreshing.
-    util = mem_used = mem_total = power = temp = 0.0
-    gpus = []
-    gpu_extra = {}
-    procs = {}
-    gpu_pids = {}
-    gpu_avail = False
-    try:
-        # One CSV row per card (issue #95). Parse each field defensively: nvidia-smi
-        # emits the literal "[N/A]" / "[Not Supported]" for power.draw/temperature
-        # on many consumer/laptop GPUs and inside containers, even with `nounits` —
-        # so degrade just the bad field to 0 rather than dropping the whole card.
-        rows = smi(["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-                    "--format=csv,noheader,nounits"]).splitlines()
-        for line in rows:
-            if not line.strip():
-                continue
-            p = [x.strip() for x in line.split(",")]
-            if len(p) < 7:
-                continue
-            u, mu, mt, pw, tp = (_gpu_num(x) for x in p[2:7])
-            gpus.append({"idx": int(_gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
-                         "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp})
-        amd = False
-        if not gpus:
-            # No NVIDIA card (or no nvidia-smi) — fall back to the AMD amdgpu sysfs
-            # back-end (issue #1). Additive: an NVIDIA host never reaches this.
-            gpus = amd_gpus()
-            amd = bool(gpus)
-            if not gpus:
-                raise ValueError("no NVIDIA or AMD GPU detected")
-        gpu_avail = True
-        # Aggregate across cards for the existing single-GPU views: VRAM + power are
-        # the pool, utilisation is averaged, temperature is the hottest card. AMD
-        # cards expose the same keys, so this aggregation is vendor-agnostic.
-        mem_used  = sum(g["mem_used"] for g in gpus)
-        mem_total = sum(g["mem_total"] for g in gpus)
-        power     = sum(g["power"] for g in gpus)
-        util      = round(sum(g["util"] for g in gpus) / len(gpus))
-        temp      = max(g["temp"] for g in gpus)
-        if amd:
-            # Per-card enrichment (clocks/throttle) and per-process VRAM attribution
-            # are nvidia-smi-specific; AMD shows the core panel (util/VRAM/temp/power)
-            # without them. Per-process AMD attribution is a follow-up (issue #1).
-            gpu_extra = {}
-        else:
-            _enrich_gpus(gpus)                 # mem-bw util, clocks, power limit, throttle reasons (best-effort)
-            gpu_extra = _gpu_extra(gpus)
-            for line in smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                if line.strip():
-                    pid, mem = (p.strip() for p in line.split(","))
-                    svc = service_for_pid(pid, nm)
-                    procs[svc] = procs.get(svc, 0) + _gpu_num(mem)
-                    try:
-                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _gpu_num(mem)
-                    except ValueError:
-                        pass
-    except Exception as e:
-        # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
-        if LATEST.get("gpu_avail"):
-            print("GPU sample failed (continuing without GPU):", e, flush=True)
-
-    # Detect models from EVERY recognised AI server, not just the ones holding the GPU
-    # right now — so a server that has unloaded its model (e.g. OLLAMA_KEEP_ALIVE
-    # expired) or sits between requests still shows up as Idle instead of vanishing.
-    # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
-    ai = [c for c in conts if _match_probe(c)]
-    models = []
-    model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
-    if ai:
-        with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
-            found_lists = list(ex.map(probe_models, ai))
-        provider_of = {c["name"]: _match_probe_key(c) for c in ai}
-        for ct, found in zip(ai, found_lists):
-            svc = ct["name"]
-            provider = provider_of.get(svc)
-            smem = procs.get(svc)                         # MB this server holds on the GPU now
-            api_vram = any(v is not None for _, v in found)
-            for mdl, vram in found:
-                if vram is not None:                      # server reported its own VRAM (Ollama)
-                    vram_val = round(vram)
-                elif not api_vram and len(found) == 1 and smem:
-                    vram_val = round(smem)                # single model ↔ all the server's VRAM
-                else:
-                    vram_val = None                        # server up but idle / can't attribute
-                models.append((svc, mdl, vram_val))
-                model_catalog.append({"service": svc, "provider": provider, "model": mdl,
-                                       "loaded": vram_val is not None, "vram_mb": vram_val})
-
-    # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
-    edges = sample_callers(conts, {c["name"] for c in ai})
-
-    # Model intelligence: per-model metadata (Ollama /api/show, cached) + live serving
-    # telemetry (vLLM/TGI /metrics). Both best-effort — a slow/absent endpoint must
-    # never wedge the sample, so each is isolated.
-    try:
-        model_meta = collect_model_meta(ai, models)
-    except Exception:
-        model_meta = {}
-    try:
-        serving = collect_serving(ai)
-    except Exception:
-        serving = []
-    try:
-        training = collect_training(gpu_pids)
-    except Exception:
-        training = []
-    try:
-        devtools = collect_devtools(gpu_pids)
-    except Exception:
-        devtools = []
-
-    host = read_host()
-    # Measured CPU/DRAM watts (RAPL) + per-process CPU breakdown — both best-effort.
-    # Call collect_top_processes ONCE here (the sampler cadence) and cache it so the
-    # Top-processes card + the cost attribution share one delta (health_scan reuses it).
-    rapl = {}
-    try:
-        rapl = read_rapl_power()
-    except Exception:
-        rapl = {}
-    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
-    try:
-        top_cpu = collect_top_processes()
-    except Exception:
-        top_cpu = None
-    HEALTH["processes"] = top_cpu
-    ts = int(time.time())
-    if _DB_MAINTENANCE:
-        return
-    with LOCK:
-        # When the GPU is absent/failed, store NULL for the GPU columns (not 0) so
-        # history charts skip the gap via AVG() instead of showing a fake 0 dip;
-        # the host columns are always real.
-        gcols = (util, mem_used, mem_total, power, temp) if gpu_avail else (None,)*5
-        DB.execute("INSERT OR REPLACE INTO samples(ts,util,mem_used,mem_total,power,temp,cpu,ram_used,ram_total,load1,ctemp,cpu_power,dram_power)"
-                   " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (ts, *gcols, host["cpu"], host["ram_used"],
-                    host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power))
-        for svc, mem in procs.items():
-            DB.execute("INSERT INTO proc VALUES(?,?,?)", (ts, svc, mem))
-        pp_rows = _attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
-        if pp_rows:
-            DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
-        for svc, mdl, vram in models:
-            if vram is not None:          # persist only VRAM-bearing rows; idle catalogue
-                DB.execute("INSERT INTO models VALUES(?,?,?,?)", (ts, svc, mdl, vram))  # lives in LATEST only
-        for (caller, server), n in edges.items():
-            DB.execute("INSERT INTO edges VALUES(?,?,?,?)", (ts, caller, server, n))
-        # Per-GPU history only when there's more than one card (single-GPU rigs are
-        # already covered by the aggregate `samples` table) — keeps storage lean.
-        if gpu_avail and len(gpus) > 1:
-            for g in gpus:
-                DB.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
-                           "VALUES(?,?,?,?,?,?,?)",
-                           (ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]))
-        DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
-                       _net_rows(ts, nm))   # host NICs + per-container talkers (#30)
-        # Disk I/O moves fast, so sample it on its own tighter cadence (~45s) into
-        # a dedicated 7-day ring — dense enough for per-device sparklines + the
-        # anomaly baseline without bloating the DB. Sourced from the health_scan
-        # snapshot (populated every 15s) so no extra /proc read here.
-        if ts % 45 < INTERVAL:
-            dio = HEALTH.get("disk_io") or {}
-            if dio.get("available"):
-                for it in (dio.get("items") or []):
-                    DB.execute("INSERT INTO disk_io_samples(ts,device,read_mb_s,write_mb_s,util_pct) "
-                               "VALUES(?,?,?,?,?)",
-                               (ts, it["device"], it.get("read_mb_s"),
-                                it.get("write_mb_s"), it.get("util_pct")))
-            # Persist a BOUNDED per-process I/O ring: only the top-few writers +
-            # top-few readers from the attribution already computed (comm only,
-            # never argv). Deduped by pid -> at most ~6 rows/poll, not all ~20
-            # candidates. Feeds spike-time attribution; rides this same cadence.
-            _pio = (HEALTH.get("processes") or {}).get("io") or {}
-            if _pio.get("available"):
-                _seen_pids, _pio_rows = set(), []
-                for _r in (sorted((_pio.get("writers") or []),
-                                  key=lambda r: -(r.get("write_b_s") or 0))[:3]
-                           + sorted((_pio.get("readers") or []),
-                                    key=lambda r: -(r.get("read_b_s") or 0))[:3]):
-                    _p = _r.get("pid")
-                    if _p in _seen_pids:
-                        continue
-                    _seen_pids.add(_p)
-                    _pio_rows.append((ts, _p, _r.get("name"),
-                                      int(_r.get("read_b_s") or 0), int(_r.get("write_b_s") or 0)))
-                if _pio_rows:
-                    DB.executemany("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
-                                   "VALUES(?,?,?,?,?)", _pio_rows)
-        if ts % 360 < INTERVAL:
-            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
-                DB.execute(f"DELETE FROM {t} WHERE ts<?", (ts - RETENTION,))
-            DB.execute("DELETE FROM disk_io_samples WHERE ts<?", (ts - _DISK_IO_RETENTION,))
-            DB.execute("DELETE FROM proc_io_samples WHERE ts<?", (ts - _PROC_IO_RETENTION,))
-        if ts % 60 < INTERVAL:   # stale-run janitor: a crashed/disconnected push run -> killed
-            DB.execute("UPDATE runs SET status='killed', ended_at=COALESCE(ended_at,heartbeat_at,?) "
-                       "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
-                       (ts, ts - 180))
-        DB.commit()
-    # MLflow pull (network; outside the lock) every ~5 min when configured.
-    if get_settings().get("mlflow_uri") and ts % 300 < INTERVAL:
-        try:
-            sync_mlflow()
-        except Exception as e:
-            print("mlflow sync error:", e, flush=True)
-    LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
-                  cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
-                  gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
-                  procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
-                  model_catalog=model_catalog,
-                  model_meta=model_meta, serving=serving, training=training, devtools=devtools,
-                  callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
-                                 key=lambda x: -x["conns"]), host=host)
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import sample_once
 
 _DISK_IO_MIN_DEV = 15.0    # MB/s: below this, a device's wobble isn't worth flagging
 _DISKIO_ANOM_WINDOW  = 6 * 3600   # trailing baseline window (~6h at the ~45s disk-io cadence)
@@ -5656,12 +4913,11 @@ def _disk_io_anomaly_items(cur, now):
     excluding the latest point), same maths style as the rest of the monitor's
     threshold checks. Returns a list of {device, value, baseline, z, direction,
     magnitude} dicts — only devices that actually fired. Never raises."""
+    from backend.db.repos import system as _sys_repo2
     since = now - _DISKIO_ANOM_WINDOW
     by_dev = {}
     try:
-        for dev, r, w in cur.execute(
-                "SELECT device, read_mb_s, write_mb_s FROM disk_io_samples "
-                "WHERE ts>=? ORDER BY ts", (since,)):
+        for dev, r, w in _sys_repo2.query_disk_io_for_anomaly(since, conn=cur):
             by_dev.setdefault(dev, []).append((r or 0.0) + (w or 0.0))
     except Exception:
         return []
@@ -5695,6 +4951,7 @@ def diskio_scan():
     disk can't spam the Insight Feed. Writes into the same `events` table as OOM
     (kind='diskio_spike'), so it rides the existing events->insights plumbing for
     free — no new alert/incident system needed."""
+    from backend.db.repos import system as _sys_repo
     if _DB_MAINTENANCE:
         return
     now = int(time.time())
@@ -5702,13 +4959,14 @@ def diskio_scan():
         items = _disk_io_anomaly_items(DB.cursor(), now)
         firing = {it["device"]: it for it in items}
         newly = [it for dev, it in firing.items() if dev not in _diskio_anom_active]
-        for it in newly:
-            detail = (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
-                      f"{it['z']:+.1f}σ)")[:300]
-            DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)",
-                      (now, it["device"], "diskio_spike", detail))
         if newly:
-            DB.commit()
+            batch = [
+                (now, it["device"], "diskio_spike",
+                 (f"{it['direction']} to {it['value']} MB/s (baseline ~{it['baseline']} MB/s, "
+                  f"{it['z']:+.1f}σ)")[:300])
+                for it in newly
+            ]
+            _sys_repo.insert_events_batch(batch, conn=DB)
         _diskio_anom_active.clear()
         _diskio_anom_active.update(firing.keys())
     _diskio_anom_latest.clear()
@@ -5732,36 +4990,20 @@ def oom_scan():
                 ets = int(time.time())
             if _DB_MAINTENANCE:
                 continue
+            from backend.db.repos import system as _sys_repo
             with LOCK:
-                DB.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?)", (ets, svc, "oom", line.strip()[:300]))
-                DB.commit()
+                _sys_repo.insert_event(ets, svc, "oom", line.strip()[:300], conn=DB)
         _scan_since[svc] = int(time.time())
 
-def collector():
-    last_oom = last_health = last_notify = last_diskio = 0
-    while True:
-        try:
-            sample_once()
-            now = time.time()
-            if now - last_oom > 60:
-                oom_scan(); last_oom = now
-            if now - last_diskio > 60:
-                try: diskio_scan()
-                except Exception as e: print("diskio_scan error:", e, flush=True)
-                last_diskio = now
-            if now - last_health > 15:
-                health_scan(); last_health = now
-            # Notifier runs *after* the latest health/oom data is in place, so
-            # state-change detection sees a consistent snapshot.
-            if now - last_notify > 20:
-                try: notify_scan()
-                except Exception as e: print("notify_scan error:", e, flush=True)
-                last_notify = now
-        except Exception as e:
-            print("collector error:", e, flush=True)
-        time.sleep(INTERVAL)
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import _rollup_now
 
-# ── Insights ──────────────────────────────────────────────────────────────
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import _rollup_net_now
+
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import collector
+
 def build_insights(total, services, mem_total, events, host):
     ins, mem = [], total["mem"]
     if not mem:
@@ -5802,97 +5044,6 @@ def build_insights(total, services, mem_total, events, host):
 # ── API ──────────────────────────────────────────────────────────────────
 RANGES = {"1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800, "30d": 2592000, "all": None}
 
-@app.route("/api/data")
-def api_data():
-    rng = request.args.get("range", "6h")
-    span = RANGES.get(rng, 21600); now = int(time.time())
-    with LOCK:
-        cur = DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
-        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-        tot = cur.execute("SELECT (ts/?)*? b,AVG(util),AVG(mem_used),MAX(mem_used),AVG(power),AVG(temp),"
-                          "AVG(cpu),AVG(ram_used),AVG(ram_total),AVG(load1),AVG(ctemp) "
-                          "FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
-        labels = [int(r[0]) for r in tot]
-        idx = {b: i for i, b in enumerate(labels)}
-        total = {"util": [round(r[1] or 0) for r in tot], "mem": [round(r[2] or 0) for r in tot],
-                 "mempk": [round(r[3] or 0) for r in tot], "power": [round(r[4] or 0) for r in tot],
-                 "temp": [round(r[5] or 0) for r in tot], "cpu": [round(r[6] or 0) for r in tot],
-                 "ram_used": [round(r[7] or 0) for r in tot], "ram_total": [round(r[8] or 0) for r in tot],
-                 "load1": [round(r[9] or 0, 2) for r in tot], "ctemp": [round(r[10] or 0) for r in tot]}
-        services = {}
-        for b, svc, mem in cur.execute("SELECT (ts/?)*? b,service,AVG(mem) FROM proc WHERE ts>=? GROUP BY b,service",
-                                       (bk, bk, since)).fetchall():
-            i = idx.get(int(b))
-            if i is not None:
-                services.setdefault(svc, [0] * len(labels))[i] = round(mem or 0)
-        other = [max(0, total["mem"][i] - sum(s[i] for s in services.values())) for i in range(len(labels))]
-        # Per-device disk-I/O trend, same bucketing/labels as everything else on this
-        # endpoint — feeds the Disk I/O tab's per-device sparklines. disk_io_samples
-        # rides its own ~45s cadence (sparser than `samples`), so buckets it doesn't
-        # cover keep their 0-fill default (matches the `services` fill above).
-        disk_io = {}
-        for b, dev, r, w, u in cur.execute(
-                "SELECT (ts/?)*? b,device,AVG(read_mb_s),AVG(write_mb_s),AVG(util_pct) "
-                "FROM disk_io_samples WHERE ts>=? GROUP BY b,device", (bk, bk, since)).fetchall():
-            i = idx.get(int(b))
-            if i is None:
-                continue
-            d = disk_io.setdefault(dev, {"read_mb_s": [0] * len(labels),
-                                         "write_mb_s": [0] * len(labels),
-                                         "util_pct": [0] * len(labels)})
-            d["read_mb_s"][i]  = round(r or 0, 1)
-            d["write_mb_s"][i] = round(w or 0, 1)
-            d["util_pct"][i]   = round(u or 0, 1)
-        ticks = cur.execute("SELECT COUNT(*) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 1
-        summary = sorted(({"service": s, "peak": round(pk), "avg": round(av), "present": round(100 * cnt / ticks)}
-                          for s, pk, av, cnt in cur.execute(
-                              "SELECT service,MAX(mem),AVG(mem),COUNT(DISTINCT ts) FROM proc WHERE ts>=? GROUP BY service",
-                              (since,)).fetchall()), key=lambda x: -x["peak"])
-        model_summary = sorted(({"service": s, "model": m, "peak": round(pk or 0), "avg": round(av or 0)}
-                                for s, m, pk, av in cur.execute(
-                                    "SELECT service,model,MAX(vram),AVG(vram) FROM models WHERE ts>=? AND vram IS NOT NULL "
-                                    "GROUP BY service,model", (since,)).fetchall()), key=lambda x: -x["peak"])
-        # Caller attribution: connection-seconds per (caller → server) over the range.
-        # Each sample of `conns` open connections represents INTERVAL seconds of traffic.
-        callers = sorted(({"caller": c, "server": s, "seconds": int((tot or 0) * INTERVAL), "samples": n}
-                          for c, s, tot, n in cur.execute(
-                              "SELECT caller,server,SUM(conns),COUNT(DISTINCT ts) FROM edges WHERE ts>=? "
-                              "GROUP BY caller,server", (since,)).fetchall()), key=lambda x: -x["seconds"])
-        evs = [{"ts": t, "service": s, "kind": k, "detail": d}
-               for t, s, k, d in cur.execute("SELECT ts,service,kind,detail FROM events WHERE ts>=? ORDER BY ts",
-                                              (since,)).fetchall()]
-        oom_evs = [e for e in evs if e["kind"] == "oom"]
-        for e in oom_evs:
-            row = cur.execute("SELECT service,mem FROM proc WHERE ts<=? AND service!=? ORDER BY ts DESC,mem DESC LIMIT 1",
-                              (e["ts"] + INTERVAL, e["service"])).fetchone()
-            if row:
-                e["blame"] = (f"{e['service']} lost to {row[0]} (holding {round(row[1])} MB) at "
-                              f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}.")
-        mem_total = LATEST["mem_total"] or 24576
-        peak = max(total["mempk"]) if total["mempk"] else 0
-        insights = build_insights(total, services, mem_total, oom_evs, LATEST["host"])
-        diskio_evs = [e for e in evs if e["kind"] == "diskio_spike"]
-        if diskio_evs:
-            latest_by_dev = {}
-            for e in diskio_evs:
-                latest_by_dev[e["service"]] = e   # `service` column holds the device name here
-            for dev, e in latest_by_dev.items():
-                insights.append({"level": "warning", "title": f"Disk I/O spike on {dev}",
-                                 "detail": e["detail"]})
-    # Uptime rows ride the same Insight Feed (computed outside LOCK — uptime_overview
-    # takes it itself). DOWN/slow endpoints surface on the cockpit with no new tile.
-    try:
-        insights = insights + uptime_insights()
-        up_summary = uptime_summary()
-    except Exception as e:
-        print("uptime overview error:", e, flush=True)
-        up_summary = {"total": 0, "up": 0, "down": 0, "unknown": 0, "worst_down": None}
-    return jsonify({"version": VERSION, "range": rng, "bucket_sec": bk, "labels": labels, "total": total,
-                    "services": services, "other": other, "summary": summary, "model_summary": model_summary,
-                    "callers": callers, "events": oom_evs, "insights": insights, "pressure_free_mb": PRESSURE_MB,
-                    "uptime_summary": up_summary, "disk_io": disk_io,
-                    "mem_total": mem_total, "peak_mem": peak, "now": LATEST})
 
 def _hhmm_to_min(s, default):
     """'HH:MM' -> minutes since midnight [0,1440). Falls back to `default` on junk."""
@@ -5922,105 +5073,7 @@ def _make_is_night(night_start, night_end):
             return mins >= ns or mins < ne
     return is_night
 
-@app.route("/api/cost")
-def api_cost():
-    """Power → kWh → money (#25), now tariff-aware. Integrates the GPU `power`
-    samples we already collect; each sample stands for INTERVAL seconds, so
-    energy(kWh) = sum(power_W) * INTERVAL / 3_600_000.
 
-    Single mode (default): cost = energy * kwh_price — byte-for-byte the original
-    behaviour. Dual mode: each sample is billed at the night price inside the
-    (possibly midnight-wrapping) night window and the day price otherwise, split
-    per window. A blank night price silently degrades to single, so a user who
-    doesn't know their rates keeps the simple average. The card stays hidden until
-    a day price is set (`enabled`)."""
-    s = get_settings()
-    def fnum(key):
-        v = (s.get(key) or "").strip()
-        if v == "":
-            return None
-        try:
-            return float(v)
-        except ValueError:
-            return None
-
-    day_price   = fnum("kwh_price") or 0.0
-    night_price = fnum("kwh_price_night")
-    mode = "dual" if (s.get("tariff_mode") == "dual" and night_price is not None
-                      and day_price > 0) else "single"
-    currency = s.get("currency") or "$"
-    is_night = _make_is_night(s.get("night_start", "22:00"), s.get("night_end", "06:00"))
-
-    rng = request.args.get("range", "7d")
-    span = RANGES.get(rng, 604800)
-    now = int(time.time())
-    kwh_per_wsample = INTERVAL / 3_600_000.0   # one power sample -> kWh
-
-    with LOCK:
-        cur = DB.cursor()
-        def avg_w(since):
-            return round(cur.execute("SELECT AVG(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0)
-        def total_kwh(since):
-            tot = cur.execute("SELECT SUM(power) FROM samples WHERE ts>=?", (since,)).fetchone()[0] or 0
-            return tot * kwh_per_wsample
-        def split_kwh(since):
-            """One pass over (ts,power) >= since -> (day_kwh, night_kwh)."""
-            day_w = night_w = 0.0
-            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL", (since,)):
-                if is_night(ts):
-                    night_w += p
-                else:
-                    day_w += p
-            return day_w * kwh_per_wsample, night_w * kwh_per_wsample
-
-        lt = time.localtime(now)
-        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
-        wins = {"today": midnight, "d7": now - 604800, "d30": now - 2592000}
-        kwh, cost, split = {}, {}, {}
-        for w, since in wins.items():
-            if mode == "dual":
-                dk, nk = split_kwh(since)
-            else:
-                dk, nk = total_kwh(since), 0.0       # single: one SUM, no per-row loop
-            dc, nc = dk * day_price, nk * (night_price or 0.0)
-            kwh[w]  = round(dk + nk, 3)
-            cost[w] = round(dc + nc, 2)
-            split[w] = {"day_kwh": round(dk, 3), "night_kwh": round(nk, 3),
-                        "day_cost": round(dc, 2), "night_cost": round(nc, 2)}
-
-        # Cumulative-cost series across the selected range (mirrors api_data buckets).
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
-        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-        labels, cost_cum, running = [], [], 0.0
-        if mode == "dual":                            # stream + classify per bucket (one pass)
-            acc = {}
-            for ts, p in cur.execute("SELECT ts,power FROM samples WHERE ts>=? AND power IS NOT NULL ORDER BY ts", (since,)):
-                b = (ts // bk) * bk
-                price = night_price if is_night(ts) else day_price
-                acc[b] = acc.get(b, 0.0) + (p or 0) * kwh_per_wsample * price
-            for b in sorted(acc):
-                running += acc[b]
-                labels.append(int(b)); cost_cum.append(round(running, 4))
-        else:                                         # single: cheap SQL-bucketed path (unchanged)
-            rows = cur.execute("SELECT (ts/?)*? b, SUM(power) FROM samples WHERE ts>=? GROUP BY b ORDER BY b",
-                               (bk, bk, since)).fetchall()
-            for b, p in rows:
-                running += (p or 0) * kwh_per_wsample * day_price
-                labels.append(int(b)); cost_cum.append(round(running, 4))
-
-    return jsonify({
-        "enabled": day_price > 0, "kwh_price": day_price, "currency": currency,
-        "range": rng, "bucket_sec": bk,
-        "current_w": round(LATEST.get("power") or 0),
-        "avg_24h_w": avg_w(now - 86400), "avg_7d_w": avg_w(now - 604800),
-        "kwh": kwh, "cost": cost, "split": split,
-        "tariff": {"mode": mode, "price_day": day_price, "price_night": night_price,
-                   "night_start": s.get("night_start", "22:00"),
-                   "night_end": s.get("night_end", "06:00")},
-        "series": {"labels": labels, "cost_cum": cost_cum},
-    })
-
-# ── Costs page: per-machine → per-component → per-process (with drilldown) ─────
 _TOTAL_W_EXPR = "COALESCE(power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0)"
 
 def _cost_ctx():
@@ -6044,306 +5097,7 @@ def _cost_ctx():
 def _price_at(ctx, ts):
     return ctx["night"] if (ctx["mode"] == "dual" and ctx["is_night"](ts)) else ctx["day"]
 
-@app.route("/api/costs")
-def api_costs():
-    """Richer power+cost view for the Costs page: per-machine totals, a stacked
-    component breakdown (GPU measured, CPU/DRAM measured via RAPL, optional operator
-    'other' baseline) and a ranked per-process/service/model breakdown — all over a
-    selectable range and tariff-aware. /api/cost (GPU-only) is left untouched."""
-    ctx = _cost_ctx()
-    cur = ctx["currency"]
-    rng = request.args.get("range", "7d")
-    span = RANGES.get(rng, 604800)
-    now = int(time.time())
-    kwh_per = INTERVAL / 3_600_000.0
-    with LOCK:
-        c = DB.cursor()
-        since = (c.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
-        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-        comp = c.execute(f"SELECT (ts/?)*? b, AVG(power), AVG(cpu_power), AVG(dram_power) "
-                         f"FROM samples WHERE ts>=? GROUP BY b ORDER BY b", (bk, bk, since)).fetchall()
-        # component energy + cost over the range (tariff-aware, one streaming pass)
-        comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
-        cost_range = 0.0
-        nticks = 0
-        for ts, p, cp, dp in c.execute("SELECT ts,power,cpu_power,dram_power FROM samples WHERE ts>=?", (since,)):
-            nticks += 1
-            price = _price_at(ctx, ts)
-            tot = (p or 0) + (cp or 0) + (dp or 0)
-            comp_kwh["gpu"] += (p or 0) * kwh_per
-            comp_kwh["cpu"] += (cp or 0) * kwh_per
-            comp_kwh["dram"] += (dp or 0) * kwh_per
-            cost_range += tot * kwh_per * price
-        # today/d7/d30 total-cost windows (machine total watts, tariff-aware)
-        def win_cost(start):
-            tot = 0.0
-            for ts, w in c.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=?", (start,)):
-                tot += (w or 0) * kwh_per * _price_at(ctx, ts)
-            return round(tot, 2)
-        lt = time.localtime(now)
-        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
-        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
-        # ranked per-entity breakdown from power_proc (tariff-aware day/night split)
-        acc = {}
-        for ts, kind, name, watts in c.execute("SELECT ts,kind,name,watts FROM power_proc WHERE ts>=?", (since,)):
-            a = acc.setdefault((kind, name), [0.0, 0.0])
-            if ctx["mode"] == "dual" and ctx["is_night"](ts):
-                a[1] += watts
-            else:
-                a[0] += watts
-    hours = max(1e-9, (now - since) / 3600.0)
-    idle_w = ctx["idle_w"]
-    labels = [int(r[0]) for r in comp]
-    series = {"labels": labels,
-              "gpu":  [round(r[1] or 0) for r in comp],
-              "cpu":  [round(r[2] or 0) if r[2] is not None else 0 for r in comp],
-              "dram": [round(r[3] or 0) if r[3] is not None else 0 for r in comp]}
-    have_cpu = any(r[2] is not None for r in comp)
-    have_dram = any(r[3] is not None for r in comp)
-    if not have_cpu: series.pop("cpu")
-    if not have_dram: series.pop("dram")
-    if idle_w:
-        series["other"] = [round(idle_w)] * len(labels)
-    breakdown = []
-    for (kind, name), (dayw, nightw) in acc.items():
-        energy = (dayw + nightw) * kwh_per
-        cost = (dayw * ctx["day"] + nightw * (ctx["night"] if ctx["night"] is not None else ctx["day"])) * kwh_per
-        breakdown.append({"kind": kind, "name": name, "energy_kwh": round(energy, 4),
-                          "cost": round(cost, 4), "avg_w": round((dayw + nightw) / max(1, nticks))})
-    breakdown.sort(key=lambda x: -x["energy_kwh"])
-    now_gpu = round(LATEST.get("power") or 0)
-    now_cpu = round(LATEST.get("cpu_power") or 0) if LATEST.get("cpu_power") is not None else None
-    now_dram = round(LATEST.get("dram_power") or 0) if LATEST.get("dram_power") is not None else None
-    now_total = now_gpu + (now_cpu or 0) + (now_dram or 0) + (round(idle_w) if idle_w else 0)
-    measured = ["gpu"] + (["cpu"] if have_cpu else []) + (["dram"] if have_dram else [])
-    machine = {"name": "local",
-               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram, "total": now_total},
-               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items() if (k != "dram" or have_dram)},
-               "cost": cost_win, "cost_range": round(cost_range, 2),
-               "measured": measured, "estimated": (["other"] if idle_w else [])}
-    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"][k] for k in machine["energy_kwh"] if k != "total"), 3)
-    return jsonify({
-        "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": cur,
-        "rapl_available": have_cpu,
-        "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
-                   "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
-        "machines": [machine], "components": series, "breakdown": breakdown[:40],
-    })
 
-@app.route("/api/cost/heatmap")
-def api_cost_heatmap():
-    """Busy-vs-quiet rhythm of the lab as a 7×24 grid (local day-of-week × hour).
-
-    Each historical `samples` row is the machine's total draw (GPU+CPU+DRAM) for
-    one INTERVAL tick. We bucket every tick by its LOCAL weekday/hour and average
-    the watts in each cell, then derive a cost-rate (€/h) for that cell at the
-    tariff's price for that hour band — reusing the same `_cost_ctx`/`_price_at`
-    machinery as the Costs page, so the €/kWh math never diverges. Sparse cells
-    carry their own sample count so the UI can be honest about coverage.
-
-    Pure-Python aggregation, read outside any held lock, always 200. When cost is
-    disabled (no tariff) we still return the power grid and `enabled:false` so the
-    card can render watts and prompt for a price.
-    """
-    ctx = _cost_ctx()
-    cur = ctx["currency"]
-    # window: last N days, sane default 30, capped at a year so a huge DB can't stall
-    try:
-        days = int(request.args.get("days", "30"))
-    except (TypeError, ValueError):
-        days = 30
-    days = max(1, min(days, 365))
-    now = int(time.time())
-    since = now - days * 86400
-
-    # 7×24 accumulators: summed watts and tick count per local day/hour cell
-    sum_w = [[0.0] * 24 for _ in range(7)]
-    cnt   = [[0]   * 24 for _ in range(7)]
-    span_min = span_max = None
-    try:
-        with LOCK:
-            c = DB.cursor()
-            rows = c.execute(
-                f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? ORDER BY ts",
-                (since,)).fetchall()
-        # aggregate OUTSIDE the lock — pure Python, no DB calls below
-        for ts, w in rows:
-            lt = time.localtime(ts)
-            # Python weekday(): Mon=0..Sun=6 — matches our locale day labels
-            d = lt.tm_wday
-            h = lt.tm_hour
-            sum_w[d][h] += (w or 0)
-            cnt[d][h] += 1
-            if span_min is None or ts < span_min:
-                span_min = ts
-            if span_max is None or ts > span_max:
-                span_max = ts
-    except Exception:
-        rows = []
-
-    # build the grids; price each cell at the tariff for a representative ts in it
-    rep_ts = span_max or now
-    rep_lt = time.localtime(rep_ts)
-    # anchor to local midnight of the most recent observed day so is_night() lands
-    # in the right band per (day,hour); the date component is irrelevant to the band
-    anchor = int(time.mktime((rep_lt.tm_year, rep_lt.tm_mon, rep_lt.tm_mday,
-                              0, 0, 0, 0, 0, -1)))
-    avg_w  = [[None] * 24 for _ in range(7)]
-    cost_h = [[None] * 24 for _ in range(7)]   # cost per HOUR at this cell's mean draw
-    max_w = max_cost = 0.0
-    busiest = quietest = None                  # by avg watts
-    total_ticks = 0
-    for d in range(7):
-        for h in range(24):
-            n = cnt[d][h]
-            total_ticks += n
-            if n == 0:
-                continue
-            aw = sum_w[d][h] / n
-            avg_w[d][h] = round(aw)
-            # price for this hour band: a ts at hour h on the anchor day
-            cell_ts = anchor + h * 3600
-            price = _price_at(ctx, cell_ts)
-            ch = aw / 1000.0 * price           # W -> kW * €/kWh = €/h
-            cost_h[d][h] = round(ch, 4)
-            max_w = max(max_w, aw)
-            max_cost = max(max_cost, ch)
-            if busiest is None or aw > busiest["avg_w"]:
-                busiest = {"day": d, "hour": h, "avg_w": round(aw),
-                           "cost_h": round(ch, 4), "samples": n}
-            if quietest is None or aw < quietest["avg_w"]:
-                quietest = {"day": d, "hour": h, "avg_w": round(aw),
-                            "cost_h": round(ch, 4), "samples": n}
-
-    # busy vs quiet bands: top/bottom quartile of populated cells by avg watts
-    populated = [(avg_w[d][h], cost_h[d][h])
-                 for d in range(7) for h in range(24) if avg_w[d][h] is not None]
-    bands = None
-    if len(populated) >= 4:
-        ordered = sorted(populated, key=lambda x: x[0])
-        q = max(1, len(ordered) // 4)
-        quiet_band = ordered[:q]
-        busy_band = ordered[-q:]
-        def band_stats(b):
-            return {"avg_w": round(sum(x[0] for x in b) / len(b)),
-                    "avg_cost_h": round(sum((x[1] or 0) for x in b) / len(b), 4),
-                    "cells": len(b)}
-        bands = {"busy": band_stats(busy_band), "quiet": band_stats(quiet_band)}
-
-    # per-day rollups (busiest / quietest day by mean watts across populated hours)
-    day_avg = [None] * 7
-    for d in range(7):
-        vals = [avg_w[d][h] for h in range(24) if avg_w[d][h] is not None]
-        if vals:
-            day_avg[d] = round(sum(vals) / len(vals))
-
-    coverage = round(total_ticks / max(1, days * 24 * 3600 / INTERVAL), 4)
-    # "ready" once we have at least a day's worth of ticks spread across cells
-    populated_cells = len(populated)
-    ready = total_ticks >= (86400 / INTERVAL) and populated_cells >= 6
-
-    return jsonify({
-        "ok": True,
-        "enabled": ctx["day"] > 0,
-        "currency": cur,
-        "days": days,
-        "interval_sec": INTERVAL,
-        "ready": ready,
-        "rows": 7, "cols": 24,
-        "avg_w": avg_w,
-        "cost_h": cost_h,
-        "samples": cnt,
-        "day_avg_w": day_avg,
-        "max_w": round(max_w),
-        "max_cost_h": round(max_cost, 4),
-        "busiest": busiest,
-        "quietest": quietest,
-        "bands": bands,
-        "total_ticks": total_ticks,
-        "populated_cells": populated_cells,
-        "coverage": coverage,
-        "span": {"min": span_min, "max": span_max},
-        "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
-                   "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
-    })
-
-@app.route("/api/costs/entity")
-def api_costs_entity():
-    """Per-entity drilldown: a power + cumulative-cost time-series for one
-    process/service/model over the range, plus what resources it used."""
-    ctx = _cost_ctx()
-    name = request.args.get("name", "")
-    kind = request.args.get("kind", "")
-    rng = request.args.get("range", "7d")
-    span = RANGES.get(rng, 604800)
-    now = int(time.time())
-    kwh_per = INTERVAL / 3_600_000.0
-    with LOCK:
-        c = DB.cursor()
-        since = (c.execute("SELECT MIN(ts) FROM power_proc").fetchone()[0] or now) if span is None else now - span
-        bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-        q = "SELECT (ts/?)*? b, AVG(watts), MAX(watts) FROM power_proc WHERE name=? AND ts>=?"
-        args = [bk, bk, name, since]
-        if kind:
-            q += " AND kind=?"; args.append(kind)
-        q += " GROUP BY b ORDER BY b"
-        rows = c.execute(q, args).fetchall()
-        # cumulative tariff-aware cost needs per-bucket price; classify by bucket start ts
-        vram_peak = None
-        if kind != "cpu":
-            vram_peak = c.execute("SELECT MAX(mem) FROM proc WHERE service=? AND ts>=?", (name, since)).fetchone()[0]
-    labels, watts, cost_cum, running, energy = [], [], [], 0.0, 0.0
-    peak = 0.0
-    for b, avgw, maxw in rows:
-        labels.append(int(b)); watts.append(round(avgw or 0))
-        peak = max(peak, maxw or 0)
-        e = (avgw or 0) * kwh_per * (bk / INTERVAL)   # energy this bucket (avg W over bk seconds)
-        energy += e
-        running += e * _price_at(ctx, int(b))
-        cost_cum.append(round(running, 4))
-    return jsonify({
-        "name": name, "kind": kind, "range": rng, "bucket_sec": bk, "currency": ctx["currency"],
-        "energy_kwh": round(energy, 4), "cost": round(running, 2),
-        "avg_w": round(sum(watts) / len(watts)) if watts else 0, "peak_w": round(peak),
-        "series": {"labels": labels, "watts": watts, "cost_cum": cost_cum},
-        "resources": {"gpu_vram_peak_mb": round(vram_peak) if vram_peak else None},
-    })
-
-@app.route("/api/sessions")
-def api_sessions():
-    """GPU activity sessions over the range — contiguous GPU-busy periods rebuilt
-    from the power/util history. Plus the live training processes detected on the
-    hub right now (LATEST['training']). Powers the Experiments tab."""
-    s = get_settings()
-    try:
-        price = float(s.get("kwh_price") or 0)
-    except (TypeError, ValueError):
-        price = 0.0
-    rng = request.args.get("range", "7d")
-    span = RANGES.get(rng, 604800)
-    now = int(time.time())
-    with LOCK:
-        cur = DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM samples").fetchone()[0] or now) if span is None else now - span
-        rows = cur.execute("SELECT ts,util,power,mem_used FROM samples WHERE ts>=? ORDER BY ts", (since,)).fetchall()
-    sessions = _gpu_sessions(rows, INTERVAL, price=price)[:50]
-    tot_energy = round(sum(x["energy_kwh"] for x in sessions), 3)
-    return jsonify({
-        "range": rng, "currency": s.get("currency") or "$",
-        "price": price, "kwh_price": price,
-        "active_pct": _ACTIVE_UTIL,
-        "sessions": sessions,
-        "totals": {"count": len(sessions), "energy_kwh": tot_energy,
-                   "cost": round(tot_energy * price, 2),
-                   "active_hours": round(sum(x["duration"] for x in sessions) / 3600.0, 1)},
-        "training": LATEST.get("training") or [],
-        "devtools": LATEST.get("devtools") or [],
-    })
-
-# ── Integrations: experiment/run tracking API (push/pull) + MLflow sync ────────
-# Pivot from /proc auto-detection to a key-authenticated ingest API a notebook can
-# push to (Jupyter/Colab/Kaggle via homelab_run.py), pulled back with the run's real
-# GPU energy/cost attached by overlapping its [start,end] window with `samples`.
 MAX_RUN_FIELD, MAX_RUN_JSON, MAX_METRICS_REQ = 4096, 64 * 1024, 1000
 RUN_SOURCES = {"jupyter", "colab", "kaggle", "mlflow", "api", "cli"}
 RUN_STATUS  = {"running", "finished", "failed", "killed"}
@@ -6357,53 +5111,20 @@ def _hash_key(k):
 def _create_api_key(name, expires_in_days=None):
     """Mint a key: persist its hash + metadata, return (id, plaintext). The plaintext
     is the only time it's available."""
+    from backend.db.repos import auth as _auth_repo
     key = "hlm_" + secrets.token_urlsafe(32)
     kid, now = uuid.uuid4().hex, int(time.time())
     exp = (now + int(expires_in_days) * 86400) if expires_in_days else None
     with LOCK:
-        DB.execute("INSERT INTO api_keys(id,name,key_hash,prefix,created_at,expires_at,last_used_at) "
-                   "VALUES(?,?,?,?,?,?,?)", (kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None))
-        DB.commit()
+        _auth_repo.insert(kid, (name or "key")[:128], _hash_key(key), key[:12], now, exp, None, conn=DB)
     return kid, key
 
 def _gen_api_key(name="default", expires_in_days=None):
     """Back-compat shim (used by tests): mint a key and return the plaintext."""
     return _create_api_key(name, expires_in_days)[1]
 
-def _key_lookup(presented):
-    """Return the id of a live (non-expired) key matching `presented`, else None,
-    and stamp its last_used_at. Stored value is a hash, so the lookup never exposes
-    a usable secret. Fail-closed: no keys => all ingest rejected."""
-    if not presented:
-        return None
-    now = int(time.time())
-    with LOCK:
-        row = DB.execute("SELECT id, expires_at FROM api_keys WHERE key_hash=?",
-                         (_hash_key(presented),)).fetchone()
-        if not row:
-            return None
-        kid, exp = row
-        if exp and exp < now:
-            return None
-        DB.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, kid))
-        DB.commit()
-    return kid
-
-def _presented_key():
-    auth = request.headers.get("Authorization", "")
-    if auth[:7].lower() == "bearer ":
-        return auth[7:].strip()
-    return request.headers.get("X-API-Key", "").strip()
-
-def require_api_key(fn):
-    @wraps(fn)
-    def wrapper(*a, **kw):
-        kid = _key_lookup(_presented_key())
-        if not kid:
-            return jsonify({"ok": False, "error": "missing, invalid, or expired API key"}), 401
-        g.api_key_id = kid
-        return fn(*a, **kw)
-    return wrapper
+# Phase 3.4: moved to backend/auth — re-exported for backward compat
+from backend.auth import _key_lookup, _presented_key, require_api_key
 
 def _clip(v, n):
     return ("" if v is None else str(v))[:n]
@@ -6425,14 +5146,13 @@ def _safe_json(txt):
 def _run_cost_window(cur, started, ended, ctx):
     """Integrate samples.power over [started, ended] -> (energy_kwh, cost, avg_w,
     peak_util), priced exactly like the cost card (dual-tariff aware)."""
+    from backend.db.repos import experiments as _exp_repo
     end = ended or int(time.time())
     kwh_per = INTERVAL / 3_600_000.0
     e_kwh = cost = sum_p = 0.0
     n = 0
     peak_u = 0.0
-    for ts, util, power in cur.execute(
-            "SELECT ts,util,power FROM samples WHERE ts>=? AND ts<=? AND power IS NOT NULL",
-            (started, end)):
+    for ts, util, power in _exp_repo.get_run_cost_samples(started, end, conn=cur):
         p = power or 0.0
         sum_p += p; n += 1; peak_u = max(peak_u, util or 0)
         e_kwh += p * kwh_per
@@ -6621,234 +5341,6 @@ def _merge_registry(ollama_models, catalog):
     return out
 
 
-@app.route("/api/models")
-def api_models():
-    """The Model Registry: the full inventory of models available on this host —
-    ollama's on-disk catalogue (GET /api/tags, size/quant/param detail) merged with
-    every other recognised AI server's model list (#219: vLLM, llama.cpp, LM Studio,
-    ComfyUI, InvokeAI, …), cross-referenced with what's loaded right now so the UI
-    can flag resident models + their live VRAM, grouped by provider.
-
-    Always 200, graceful-degrade, never 500, no secret leak (we echo a `reachable`
-    bool, never the URL/creds). Ollama half cached ~45s so a busy tab can't hammer
-    it; the rest rides the existing sampler's cached model_catalog (no extra I/O).
-    /api/tags is polled outside any held LOCK."""
-    ollama_models, reachable = _model_registry()
-    models = _merge_registry(ollama_models, LATEST.get("model_catalog"))
-    return jsonify({
-        "enabled": COPILOT_ENABLED,
-        "ollama_reachable": reachable,
-        "models": models,
-        "totals": _registry_totals(models),
-        "providers": sorted({m["provider"] for m in models}),
-    })
-
-
-@app.route("/api/integration/keys", methods=["GET", "POST"])
-def api_keys_route():
-    """GET -> {keys:[{id,name,prefix,created_at,expires_at,last_used_at,expired,runs}]}
-    (never the secret). POST {name, expires_in_days?} -> {id, key} (key revealed once)."""
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        days = body.get("expires_in_days")
-        try:
-            days = int(days) if days not in (None, "", 0, "0") else None
-        except (TypeError, ValueError):
-            days = None
-        if days is not None and days <= 0:
-            days = None
-        kid, key = _create_api_key(_clip(body.get("name") or "key", 128), days)
-        return jsonify({"ok": True, "id": kid, "key": key})
-    now = int(time.time())
-    with LOCK:
-        rows = DB.execute("SELECT id,name,prefix,created_at,expires_at,last_used_at "
-                          "FROM api_keys ORDER BY created_at DESC").fetchall()
-        counts = dict(DB.execute("SELECT key_id, COUNT(*) FROM runs WHERE key_id IS NOT NULL "
-                                 "GROUP BY key_id").fetchall())
-    keys = [{"id": kid, "name": name, "prefix": prefix, "created_at": created,
-             "expires_at": exp, "last_used_at": used, "expired": bool(exp and exp < now),
-             "runs": counts.get(kid, 0)}
-            for (kid, name, prefix, created, exp, used) in rows]
-    return jsonify({"keys": keys, "has_key": bool(keys)})
-
-@app.route("/api/integration/keys/<kid>", methods=["DELETE"])
-def api_keys_delete(kid):
-    """Revoke (remove) a key. Runs it pushed are kept; they just lose live attribution."""
-    with LOCK:
-        cur = DB.execute("DELETE FROM api_keys WHERE id=?", (kid,))
-        DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount
-            else (jsonify({"ok": False, "error": "unknown key"}), 404))
-
-@app.route("/api/runs", methods=["POST"])
-@require_api_key
-def api_runs_create():
-    body = request.get_json(silent=True) or {}
-    source = (body.get("source") or "api").lower()
-    if source not in RUN_SOURCES:
-        source = "api"
-    now = int(time.time())
-    rid = (body.get("id") or uuid.uuid4().hex)[:64]
-    try:
-        params = _json_field(body.get("params"), MAX_RUN_JSON)
-        tags = _json_field(body.get("tags"), MAX_RUN_JSON)
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 413
-    with LOCK:
-        DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,notes,"
-                   "heartbeat_at,ext_id,created_at,key_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                   "ON CONFLICT(id) DO NOTHING",
-                   (rid, _clip(body.get("name") or "run", MAX_RUN_FIELD), source, "running",
-                    int(body.get("started_at") or now), None, _clip(body.get("host"), 256),
-                    params, tags, _clip(body.get("notes"), MAX_RUN_FIELD), now, None, now,
-                    getattr(g, "api_key_id", None)))
-        DB.commit()
-    return jsonify({"ok": True, "id": rid})
-
-@app.route("/api/runs/<rid>", methods=["PATCH"])
-@require_api_key
-def api_runs_update(rid):
-    body = request.get_json(silent=True) or {}
-    sets, args = ["heartbeat_at=?"], [int(time.time())]
-    if body.get("status") in RUN_STATUS:
-        sets.append("status=?"); args.append(body["status"])
-    if body.get("ended_at"):
-        sets.append("ended_at=?"); args.append(int(body["ended_at"]))
-    for f, n in (("name", MAX_RUN_FIELD), ("notes", MAX_RUN_FIELD)):
-        if f in body:
-            sets.append(f"{f}=?"); args.append(_clip(body[f], n))
-    try:
-        for f in ("params", "tags"):
-            if f in body:
-                sets.append(f"{f}=?"); args.append(_json_field(body[f], MAX_RUN_JSON))
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 413
-    args.append(rid)
-    with LOCK:
-        cur = DB.execute(f"UPDATE runs SET {','.join(sets)} WHERE id=?", args)
-        DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount else (jsonify({"ok": False, "error": "unknown run"}), 404))
-
-@app.route("/api/runs/<rid>/metrics", methods=["POST"])
-@require_api_key
-def api_runs_metrics(rid):
-    body = request.get_json(silent=True) or {}
-    pts = body.get("metrics")
-    if pts is None and "key" in body:
-        pts = [body]
-    pts = pts or []
-    if len(pts) > MAX_METRICS_REQ:
-        return jsonify({"ok": False, "error": f"max {MAX_METRICS_REQ} points/request"}), 413
-    now = int(time.time())
-    rows = []
-    for p in pts:
-        try:
-            rows.append((rid, int(p.get("ts") or now), int(p.get("step") or 0),
-                         _clip(p["key"], 128), float(p["value"])))
-        except (KeyError, TypeError, ValueError):
-            continue
-    with LOCK:
-        if not DB.execute("SELECT 1 FROM runs WHERE id=?", (rid,)).fetchone():
-            return jsonify({"ok": False, "error": "unknown run"}), 404
-        if rows:
-            DB.executemany("INSERT INTO run_metrics(run_id,ts,step,key,value) VALUES(?,?,?,?,?)", rows)
-            DB.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (now, rid))
-            DB.commit()
-    return jsonify({"ok": True, "logged": len(rows)})
-
-@app.route("/api/runs/<rid>/finish", methods=["POST"])
-@require_api_key
-def api_runs_finish(rid):
-    body = request.get_json(silent=True) or {}
-    status = body.get("status") if body.get("status") in RUN_STATUS else "finished"
-    if status == "running":
-        status = "finished"
-    ended = int(body.get("ended_at") or time.time())
-    with LOCK:
-        cur = DB.execute("UPDATE runs SET status=?, ended_at=?, heartbeat_at=? WHERE id=?",
-                         (status, ended, ended, rid))
-        DB.commit()
-    return (jsonify({"ok": True, "id": rid, "status": status}) if cur.rowcount
-            else (jsonify({"ok": False, "error": "unknown run"}), 404))
-
-@app.route("/api/runs/<rid>", methods=["DELETE"])
-def api_runs_delete(rid):
-    """Remove a run and its logged metrics. A same-origin browser management action
-    (like deleting a host or an API key), so it's open on the LAN rather than
-    key-gated — the key gates *ingest* (forgery from notebooks), not housekeeping."""
-    with LOCK:
-        cur = DB.execute("DELETE FROM runs WHERE id=?", (rid,))
-        DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
-        DB.commit()
-    return (jsonify({"ok": True}) if cur.rowcount
-            else (jsonify({"ok": False, "error": "unknown run"}), 404))
-
-@app.route("/api/runs")
-def api_runs_list():
-    ctx = _cost_ctx()
-    rng = request.args.get("range", "7d"); span = RANGES.get(rng, 604800)
-    status = request.args.get("status")
-    key_filter = request.args.get("key")
-    now = int(time.time()); since = 0 if span is None else now - span
-    q = ("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes,key_id "
-         "FROM runs WHERE (ended_at IS NULL OR ended_at>=?) AND started_at<=? ")
-    args = [since, now]
-    if status in RUN_STATUS:
-        q += "AND status=? "; args.append(status)
-    if key_filter:
-        q += "AND key_id=? "; args.append(key_filter)
-    q += "ORDER BY started_at DESC LIMIT 500"
-    out = []
-    with LOCK:
-        cur = DB.cursor()
-        key_names = dict(cur.execute("SELECT id, name FROM api_keys").fetchall())
-        for (rid, name, source, st, started, ended, host, params, tags, notes, key_id) in cur.execute(q, args).fetchall():
-            e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, ended, ctx)
-            kv = {}
-            # latest value per key = the last-logged row (max rowid), robust even when
-            # several points share a timestamp.
-            for k, v in cur.execute(
-                    "SELECT key, value FROM run_metrics WHERE run_id=? AND rowid IN "
-                    "(SELECT MAX(rowid) FROM run_metrics WHERE run_id=? GROUP BY key)", (rid, rid)):
-                kv[k] = v
-            out.append({"id": rid, "name": name, "source": source, "status": st,
-                        "started_at": started, "ended_at": ended, "duration": (ended or now) - started,
-                        "host": host, "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes,
-                        "key_id": key_id, "key_name": key_names.get(key_id),
-                        "metrics_latest": kv, "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u})
-    return jsonify({"range": rng, "currency": ctx["currency"], "tariff_mode": ctx["mode"], "runs": out})
-
-@app.route("/api/runs/<rid>")
-def api_runs_get(rid):
-    ctx = _cost_ctx()
-    now = int(time.time())
-    with LOCK:
-        cur = DB.cursor()
-        r = cur.execute("SELECT id,name,source,status,started_at,ended_at,host,params,tags,notes "
-                        "FROM runs WHERE id=?", (rid,)).fetchone()
-        if not r:
-            return jsonify({"error": "unknown run"}), 404
-        (rid, name, source, st, started, ended, host, params, tags, notes) = r
-        end = ended or now
-        metrics = {}
-        for k, ts, step, v in cur.execute(
-                "SELECT key,ts,step,value FROM run_metrics WHERE run_id=? ORDER BY key,ts,step", (rid,)):
-            d = metrics.setdefault(k, {"steps": [], "ts": [], "values": []})
-            d["steps"].append(step); d["ts"].append(ts); d["values"].append(v)
-        bk = max(INTERVAL, round(max(1, end - started) / MAX_POINTS))
-        labels, power_w, util_pct = [], [], []
-        for b, ap, au in cur.execute("SELECT (ts/?)*? b, AVG(power), AVG(util) FROM samples "
-                                     "WHERE ts>=? AND ts<=? GROUP BY b ORDER BY b", (bk, bk, started, end)):
-            labels.append(int(b)); power_w.append(round(ap or 0)); util_pct.append(round(au or 0))
-        e_kwh, cost, avg_w, peak_u = _run_cost_window(cur, started, end, ctx)
-    return jsonify({"id": rid, "name": name, "source": source, "status": st,
-                    "started_at": started, "ended_at": ended, "duration": end - started, "host": host,
-                    "params": _safe_json(params), "tags": _safe_json(tags), "notes": notes, "metrics": metrics,
-                    "resource": {"labels": labels, "power_w": power_w, "util_pct": util_pct, "bucket_sec": bk},
-                    "energy_kwh": e_kwh, "cost": cost, "avg_w": avg_w, "peak_util": peak_u,
-                    "currency": ctx["currency"], "tariff_mode": ctx["mode"]})
-
-# ── MLflow sync (pull) — mirror MLflow runs in as source='mlflow', pure REST ───
 _MLF_STATUS = {"RUNNING": "running", "FINISHED": "finished", "FAILED": "failed",
                "KILLED": "killed", "SCHEDULED": "running"}
 
@@ -6902,19 +5394,14 @@ def sync_mlflow():
             status = _MLF_STATUS.get(info.get("status"), "running")
             params = {p["key"]: p["value"] for p in data.get("params", [])}
             tags = {k: v for k, v in tagd.items() if not k.startswith("mlflow.")}
+            from backend.db.repos import experiments as _exp_repo
             with LOCK:
-                row = DB.execute("SELECT id FROM runs WHERE source='mlflow' AND ext_id=?", (ext,)).fetchone()
-                rid = row[0] if row else uuid.uuid4().hex
-                DB.execute("INSERT INTO runs(id,name,source,status,started_at,ended_at,host,params,tags,"
-                           "notes,heartbeat_at,ext_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                           "ON CONFLICT(source,ext_id) DO UPDATE SET status=excluded.status, "
-                           "ended_at=excluded.ended_at, name=excluded.name, params=excluded.params, "
-                           "tags=excluded.tags, heartbeat_at=excluded.heartbeat_at",
-                           (rid, name, "mlflow", status, started, ended, "mlflow",
-                            json.dumps(params, separators=(",", ":")),
-                            json.dumps(tags, separators=(",", ":")), "", now, ext, now))
-                DB.execute("DELETE FROM run_metrics WHERE run_id=?", (rid,))
-                DB.commit()
+                rid = _exp_repo.get_mlflow_run_id(ext, conn=DB) or uuid.uuid4().hex
+                _exp_repo.upsert_mlflow_run(
+                    rid, name, status, started, ended, ext,
+                    json.dumps(params, separators=(",", ":")),
+                    json.dumps(tags, separators=(",", ":")), now, conn=DB)
+                _exp_repo.delete_run_metrics(rid, conn=DB)
             for m in data.get("metrics", []):
                 hist = _mlf("GET", "/api/2.0/mlflow/metrics/get-history",
                             params={"run_id": ext, "metric_key": m["key"]}) or {}
@@ -6930,23 +5417,7 @@ def sync_mlflow():
             break
     return synced
 
-@app.route("/api/integration/mlflow/sync", methods=["GET", "POST"])
-def api_mlflow_sync():
-    """GET -> reachability probe (green/red). POST -> sync now."""
-    if not (get_settings().get("mlflow_uri") or "").strip():
-        return jsonify({"ok": False, "error": "no MLflow URI configured"}), 400
-    if request.method == "POST":
-        try:
-            return jsonify({"ok": True, "synced": sync_mlflow()})
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)[:200]}), 502
-    try:
-        _mlf("POST", "/api/2.0/mlflow/experiments/search", {"max_results": 1})
-        return jsonify({"ok": True, "reachable": True})
-    except Exception as e:
-        return jsonify({"ok": False, "reachable": False, "error": str(e)[:200]}), 502
 
-# ── Container logs over SSE (issue #28) ───────────────────────────────────────
 _CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
 def _docker_log_stream(name, tail, follow):
@@ -7006,157 +5477,9 @@ def _docker_log_stream(name, tail, follow):
         try: c.close()
         except Exception: pass
 
-@app.route("/api/containers/<name>/logs")
-def api_container_logs(name):
-    """Last `tail` log lines for a container; with follow=1, streams new lines as
-    SSE. Read-only — `docker logs` needs no extra socket permissions."""
-    if not _CT_NAME_RE.match(name or ""):
-        return jsonify({"error": "invalid container name"}), 400
-    try:
-        tail = max(1, min(2000, int(request.args.get("tail", 200))))
-    except (TypeError, ValueError):
-        tail = 200
-    follow = request.args.get("follow") == "1"
-    return Response(_docker_log_stream(name, tail, follow),
-                    mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-                             "Connection": "keep-alive"})
-
-@app.route("/api/network")
-def api_network():
-    """Host NIC throughput + per-container top talkers over a range (#30). Rates
-    are derived from the cumulative byte counters in net_samples, so a missed
-    sample or a counter reset (reboot) never invents a spike."""
-    rng = request.args.get("range", "1h")
-    span = RANGES.get(rng, 3600)
-    now = int(time.time())
-    with LOCK:
-        cur = DB.cursor()
-        since = (cur.execute("SELECT MIN(ts) FROM net_samples").fetchone()[0] or now) if span is None else now - span
-        rows = cur.execute("SELECT ts,iface,bytes_in,bytes_out FROM net_samples WHERE ts>=? ORDER BY iface,ts",
-                           (since,)).fetchall()
-    bk = max(INTERVAL, round(max(1, now - since) / MAX_POINTS))
-    series = {}
-    for ts, iface, bi, bo in rows:
-        series.setdefault(iface, []).append((ts, bi, bo))
-
-    def rate_buckets(samples):
-        """Consecutive cumulative samples → {bucket: [sum_rate, count]} for in/out."""
-        ain, aout = {}, {}
-        for (t0, i0, o0), (t1, i1, o1) in zip(samples, samples[1:]):
-            dt = t1 - t0
-            di, do = i1 - i0, o1 - o0
-            if dt <= 0 or di < 0 or do < 0:        # gap or counter reset → skip
-                continue
-            b = (t1 // bk) * bk
-            s = ain.setdefault(b, [0, 0]);  s[0] += di / dt; s[1] += 1
-            s = aout.setdefault(b, [0, 0]); s[0] += do / dt; s[1] += 1
-        return ain, aout
-
-    host_ifaces = sorted(i for i in series if not i.startswith("@") and not _HOST_NIC_SKIP.match(i))
-    labels = sorted({(t // bk) * bk for i in host_ifaces for t, _, _ in series[i]})
-    ifaces_out = []
-    for iface in host_ifaces:
-        ain, aout = rate_buckets(series[iface])
-        ins  = [round(ain[b][0] / ain[b][1]) if ain.get(b, [0, 0])[1] else 0 for b in labels]
-        outs = [round(aout[b][0] / aout[b][1]) if aout.get(b, [0, 0])[1] else 0 for b in labels]
-        if any(ins) or any(outs):
-            ifaces_out.append({"iface": iface, "in": ins, "out": outs})
-
-    talkers = []
-    for iface, samples in series.items():
-        if not iface.startswith("@") or len(samples) < 2:
-            continue
-        di = max(0, samples[-1][1] - samples[0][1])
-        do = max(0, samples[-1][2] - samples[0][2])
-        if di + do > 0:
-            talkers.append({"name": iface[1:], "bytes_in": di, "bytes_out": do, "total": di + do})
-    talkers.sort(key=lambda x: -x["total"])
-
-    cur_in  = sum(s["in"][-1] for s in ifaces_out) if labels else 0
-    cur_out = sum(s["out"][-1] for s in ifaces_out) if labels else 0
-    return jsonify({"range": rng, "bucket_sec": bk, "labels": labels,
-                    "ifaces": ifaces_out, "talkers": talkers[:10],
-                    "current": {"in": cur_in, "out": cur_out}})
-
-@app.route("/healthz")
-def healthz():
-    """Cheap liveness probe for Docker's HEALTHCHECK and any uptime monitor.
-    No DB, no locks — just a 200 with the running version so the answer is
-    instant and never gets blocked behind a slow collector pass."""
-    return jsonify({"status": "ok", "version": VERSION}), 200
-
-@app.route("/api/changelog")
-def api_changelog():
-    """Serve the bundled CHANGELOG.md, sliced to a version range, so the dashboard's
-    one-time 'what's new' modal can show exactly what shipped — straight from the
-    image, no GitHub round-trip (works fully offline). Read-only.
-      ?to=<ver>     newest version to include (default: the running VERSION)
-      ?since=<ver>  exclusive lower bound — return every section newer than it,
-                    up to `to` (the multi-version roll-up). Omit for just `to`."""
-    to_v = request.args.get("to") or VERSION
-    since_v = request.args.get("since")
-    to_t = _parse_semver(to_v)
-    since_t = _parse_semver(since_v) if since_v else None
-    try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
-        return jsonify({"current": VERSION, "sections": [], "markdown": ""})
-    # Split on "## [x.y.z](url) — date" headers (Keep-a-Changelog style).
-    hdr = re.compile(r"^##\s*\[([^\]]+)\]\(([^)]*)\)\s*[—\-–]?\s*(.*)$")
-    sections, cur = [], None
-    for line in text.splitlines():
-        m = hdr.match(line)
-        if m:
-            if cur:
-                sections.append(cur)
-            cur = {"version": m.group(1).strip(), "url": m.group(2).strip(),
-                   "date": m.group(3).strip(), "lines": [line]}
-        elif cur is not None:
-            cur["lines"].append(line)
-    if cur:
-        sections.append(cur)
-    picked = []
-    for s in sections:                       # file is newest-first
-        sv = _parse_semver(s["version"])
-        if sv > to_t:
-            continue
-        if since_t is not None:
-            if sv > since_t:
-                picked.append(s)
-        else:
-            picked.append(s)                 # no lower bound → just the newest <= to
-            break
-    md = "\n".join("\n".join(s["lines"]).rstrip() for s in picked)
-    return jsonify({"current": VERSION, "to": to_v, "since": since_v,
-                    "sections": [{"version": s["version"], "date": s["date"], "url": s["url"]}
-                                 for s in picked],
-                    "markdown": md})
-
-@app.route("/favicon.ico")
-def favicon():
-    """Default-favicon URL — browsers ask for /favicon.ico even when an explicit
-    <link rel="icon"> points elsewhere (during early page load, or for tabs that
-    open without rendering HTML). Serve the SVG we ship in static/."""
-    return app.send_static_file("favicon.svg")
 
 _LOCALES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "locales")
 
-@app.route("/locales/<path:fn>")
-def locales(fn):
-    """Serve UI translation files (i18n, #148). The dashboard fetches
-    /locales/<code>.json for any non-English locale; English is inlined, so it
-    needs no fetch. send_from_directory guards against path traversal."""
-    if not fn.endswith(".json"):
-        return ("Not found", 404)
-    try:
-        resp = send_from_directory(_LOCALES_DIR, fn)
-    except Exception:
-        return ("Not found", 404)
-    resp.headers["Cache-Control"] = "no-cache"
-    return resp
 
 def _mcp_enabled():
     return os.environ.get("ENABLE_MCP", "1").strip().lower() not in ("0", "false", "no")
@@ -7204,118 +5527,6 @@ def build_mcp_status():
         out["last_activity_age_s"] = age_s
     return out
 
-@app.route("/api/mcp-status")
-def api_mcp_status():
-    return jsonify(build_mcp_status())
-
-@app.route("/api/health")
-def api_health():
-    """Current state of the status monitors (Docker + systemd) plus a light GPU/host
-    snapshot. Cheap and DB-free, so the dashboard can poll it often."""
-    gpu_avail = LATEST.get("gpu_avail")
-    now = {"gpu": {"util": LATEST["util"], "mem_used": LATEST["mem_used"],
-                   "mem_total": (LATEST["mem_total"] or 24576) if gpu_avail else 0,
-                   "power": LATEST["power"], "temp": LATEST["temp"],
-                   "available": bool(gpu_avail),
-                   "gpus": LATEST.get("gpus") or [],    # per-card detail (issue #95)
-                   "extra": LATEST.get("gpu_extra") or {}},  # mem-bw/clocks/throttle (telemetry)
-           "host": enrich_os_upgrade(LATEST["host"])}
-    docker  = HEALTH["docker"]  or {"available": False, "reason": "warming up…",
-                                    "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
-    systemd = HEALTH["systemd"] or {"available": False, "reason": "warming up…",
-                                    "services": [], "summary": {}}
-    update  = dict(HEALTH["update"] or {"available": False, "current": VERSION})
-    # Let the frontend decide whether to show the one-click "Update now" button.
-    # Set here (not baked into the cached collect_update payload) so toggling the
-    # env flag takes effect on restart without waiting for the update cache.
-    update["self_update_enabled"] = ALLOW_SELF_UPDATE
-    disk_io = dict(HEALTH.get("disk_io") or {"available": False, "warming_up": True,
-                                              "summary": {"total_read_mb_s": 0.0, "total_write_mb_s": 0.0},
-                                              "items": []})
-    # Per-process I/O attribution (Top writer/reader) — attach ONLY to this authed
-    # payload. Carries process comm (never cmdline/argv) and NEVER appears on the
-    # public status surface (build_public_status doesn't read processes/disk_io).
-    _pio = (HEALTH.get("processes") or {}).get("io")
-    if _pio and _pio.get("available"):
-        disk_io["attribution"] = _pio
-    if _diskio_anom_latest:
-        disk_io["anomalies"] = dict(_diskio_anom_latest)
-    return jsonify({"version": VERSION, "updated": HEALTH["at"], "now": now,
-                    "docker": docker, "systemd": systemd, "update": update,
-                    "processes": HEALTH["processes"],
-                    "disk_io": disk_io,
-                    "os_updates": os_updates_summary(),
-                    "diagnostics": local_diagnostics(),
-                    "mcp": {"enabled": _mcp_enabled(), "port": _mcp_port()},
-                    "overview": build_overview(now, docker, systemd)})
-
-@app.route("/metrics")
-def metrics():
-    """Prometheus text-format scrape endpoint.
-
-    Reads exclusively from the in-memory snapshots (LATEST / HEALTH) that the
-    background collector keeps fresh.  No new I/O is triggered on each scrape,
-    so double-sampling is impossible.
-    """
-    if not _PROM_OK:
-        return Response("# prometheus_client not installed\n", mimetype="text/plain", status=503)
-
-    # Clear all multi-label gauges before re-populating so stale series vanish.
-    for key in ("gpu_vram_used", "gpu_vram_total", "gpu_util", "gpu_temp", "gpu_power",
-                "host_disk_used", "model_vram", "container_state", "systemd_unit",
-                "models_installed"):
-        _G[key].clear()
-
-    # ── GPU ──────────────────────────────────────────────────────────────────
-    gpu_label = "gpu0"
-    _G["gpu_vram_used"].labels(gpu=gpu_label).set(LATEST.get("mem_used", 0))
-    _G["gpu_vram_total"].labels(gpu=gpu_label).set(LATEST.get("mem_total", 0))
-    _G["gpu_util"].labels(gpu=gpu_label).set(LATEST.get("util", 0))
-    _G["gpu_temp"].labels(gpu=gpu_label).set(LATEST.get("temp", 0))
-    _G["gpu_power"].labels(gpu=gpu_label).set(LATEST.get("power", 0))
-
-    # ── Host ─────────────────────────────────────────────────────────────────
-    host = LATEST.get("host") or {}
-    _G["host_cpu"].set(host.get("cpu", 0))
-    ram_total = host.get("ram_total") or 1
-    ram_used  = host.get("ram_used", 0)
-    _G["host_mem_used"].set(round(100 * ram_used / ram_total, 1))
-    for disk in (host.get("disks") or []):
-        _G["host_disk_used"].labels(mountpoint=disk["mount"]).set(disk.get("pct", 0))
-
-    # ── Model VRAM ───────────────────────────────────────────────────────────
-    for entry in (LATEST.get("models") or []):
-        vram = entry.get("vram")
-        if vram is not None:
-            _G["model_vram"].labels(server=entry.get("service", "?"),
-                                    model=entry.get("model", "?")).set(vram)
-
-    # ── Installed-models registry, by provider (#219) — no new I/O: counts the
-    # already-sampled model_catalog, same source the /api/models endpoint merges.
-    provider_counts = {}
-    for entry in (LATEST.get("model_catalog") or []):
-        p = entry.get("provider") or "unknown"
-        provider_counts[p] = provider_counts.get(p, 0) + 1
-    for provider, count in provider_counts.items():
-        _G["models_installed"].labels(provider=provider).set(count)
-
-    # ── Docker containers ────────────────────────────────────────────────────
-    docker = HEALTH.get("docker") or {}
-    for ct in (docker.get("containers") or []):
-        name  = ct.get("name", "?")
-        state = ct.get("state", "unknown")
-        _G["container_state"].labels(name=name, state=state).set(1)
-
-    # ── Systemd units ────────────────────────────────────────────────────────
-    systemd = HEALTH.get("systemd") or {}
-    for svc in (systemd.get("services") or []):
-        unit   = svc.get("name", "?")
-        active = svc.get("active", "unknown")
-        _G["systemd_unit"].labels(unit=unit, state=active).set(
-            1 if active == "active" else 0)
-
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
-
 
 def _public_settings():
     """Same as get_settings(), but redacts secrets and reports their presence."""
@@ -7325,69 +5536,7 @@ def _public_settings():
         out[k + "_set"] = bool(s.get(k))
     return out
 
-@app.route("/api/hub/pubkey")
-def api_hub_pubkey():
-    return jsonify({"pubkey": get_hub_pubkey()})
 
-@app.route("/api/hosts", methods=["GET", "POST"])
-def api_hosts():
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        host, err = add_host((body.get("name") or "").strip(),
-                             (body.get("ssh_target") or "").strip(),
-                             (body.get("tags") or "").strip())
-        if err:
-            return jsonify({"ok": False, "error": err}), 400
-        return jsonify({"ok": True, "host": host}), 201
-    return jsonify({"hosts": list_hosts()})
-
-@app.route("/api/hosts/<name>", methods=["DELETE", "PATCH"])
-def api_hosts_one(name):
-    if request.method == "DELETE":
-        ok = delete_host(name)
-        return jsonify({"ok": ok}), (200 if ok else 404)
-    body = request.get_json(silent=True) or {}
-    host, err = update_host(
-        name,
-        ssh_target=(body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None),
-        tags=(body.get("tags").strip() if isinstance(body.get("tags"), str) else None),
-    )
-    if err:
-        return jsonify({"ok": False, "error": err}), 400 if "look like" in err or "Nothing" in err else 404
-    return jsonify({"ok": True, "host": host})
-
-@app.route("/api/lan/scan")
-def api_lan_scan():
-    return jsonify(discover_lan())
-
-@app.route("/api/host_data/<name>")
-def api_host_data(name):
-    """Per-host metric snapshot. `local` is the hub itself; remotes are served
-    from the in-memory cache populated by host_poller()."""
-    if name == "local":
-        return jsonify({"name": "local", "host": enrich_os_upgrade(_local_now_snapshot()),
-                        "at": int(time.time()), "online": True})
-    with HOST_DATA_LOCK:
-        entry = HOST_DATA.get(name)
-    if not entry or "data" not in entry:
-        # No successful poll yet (or never registered) — still respond 200 so
-        # the UI can render a "waiting" state instead of erroring.
-        return jsonify({"name": name, "online": False,
-                        "error": (entry or {}).get("error") or "no data yet",
-                        "at": (entry or {}).get("at"),
-                        "host": None})
-    age     = int(time.time()) - int(entry["at"])
-    online  = _host_is_online(entry)
-    return jsonify({"name": name, "host": enrich_os_upgrade(entry["data"].get("host", {})),
-                    "at": entry["at"], "online": online,
-                    "stale_for": 0 if online else age,
-                    "error": entry.get("error")})
-
-# ── On-demand disk-usage scan (WizTree-style folder treemap) ──────────────────
-# `du --max-depth=1` of a host path (read through the read-only HOST_ROOT mount),
-# run in a background thread so a slow scan of a big disk never blocks a request.
-# The UI polls until state=="done". Results cached per path; one filesystem only
-# (--one-file-system) so scanning "/" doesn't wander into other mounted disks.
 _DISK_SCAN, _DISK_SCAN_LOCK = {}, threading.Lock()
 _DISK_SCAN_TTL = 900   # reuse a completed scan for 15 min
 
@@ -7461,361 +5610,6 @@ def _disk_scan_worker(path, real):
         with _DISK_SCAN_LOCK:
             _DISK_SCAN[path] = {"state": "error", "at": int(time.time()), "error": str(e)[:200]}
 
-@app.route("/api/disk_scan")
-def api_disk_scan():
-    path = os.path.normpath(request.args.get("path") or "/")
-    rescan = request.args.get("rescan") == "1"
-    real = _safe_host_dir(path)
-    if not real:
-        return jsonify({"path": path, "state": "error", "error": f"not a readable directory: {path}"})
-    with _DISK_SCAN_LOCK:
-        ent = _DISK_SCAN.get(path)
-        if ent and not rescan:
-            if ent["state"] == "scanning":
-                return jsonify({"path": path, "state": "scanning"})
-            if ent["state"] == "done" and time.time() - ent["at"] < _DISK_SCAN_TTL:
-                return jsonify({"path": path, **ent})
-            if ent["state"] == "error" and time.time() - ent["at"] < 20:
-                return jsonify({"path": path, **ent})
-        _DISK_SCAN[path] = {"state": "scanning", "at": int(time.time())}
-    threading.Thread(target=_disk_scan_worker, args=(path, real), daemon=True).start()
-    return jsonify({"path": path, "state": "scanning"})
-
-@app.route("/api/fleet")
-def api_fleet():
-    """Compact summary KPIs for every host in the fleet. Drives the All-hosts
-    table. Order: local first, then registered hosts in the order they were
-    added."""
-    hosts = list_hosts()
-    rows  = []
-
-    # Local row
-    rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
-                 "ssh_target": None, "host": enrich_os_upgrade(_local_now_snapshot()),
-                 "at": int(time.time()), "online": True, "is_local": True,
-                 "last_check": {"summary": {"overall": "ok"}}})
-
-    with HOST_DATA_LOCK:
-        for h in hosts:
-            entry = HOST_DATA.get(h["name"]) or {}
-            data  = entry.get("data") or {}
-            at    = entry.get("at")
-            online = _host_is_online(entry)
-            rows.append({
-                "name": h["name"],
-                "label": h["name"],
-                "ssh_target": h["ssh_target"],
-                "host": enrich_os_upgrade(data.get("host")) if data else None,
-                "at": at,
-                "online": online,
-                "is_local": False,
-                "last_check": h.get("last_check"),
-                "error": entry.get("error"),
-            })
-    return jsonify({"hosts": rows, "interval": INTERVAL})
-
-@app.route("/api/hosts/<name>/test", methods=["POST"])
-def api_hosts_test(name):
-    result = probe_host(name)
-    if result is None:
-        return jsonify({"ok": False, "error": "no such host"}), 404
-    return jsonify({"ok": True, "result": result})
-
-@app.route("/api/hosts/<name>/run", methods=["POST"])
-def api_hosts_run(name):
-    """Execute a command on a registered host. Body: {cmd, sudo_password?}.
-    The sudo password is processed in-memory: piped via stdin to `sudo -S`
-    on the remote, NEVER stored in the DB, NEVER written to logs, NEVER
-    in any process's argv. Don't pass arbitrary cmd from untrusted users —
-    the API is reachable to anyone on the LAN who can hit the dashboard."""
-    body = request.get_json(silent=True) or {}
-    cmd = (body.get("cmd") or "").strip()
-    sudo_password = body.get("sudo_password") or None
-    if not cmd:
-        return jsonify({"ok": False, "error": "cmd required"}), 400
-    result = run_on_host(name, cmd, sudo_password=sudo_password)
-    # Drop the password reference ASAP — Python keeps the string object until
-    # GC, but at least we don't hold our own reference past this point.
-    sudo_password = None
-    body = None
-    if result is None:
-        return jsonify({"ok": False, "error": "no such host"}), 404
-    return jsonify(result)
-
-@app.route("/api/backup")
-def api_backup_download():
-    """Stream a consistent SQLite snapshot (VACUUM INTO) of the live database."""
-    if _DB_MAINTENANCE:
-        return jsonify({"ok": False, "error": "Database maintenance in progress."}), 503
-    if not _data_dir_writable():
-        return jsonify({"ok": False, "error": "Cannot write backup — mount a writable /data volume."}), 400
-    tmp_path = None
-    try:
-        with LOCK:
-            fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix=".backup_", dir=_data_dir())
-            os.close(fd)
-            db_backup.vacuum_into(DB, tmp_path)
-    except Exception as e:
-        if tmp_path:
-            try: os.unlink(tmp_path)
-            except OSError: pass
-        return jsonify({"ok": False, "error": "Backup failed: %s" % e}), 500
-
-    @after_this_request
-    def _cleanup_snapshot(resp):
-        try: os.unlink(tmp_path)
-        except OSError: pass
-        return resp
-
-    return send_file(tmp_path, mimetype="application/x-sqlite3", as_attachment=True,
-                     download_name=db_backup.backup_filename())
-
-@app.route("/api/backup/restore", methods=["POST"])
-def api_backup_restore():
-    """Replace the live database with an uploaded backup snapshot."""
-    global _DB_MAINTENANCE
-    if _DB_MAINTENANCE:
-        return jsonify({"ok": False, "error": "Database maintenance already in progress."}), 503
-    if not _data_dir_writable():
-        return jsonify({"ok": False, "error": "Cannot restore — mount a writable /data volume."}), 400
-    upload = request.files.get("backup")
-    if not upload or not upload.filename:
-        return jsonify({"ok": False, "error": "No backup file uploaded."}), 400
-
-    upload_path = None
-    try:
-        fd, upload_path = tempfile.mkstemp(suffix=".db", prefix=".restore_upload_", dir=_data_dir())
-        os.close(fd)
-        upload.save(upload_path)
-        ok, err = db_backup.validate_backup(upload_path)
-        if not ok:
-            return jsonify({"ok": False, "error": err}), 400
-
-        with LOCK:
-            _DB_MAINTENANCE = True
-            try:
-                if os.path.isfile(DB_PATH):
-                    shutil.copy2(DB_PATH, "%s.pre-restore-%d.bak" % (DB_PATH, int(time.time())))
-                try:
-                    DB.close()
-                except Exception:
-                    pass
-                db_backup.remove_wal_sidecars(DB_PATH)
-                os.replace(upload_path, DB_PATH)
-                upload_path = None
-                db_backup.remove_wal_sidecars(DB_PATH)
-                reopen_db()
-            except Exception as e:
-                try:
-                    reopen_db()
-                except Exception:
-                    pass
-                return jsonify({"ok": False, "error": "Restore failed: %s" % e}), 500
-            finally:
-                _DB_MAINTENANCE = False
-
-        return jsonify({"ok": True,
-                        "message": "Backup restored. History and settings have been reloaded."})
-    finally:
-        if upload_path:
-            try: os.unlink(upload_path)
-            except OSError: pass
-
-@app.route("/api/settings", methods=["GET", "POST"])
-def api_settings():
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        # Empty string clears a setting; missing key leaves it unchanged.
-        # Secrets pass through the "_set: false" sentinel from the UI as a way
-        # to clear without revealing the current value.
-        updates = {k: body[k] for k in body if k in SETTING_DEFAULTS}
-        err = (_validate_url_settings(updates) or _validate_email_settings(updates)
-               or _validate_brief_settings(updates))
-        if err:
-            return jsonify({"ok": False, "error": err}), 400
-        save_settings(updates)
-    return jsonify({"version": VERSION, "settings": _public_settings()})
-
-@app.route("/api/notify/test", methods=["POST"])
-def api_notify_test():
-    """Send a one-shot test alert using the currently saved settings."""
-    s = get_settings()
-    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))
-            or (s.get("email_host") and s.get("email_from") and s.get("email_to"))
-            or s.get("slack_webhook_url")
-            or s.get("webhook_url")):
-        return jsonify({"ok": False, "results": [],
-                        "reason": "No Discord webhook, ntfy topic, Telegram bot, email, Slack webhook, or generic webhook configured."}), 400
-    results = dispatch_alert(s, "info",
-                             "✅ HomeLab Monitor — test alert",
-                             "If you see this, alerts are wired up correctly.")
-    return jsonify({"ok": all(ok for _, ok, _ in results),
-                    "results": [{"channel": c, "ok": ok, "error": err} for c, ok, err in results]})
-
-@app.route("/api/uptime", methods=["GET", "POST"])
-def api_uptime():
-    """List uptime checks with their live state (GET) or create one (POST).
-    GET is always 200 (an empty list before any are added); POST returns a clean
-    400 with a human error on invalid input."""
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        cid, err = create_uptime_check(body)
-        if err:
-            return jsonify({"ok": False, "error": err}), 400
-        return jsonify({"ok": True, "id": cid}), 201
-    return jsonify(uptime_overview())
-
-@app.route("/api/uptime/<cid>", methods=["PATCH", "DELETE"])
-def api_uptime_one(cid):
-    """Update (full edit or a quick enabled toggle) or delete one check."""
-    if request.method == "DELETE":
-        return (jsonify({"ok": True}) if delete_uptime_check(cid)
-                else (jsonify({"ok": False, "error": "not found"}), 404))
-    body = request.get_json(silent=True) or {}
-    ok, err = update_uptime_check(cid, body)
-    if ok:
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": err}), (404 if err == "not found" else 400)
-
-@app.route("/api/maintenance", methods=["GET", "POST"])
-def api_maintenance():
-    """List maintenance windows (GET) or create one (POST)."""
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        label = (body.get("label") or "").strip()
-        if not label:
-            return jsonify({"ok": False, "error": "label is required"}), 400
-        start_ts = body.get("start_ts")
-        end_ts   = body.get("end_ts")
-        if not start_ts or not end_ts:
-            return jsonify({"ok": False, "error": "start_ts and end_ts are required"}), 400
-        try:
-            start_ts = int(start_ts)
-            end_ts = int(end_ts)
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "start_ts and end_ts must be numeric"}), 400
-        if end_ts <= start_ts:
-            return jsonify({"ok": False, "error": "end_ts must be after start_ts"}), 400
-        recurrence = body.get("recurrence") or None
-        if recurrence and recurrence not in ("daily", "weekly"):
-            return jsonify({"ok": False, "error": "recurrence must be daily, weekly, or null"}), 400
-        if recurrence == "daily" and (end_ts - start_ts) > 86400:
-            return jsonify({"ok": False, "error": "daily recurrence window cannot exceed 24h"}), 400
-        if recurrence == "weekly" and (end_ts - start_ts) > 604800:
-            return jsonify({"ok": False, "error": "weekly recurrence window cannot exceed 7d"}), 400
-        wid = create_maintenance_window(
-            label=label,
-            kind=body.get("kind") or "*",
-            pattern=body.get("pattern") or "*",
-            start_ts=start_ts,
-            end_ts=end_ts,
-            recurrence=recurrence,
-            note=body.get("note"),
-        )
-        return jsonify({"ok": True, "id": wid}), 201
-    return jsonify(list_maintenance_windows())
-
-@app.route("/api/maintenance/<wid>", methods=["DELETE"])
-def api_maintenance_one(wid):
-    """Delete a maintenance window."""
-    delete_maintenance_window(wid)
-    return jsonify({"ok": True})
-
-@app.route("/api/update/app", methods=["POST"])
-def api_update_app():
-    """Start the opt-in one-click self-update (detached docker:cli helper).
-    400 = disabled / no update / not a compose deploy; 409 = already running;
-    202 = job started. Gated by ALLOW_SELF_UPDATE — off by default."""
-    body = request.get_json(silent=True) or {}
-    force = bool(body.get("force"))
-    code, payload = start_self_update(force=force)
-    return jsonify(payload), code
-
-@app.route("/api/update/app/status")
-def api_update_app_status():
-    """Read back the self-update progress files from the data dir. Works even
-    right after the restart — it just reads update_state.json + a tail of
-    update.log. No state file yet → idle."""
-    st = _read_update_state()
-    if not st:
-        return jsonify({"state": "idle"})
-    st = dict(st)
-    st["log"] = _tail_lines(_update_log_path(), 200)
-    st["self_update_enabled"] = ALLOW_SELF_UPDATE
-    return jsonify(st)
-
-@app.route("/api/notify/rules", methods=["GET", "POST"])
-def api_notify_rules():
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        action = body.get("action", "add")
-        if action == "add":
-            with LOCK:
-                DB.execute("INSERT INTO notification_rules (match_kind, match_pattern, channel, min_level, enabled) VALUES (?, ?, ?, ?, ?)",
-                           (body.get("match_kind", "container"), body.get("match_pattern", "*"),
-                            body.get("channel", "all"), body.get("min_level", "warning"),
-                            1 if body.get("enabled", True) else 0))
-                DB.commit()
-        elif action == "update":
-            rule_id = body.get("id")
-            if not rule_id:
-                return jsonify({"ok": False, "error": "id required"}), 400
-            with LOCK:
-                DB.execute("UPDATE notification_rules SET match_kind=?, match_pattern=?, channel=?, min_level=?, enabled=? WHERE id=?",
-                           (body.get("match_kind"), body.get("match_pattern"),
-                            body.get("channel"), body.get("min_level"),
-                            1 if body.get("enabled", True) else 0, rule_id))
-                DB.commit()
-        elif action == "delete":
-            rule_id = body.get("id")
-            if not rule_id:
-                return jsonify({"ok": False, "error": "id required"}), 400
-            with LOCK:
-                DB.execute("DELETE FROM notification_rules WHERE id=?", (rule_id,))
-                DB.commit()
-        else:
-            return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
-        return jsonify({"ok": True, "rules": get_notification_rules()})
-    return jsonify({"rules": get_notification_rules()})
-
-@app.route("/api/notify/rules/test", methods=["POST"])
-def api_notify_rules_test():
-    """Test a notification rule by sending a sample alert that would match it."""
-    body = request.get_json(silent=True) or {}
-    s = get_settings()
-    if not (s.get("discord_webhook_url") or s.get("ntfy_topic")
-            or (s.get("telegram_token") and s.get("telegram_chat_id"))):
-        return jsonify({"ok": False, "error": "No notification channels configured."}), 400
-    test_rule = {
-        "match_kind": body.get("match_kind", "container"),
-        "match_pattern": body.get("match_pattern", "*"),
-        "channel": body.get("channel", "all"),
-        "min_level": body.get("min_level", "warning"),
-        "enabled": True,
-    }
-    test_key = f"{test_rule['match_kind']}:test-rule"
-    channels = _apply_rules(test_key, body.get("level", "warning"), [test_rule])
-    if channels is None:
-        return jsonify({"ok": False, "error": "Rule would not match — check kind and pattern."}), 400
-    _dispatch_to_channels(s, body.get("level", "warning"),
-                          "🔔 HomeLab Monitor — rule test",
-                          f"Test of rule: {test_rule['match_kind']} / {test_rule['match_pattern']} → {test_rule['channel']} @ {test_rule['min_level']}",
-                          channels)
-    return jsonify({"ok": True, "channels": list(channels)})
-
-
-@app.route("/")
-def index():
-    return app.send_static_file("dashboard.html")
-
-# ── Daily brief (#170) ───────────────────────────────────────────────────────
-# An opt-in, once-a-day HTML health digest assembled from data we already collect
-# (overview + fleet + uptime checks + recent events + GPU/cost). Email gets the
-# full self-contained, inline-styled HTML (survives Gmail/Outlook with no external
-# assets); chat channels get a compact text summary with the things that need
-# attention. Pure stdlib. Each section degrades gracefully when its data is absent.
-# (_BRIEF_CHANNELS is defined up by the settings validators that consume it.)
 
 _BRIEF_PALETTE = {
     "dark":  {"bg": "#0d1117", "card": "#161b22", "bd": "#30363d", "sub": "#21262d",
@@ -7854,8 +5648,9 @@ def _brief_yesterday_cost():
     kwh_per = INTERVAL / 3_600_000.0
     cost = kwh = 0.0
     try:
+        from backend.db.repos import system as _sys_repo
         with LOCK:
-            for ts, w in DB.execute(f"SELECT ts, {_TOTAL_W_EXPR} w FROM samples WHERE ts>=? AND ts<?", (y0, today0)):
+            for ts, w in _sys_repo.query_samples_for_cost(y0, today0, conn=DB):
                 cost += (w or 0) * kwh_per * _price_at(ctx, ts)
                 kwh  += (w or 0) * kwh_per
     except Exception:
@@ -7913,11 +5708,11 @@ def _brief_checks():
 
 def _brief_events(window=86400, limit=8):
     """Recent rows from the events log (OOM/down/recovery, etc.) over the window."""
+    from backend.db.repos import system as _sys_repo
     now = int(time.time())
     try:
         with LOCK:
-            rows = DB.execute("SELECT ts, service, kind, detail FROM events "
-                              "WHERE ts>=? ORDER BY ts DESC LIMIT ?", (now - window, limit)).fetchall()
+            rows = _sys_repo.query_events_since(now - window, order_desc=True, limit=limit, conn=DB)
     except Exception:
         rows = []
     return [{"ts": r[0], "service": r[1], "kind": r[2], "detail": r[3]} for r in rows]
@@ -8217,49 +6012,17 @@ def _brief_run_once(now=None):
         print("brief send error:", e, flush=True)
     return True
 
-def brief_worker():
-    """Dedicated daemon: every 30s, send the daily brief if it's due. Inert unless
-    the brief is enabled with a configured channel."""
-    while True:
-        try:
-            _brief_run_once()
-        except Exception as e:
-            print("brief_worker error:", e, flush=True)
-        time.sleep(30)
+# Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
+from backend.collectors import brief_worker
+from backend.collectors import watchdog as _collector_watchdog
 
-@app.route("/api/brief/preview")
-def api_brief_preview():
-    """Render the current brief as HTML (the Preview button opens this in a tab)."""
-    theme = request.args.get("theme") or get_settings().get("brief_theme", "dark")
-    html, _, _, _ = render_brief("light" if theme == "light" else "dark")
-    return Response(html, mimetype="text/html; charset=utf-8")
 
-@app.route("/api/brief/test", methods=["POST"])
-def api_brief_test():
-    """Render + deliver a brief now to the chosen channel (Send-test button)."""
-    s = get_settings()
-    body = request.get_json(silent=True) or {}
-    ch = (body.get("channel") or s.get("brief_channel") or "").strip()
-    if ch not in _BRIEF_CHANNELS:
-        return jsonify({"ok": False, "error": "Pick a channel for the daily brief first."}), 400
-    if not _brief_channel_ready(s, ch):
-        return jsonify({"ok": False, "error": f"The {ch} channel isn't configured yet — fill it in above under Alerts."}), 400
-    try:
-        send_brief(s, ch)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    return jsonify({"ok": True, "channel": ch})
-
-# Under pytest, "pytest" is already in sys.modules by the time any test file's
-# `import app` runs — skip the live background workers there. They mutate global
-# state (LATEST/HEALTH/DB) on their own clock with no test-mode awareness, so a
-# long-enough suite could otherwise race a real collector tick against a test's
-# own explicit state setup. Never gated in production (no pytest import there).
 if "pytest" not in sys.modules:
     threading.Thread(target=collector, daemon=True).start()
     threading.Thread(target=host_poller, daemon=True).start()
     threading.Thread(target=uptime_worker, daemon=True).start()
     threading.Thread(target=brief_worker, daemon=True).start()
+    threading.Thread(target=_collector_watchdog, daemon=True).start()
 
 
 import os as _os
@@ -8289,12 +6052,10 @@ def _public_monitor(check, now):
     everything the Statuspage-style row needs: current state, 24h/7d/90d uptime,
     a day-by-day bar, the recent heartbeat, cert status, and recent incidents.
     No raw target (host only)."""
+    from backend.db.repos import uptime as _uptime_repo
     cid = check["id"]
     with LOCK:
-        rows = DB.execute(
-            "SELECT ts,up,latency_ms,code,err,cert_days_remaining,cert_expires_at "
-            "FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
-            (cid, now - 7776000)).fetchall()        # 90 days
+        rows = _uptime_repo.results_since_full(cid, now - 7776000, conn=DB)  # 90 days
     def win(w):
         sub = [r for r in rows if r[0] >= now - w]
         return round(100.0 * sum(1 for r in sub if r[1]) / len(sub), 2) if sub else None
@@ -8340,9 +6101,9 @@ def _public_incident_feed(monitors, now, days=14, cap=25):
     return feed[:cap]
 
 def _uptime_window_pct(check_id, now, window):
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        agg = DB.execute("SELECT COUNT(*), SUM(up) FROM uptime_results WHERE check_id=? AND ts>=?",
-                         (check_id, now - window)).fetchone()
+        agg = _uptime_repo.results_window_agg(check_id, now - window, conn=DB)
     tot = (agg[0] or 0) if agg else 0
     return round(100.0 * (agg[1] or 0) / tot, 2) if tot else None
 
@@ -8406,10 +6167,9 @@ def _public_status_detail(cid, now):
     if not check or not (check.get("public") and check.get("enabled")):
         return None
     s = _uptime_state(check["id"], now)
+    from backend.db.repos import uptime as _uptime_repo
     with LOCK:
-        rows90 = DB.execute(
-            "SELECT ts,up,latency_ms,code,err FROM uptime_results WHERE check_id=? AND ts>=? ORDER BY ts",
-            (check["id"], now - 7776000)).fetchall()         # 90 days
+        rows90 = _uptime_repo.results_since_full(check["id"], now - 7776000, conn=DB)  # 90 days
     rows24 = [r for r in rows90 if r[0] >= now - 86400]
     return {
         "id": check["id"], "label": check["label"], "type": check["type"],
@@ -8437,50 +6197,6 @@ def _public_overall_status(cards, monitors):
         return "crit"
     return "ok" if all(c.get("status") == "ok" for c in cards) else "warn"
 
-@app.route("/api/public-status")
-def api_public_status():
-    if not _os.environ.get("PUBLIC_STATUS"):
-        abort(404)
-    cfg = get_settings()
-    gpu_avail = LATEST.get("gpu_avail")
-    now = {"gpu": {"util": LATEST.get("util"), "mem_used": LATEST.get("mem_used"),
-                   "mem_total": (LATEST.get("mem_total") or 24576) if gpu_avail else 0,
-                   "power": LATEST.get("power"), "temp": LATEST.get("temp"),
-                   "available": bool(gpu_avail),
-                   "gpus": LATEST.get("gpus") or [],
-                   "extra": LATEST.get("gpu_extra") or {}},
-           "host": LATEST.get("host") or {}}
-    docker  = HEALTH.get("docker")  or {"available": False, "reason": "warming up", "containers": [], "summary": {"total": 0, "running": 0, "problems": 0}}
-    systemd = HEALTH.get("systemd") or {"available": False, "reason": "warming up", "services": [], "summary": {}}
-    cards = build_overview(now, docker, systemd)
-    safe_cards = [{k: v for k, v in c.items() if k in ("key", "label", "status", "metric", "detail")} for c in cards]
-    _now = int(time.time())
-    monitors = _public_monitors(_now)
-    return jsonify({
-        "lab_name": cfg.get("lab_name", "My HomeLab"),
-        "lab_emoji": cfg.get("lab_emoji", "🏠"),
-        "overview": safe_cards,
-        "monitors": monitors,
-        "monitors_summary": _public_monitors_summary(monitors),
-        "incidents": _public_incident_feed(monitors, _now),
-        "status": _public_overall_status(safe_cards, monitors),
-    })
-
-@app.route("/api/public-status/<cid>")
-def api_public_status_one(cid):
-    if not _os.environ.get("PUBLIC_STATUS"):
-        abort(404)
-    detail = _public_status_detail(cid, int(time.time()))
-    if detail is None:
-        abort(404)
-    return jsonify(detail)
-
-@app.route("/public")
-@app.route("/public/<cid>")
-def public_status(cid=None):
-    if not _os.environ.get("PUBLIC_STATUS"):
-        abort(404)
-    return send_from_directory("static", "public.html")
 
 if __name__ == "__main__":
     print(

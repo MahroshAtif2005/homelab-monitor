@@ -1,0 +1,90 @@
+{
+  "diagnostics": [],
+  "disk_io": {
+    "available": false,
+    "items": [],
+    "summary": {
+      "total_read_mb_s": 0.0,
+      "total_write_mb_s": 0.0
+    },
+    "warming_up": true
+  },
+  "docker": {
+    "available": true,
+    "containers": [],
+    "controls_enabled": true,
+    "summary": {
+      "problems": 0,
+      "running": 0,
+      "total": 0
+    }
+  },
+  "mcp": {
+    "enabled": true,
+    "port": 9810
+  },
+  "now": {
+    "gpu": {
+      "available": false,
+      "extra": {},
+      "gpus": [],
+      "mem_total": 0,
+      "mem_used": 8192,
+      "power": 130,
+      "temp": 66,
+      "util": 42
+    },
+    "host": {
+      "cores": 8,
+      "cpu": 35,
+      "ctemp": 55,
+      "disks": [],
+      "hostname": "testhost",
+      "load1": 1.5,
+      "ram_kernel": 500,
+      "ram_total": 32000,
+      "ram_used": 16000,
+      "uptime": 86400
+    }
+  },
+  "os_updates": {
+    "available": 0
+  },
+  "overview": [
+    {
+      "detail": "50% RAM \u00b7 0% disk",
+      "key": "host",
+      "label": "Host",
+      "metric": "35% CPU",
+      "status": "ok"
+    },
+    {
+      "detail": "all healthy",
+      "key": "containers",
+      "label": "Containers",
+      "metric": "0/0 up",
+      "status": "ok"
+    },
+    {
+      "detail": "none failed",
+      "key": "services",
+      "label": "Services",
+      "metric": "0 running",
+      "status": "ok"
+    }
+  ],
+  "processes": null,
+  "systemd": {
+    "available": true,
+    "controls_enabled": true,
+    "services": [],
+    "summary": {}
+  },
+  "update": {
+    "available": false,
+    "current": "0.24.0",
+    "self_update_enabled": true
+  },
+  "updated": 1735689600,
+  "version": "0.24.0"
+}

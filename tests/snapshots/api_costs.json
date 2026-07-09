@@ -1,0 +1,49 @@
+{
+  "breakdown": [],
+  "bucket_sec": 10,
+  "components": {
+    "gpu": [
+      130
+    ],
+    "labels": [
+      1735689600
+    ]
+  },
+  "currency": "$",
+  "enabled": false,
+  "machines": [
+    {
+      "cost": {
+        "d30": 0.0,
+        "d7": 0.0,
+        "today": 0.0
+      },
+      "cost_range": 0.0,
+      "energy_kwh": {
+        "cpu": 0.0,
+        "gpu": 0.001,
+        "total": 0.001
+      },
+      "estimated": [],
+      "measured": [
+        "gpu"
+      ],
+      "name": "local",
+      "now_w": {
+        "cpu": null,
+        "dram": null,
+        "gpu": 130,
+        "total": 130
+      }
+    }
+  ],
+  "range": "1h",
+  "rapl_available": false,
+  "tariff": {
+    "mode": "single",
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "price_day": 0.0,
+    "price_night": null
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "reason": "No Discord webhook, ntfy topic, Telegram bot, email, Slack webhook, or generic webhook configured.",
+  "results": []
+}

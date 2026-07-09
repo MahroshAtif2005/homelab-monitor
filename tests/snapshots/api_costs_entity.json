@@ -1,0 +1,19 @@
+{
+  "avg_w": 0,
+  "bucket_sec": 10,
+  "cost": 0.0,
+  "currency": "$",
+  "energy_kwh": 0.0,
+  "kind": "gpu",
+  "name": "test",
+  "peak_w": 0,
+  "range": "1h",
+  "resources": {
+    "gpu_vram_peak_mb": null
+  },
+  "series": {
+    "cost_cum": [],
+    "labels": [],
+    "watts": []
+  }
+}

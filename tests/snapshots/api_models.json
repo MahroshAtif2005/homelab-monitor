@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "models": [],
+  "ollama_reachable": false,
+  "providers": [],
+  "totals": {
+    "count": 0,
+    "loaded": 0,
+    "total_bytes": 0,
+    "total_gb": 0.0
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "at": 1735689600,
+  "host": {
+    "cpu": 30,
+    "hostname": "testhost"
+  },
+  "name": "local",
+  "online": true
+}
