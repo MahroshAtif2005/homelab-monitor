@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from backend.db.repos.samples import rollup_now as _rollup_now
 from backend.db.repos.samples import rollup_net_now as _rollup_net_now
 from backend._heartbeat import heartbeat as _heartbeat, get_heartbeats as _get_heartbeats
+from backend.probes import _match_probe, _match_probe_key, probe_models
 
 # Re-export so callers can do `from backend.collectors import _HEARTBEATS, _HEARTBEAT_LOCK`
 # (used by tests that import the heartbeat module directly for isolation assertions).
@@ -71,7 +72,7 @@ def host_poller():
                 # Each host gets its own thread for the cycle, so the wall-clock
                 # period is the slowest single probe, not the sum of all of them.
                 with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as ex:
-                    list(ex.map(_poll_one_host, hosts))
+                    list(ex.map(_app._poll_one_host, hosts))
         except Exception as e:
             print("host_poller error:", e, flush=True)
         time.sleep(_app.INTERVAL)

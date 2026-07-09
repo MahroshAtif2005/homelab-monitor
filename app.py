@@ -4439,10 +4439,11 @@ def _emit(s, key, level, title, detail, rules=None):
         if _NOTIFIED.get(key):
             return
         _NOTIFIED[key] = 1
-    try:
-        _edge_state_repo.arm_key(key, int(time.time()), conn=_app.DB)
-    except Exception as e:
-        print(f"edge_state arm_key error: {e}", flush=True)
+    with LOCK:
+        try:
+            _edge_state_repo.arm_key(key, int(time.time()), conn=_app.DB)
+        except Exception as e:
+            print(f"edge_state arm_key error: {e}", flush=True)
     channels = _apply_rules(key, level, rules)
     if channels is not None:
         _dispatch_to_channels(s, level, title, detail, channels)
@@ -4458,10 +4459,11 @@ def _clear(key):
         was_armed = key in _NOTIFIED
         _NOTIFIED.pop(key, None)
     if was_armed:
-        try:
-            _edge_state_repo.disarm_key(key, conn=_app.DB)
-        except Exception as e:
-            print(f"edge_state disarm_key error: {e}", flush=True)
+        with LOCK:
+            try:
+                _edge_state_repo.disarm_key(key, conn=_app.DB)
+            except Exception as e:
+                print(f"edge_state disarm_key error: {e}", flush=True)
 
 def _in_maintenance(kind, name):
     """Return True if kind:name is currently covered by an active maintenance window."""
