@@ -2,10 +2,12 @@
 by the hub's local collector (app.amd_gpus) and the remote Linux probe
 (probe._amd_gpu_sysfs). We build a fake /sys/class/drm tree so the parsing is
 verified without an AMD GPU present."""
+import errno
 import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
@@ -137,6 +139,42 @@ class TestVendorAwareDiagnostics(unittest.TestCase):
         blob = (c.get("remedy") or {}).get("where", "") + (c.get("remedy") or {}).get("cmd", "")
         self.assertIn("amdgpu", blob)
         self.assertIn("mem_info_vram_total", blob)
+
+    def test_hybrid_is_labelled_both_vendors(self):
+        app.LATEST.update(gpu_avail=True, gpu_vendor="hybrid", mem_total=32768)
+        c = self._gpu_check()
+        self.assertEqual(c["label"], "GPU (NVIDIA + AMD)")
+        self.assertIn("nvidia-smi + amdgpu sysfs", c["detail"])
+
+
+class TestEbusyRetry(unittest.TestCase):
+    """amdgpu's gpu_busy_percent intermittently returns EBUSY ('Device or resource
+    busy'); the reader must retry once rather than silently dropping utilisation."""
+
+    def test_read_int_retries_once_on_ebusy(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "gpu_busy_percent")
+        with open(p, "w") as f:
+            f.write("37")
+        real_open, state = open, {"busy": True}
+        def flaky(path, *a, **k):
+            if isinstance(path, str) and path.endswith("gpu_busy_percent") and state["busy"]:
+                state["busy"] = False
+                raise OSError(errno.EBUSY, "Device or resource busy")
+            return real_open(path, *a, **k)
+        with mock.patch("builtins.open", side_effect=flaky):
+            self.assertEqual(app._amd_read_int(p), 37)   # retry succeeded
+
+    def test_read_int_gives_up_on_persistent_ebusy(self):
+        def always_busy(path, *a, **k):
+            raise OSError(errno.EBUSY, "busy")
+        with mock.patch("builtins.open", side_effect=always_busy):
+            self.assertIsNone(app._amd_read_int("/sys/x/gpu_busy_percent"))
+
+    def test_other_oserror_is_not_retried(self):
+        # A genuinely absent node (ENOENT) → None, no retry loop.
+        self.assertIsNone(app._amd_read_int("/definitely/not/here"))
 
 
 if __name__ == "__main__":

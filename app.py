@@ -18,7 +18,7 @@ Adding a new monitor (it's meant to be easy):
   2. Populate it from `health_scan()` so the background thread keeps it fresh.
   3. Expose it via `/api/health` and add a matching tab/panel in dashboard.html.
 """
-import os, re, sys, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch
+import os, re, sys, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch, errno
 from functools import wraps
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
@@ -2566,12 +2566,12 @@ def local_diagnostics():
     # and remediate for whichever vendor is actually present, so an AMD user isn't
     # told to install the NVIDIA runtime.
     vram = round(LATEST.get("mem_total") or 0)
-    if LATEST.get("gpu_avail") and LATEST.get("gpu_vendor") == "amd":
-        _diag(checks, "nvidia", "GPU (AMD)", "ok",
-              f"amdgpu sysfs OK · {vram} MB VRAM")
-    elif LATEST.get("gpu_avail"):
-        _diag(checks, "nvidia", "GPU (NVIDIA)", "ok",
-              f"nvidia-smi OK · {vram} MB VRAM")
+    if LATEST.get("gpu_avail"):
+        label, src = {
+            "amd":    ("GPU (AMD)", "amdgpu sysfs"),
+            "hybrid": ("GPU (NVIDIA + AMD)", "nvidia-smi + amdgpu sysfs"),
+        }.get(LATEST.get("gpu_vendor"), ("GPU (NVIDIA)", "nvidia-smi"))
+        _diag(checks, "nvidia", label, "ok", f"{src} OK · {vram} MB VRAM")
     else:
         _diag(checks, "nvidia", "GPU", "info",
               "no GPU detected — GPU panels are hidden (everything else works)",
@@ -4683,7 +4683,18 @@ def _amd_read_int(path):
     try:
         with open(path) as f:
             return int(f.read().strip())
-    except (OSError, ValueError):
+    except OSError as e:
+        # amdgpu's gpu_busy_percent intermittently returns EBUSY ("Device or
+        # resource busy") — a known driver quirk; one retry usually clears it.
+        # Any other OS error means the node is genuinely absent → treat as None.
+        if getattr(e, "errno", None) == errno.EBUSY:
+            try:
+                with open(path) as f:
+                    return int(f.read().strip())
+            except (OSError, ValueError):
+                return None
+        return None
+    except ValueError:
         return None
 
 def _amd_hwmon(dev, fname):
