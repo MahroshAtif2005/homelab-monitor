@@ -115,6 +115,7 @@ def sample_once():
     procs = {}
     gpu_pids = {}
     gpu_avail = False
+    gpu_vendor = None   # "nvidia" | "amd" — drives the vendor-aware GPU diagnostic
     try:
         # One CSV row per card (issue #95). Parse each field defensively: nvidia-_app.smi
         # emits the literal "[N/A]" / "[Not Supported]" for power.draw/temperature
@@ -140,6 +141,7 @@ def sample_once():
             if not gpus:
                 raise ValueError("no NVIDIA or AMD GPU detected")
         gpu_avail = True
+        gpu_vendor = "amd" if amd else "nvidia"
         # Aggregate across cards for the existing single-GPU views: VRAM + power are
         # the pool, utilisation is averaged, temperature is the hottest card. AMD
         # cards expose the same keys, so this aggregation is vendor-agnostic.
@@ -329,7 +331,7 @@ def sample_once():
             print("mlflow sync error:", e, flush=True)
     _app.LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
-                  gpu_avail=gpu_avail, gpus=gpus, gpu_extra=gpu_extra,
+                  gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
                   model_catalog=model_catalog,

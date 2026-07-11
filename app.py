@@ -359,7 +359,7 @@ _apply_schema_migrations(DB)
 _backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
-          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpus": [], "gpu_extra": {},
+          "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
@@ -2561,20 +2561,35 @@ def _diag(checks, cid, label, status, detail, remedy=None):
 def local_diagnostics():
     checks = []
     # GPU (optional) — info, not a failure: the monitor is useful without one.
-    if LATEST.get("gpu_avail"):
-        _diag(checks, "nvidia", "NVIDIA GPU", "ok",
-              f"nvidia-smi OK · {round(LATEST.get('mem_total') or 0)} MB VRAM")
+    # Vendor-aware: NVIDIA is read via nvidia-smi, AMD via the amdgpu sysfs interface
+    # (no ROCm). We keep the diagnostic id "nvidia" (stable i18n/DOM key) but label
+    # and remediate for whichever vendor is actually present, so an AMD user isn't
+    # told to install the NVIDIA runtime.
+    vram = round(LATEST.get("mem_total") or 0)
+    if LATEST.get("gpu_avail") and LATEST.get("gpu_vendor") == "amd":
+        _diag(checks, "nvidia", "GPU (AMD)", "ok",
+              f"amdgpu sysfs OK · {vram} MB VRAM")
+    elif LATEST.get("gpu_avail"):
+        _diag(checks, "nvidia", "GPU (NVIDIA)", "ok",
+              f"nvidia-smi OK · {vram} MB VRAM")
     else:
-        _diag(checks, "nvidia", "NVIDIA GPU", "info",
+        _diag(checks, "nvidia", "GPU", "info",
               "no GPU detected — GPU panels are hidden (everything else works)",
-              {"where": "on the host — only if it actually has an NVIDIA GPU. "
-                        "GPU containers use the env vars below only when nvidia is "
-                        "Docker's DEFAULT runtime; the recreate step is what was "
-                        "missing if a previous attempt 'did nothing'.",
-               "cmd": "sudo nvidia-ctk runtime configure --runtime=docker --set-as-default\n"
+              {"where": "on the host, if it has a GPU. AMD (amdgpu) is picked up "
+                        "automatically from the kernel's sysfs — no ROCm, no extra "
+                        "config; if a Radeon still isn't seen, check the sysfs nodes "
+                        "below exist (older kernels/APUs may not expose them). NVIDIA "
+                        "needs nvidia-smi injected: the env vars below only take effect "
+                        "when nvidia is Docker's DEFAULT runtime, and the recreate step "
+                        "is what was missing if a previous attempt 'did nothing'.",
+               "cmd": "# AMD — confirm the kernel exposes the card (no install needed):\n"
+                      "for c in /sys/class/drm/card*/device; do echo \"$c:\"; "
+                      "cat $c/vendor $c/mem_info_vram_total $c/gpu_busy_percent 2>&1; done\n"
+                      "# NVIDIA — make nvidia Docker's default runtime, then RECREATE:\n"
+                      "sudo nvidia-ctk runtime configure --runtime=docker --set-as-default\n"
                       "sudo systemctl restart docker\n"
                       "docker compose up -d --force-recreate   # recreate — restart keeps the old runtime\n"
-                      "# don't want nvidia as the global default? skip all three lines above and instead run:\n"
+                      "# don't want nvidia as the global default? skip the three lines above and instead run:\n"
                       "#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d"})
     # Docker socket — powers Containers + Services + model APIs.
     try:

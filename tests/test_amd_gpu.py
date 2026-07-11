@@ -98,5 +98,46 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), {})
 
 
+class TestVendorAwareDiagnostics(unittest.TestCase):
+    """The local diagnostics GPU row must speak the right vendor: an AMD host must
+    NOT be told to install the NVIDIA runtime (issue #1 follow-up)."""
+
+    def _gpu_check(self):
+        for c in app.local_diagnostics()["checks"]:
+            if c["id"] == "nvidia":
+                return c
+        self.fail("no GPU diagnostic row produced")
+
+    def setUp(self):
+        self._saved = dict(app.LATEST)
+
+    def tearDown(self):
+        app.LATEST.clear()
+        app.LATEST.update(self._saved)
+
+    def test_amd_present_is_labelled_amd(self):
+        app.LATEST.update(gpu_avail=True, gpu_vendor="amd", mem_total=16384)
+        c = self._gpu_check()
+        self.assertEqual(c["label"], "GPU (AMD)")
+        self.assertEqual(c["status"], "ok")
+        self.assertIn("amdgpu", c["detail"])
+
+    def test_nvidia_present_is_labelled_nvidia(self):
+        app.LATEST.update(gpu_avail=True, gpu_vendor="nvidia", mem_total=24576)
+        c = self._gpu_check()
+        self.assertEqual(c["label"], "GPU (NVIDIA)")
+        self.assertIn("nvidia-smi", c["detail"])
+
+    def test_no_gpu_remedy_mentions_amd_not_only_nvidia(self):
+        app.LATEST.update(gpu_avail=False, gpu_vendor=None)
+        c = self._gpu_check()
+        self.assertEqual(c["label"], "GPU")
+        self.assertEqual(c["status"], "info")
+        # The remedy must guide AMD users, not just NVIDIA ones.
+        blob = (c.get("remedy") or {}).get("where", "") + (c.get("remedy") or {}).get("cmd", "")
+        self.assertIn("amdgpu", blob)
+        self.assertIn("mem_info_vram_total", blob)
+
+
 if __name__ == "__main__":
     unittest.main()
