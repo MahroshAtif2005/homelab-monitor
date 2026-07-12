@@ -1847,6 +1847,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <button type="button" class="subtab on" data-sp="alerts" data-i18n="set.tab_alerts">🔔 Alerts</button>
       <button type="button" class="subtab"    data-sp="costs" data-i18n="set.tab_costs">💰 Costs</button>
       <button type="button" class="subtab"    data-sp="integrations" data-i18n="set.tab_integrations">🧪 Integrations</button>
+      <button type="button" class="subtab"    data-sp="general" data-i18n="set.tab_general" data-i18n-def="⚙️ General">⚙️ General</button>
     </div>
 
     <!-- ── Alerts sub-page ── -->
@@ -2050,6 +2051,16 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
         <p class="cap" style="margin-top:6px" data-i18n="brief.note" data-i18n-def="Settings here save automatically when you leave a field. Preview and Send test use your saved settings.">Settings here save automatically when you leave a field. Preview and Send test use your saved settings.</p>
       </div>
     </div>
+
+    <!-- Public status page (#217 follow-up) -->
+    <div style="margin-top:24px;border-top:1px solid var(--bd);padding-top:16px;max-width:800px">
+      <h2 class="card-sub" data-i18n="pubstatus.title" data-i18n-def="Public status page">Public status page</h2>
+      <p class="cap" data-i18n="pubstatus.intro" data-i18n-def="A shareable, read-only status page for the checks you mark public no auth, no host internals leaked.">A shareable, read-only status page for the checks you mark public no auth, no host internals leaked.</p>
+      <label style="display:flex;align-items:center;gap:9px;margin:10px 0">
+        <input type="checkbox" id="al_public_status_enabled">
+        <span data-i18n-html="pubstatus.enabled_label"><b>Public status page enabled</b> available at /public without needing a restart.</span>
+      </label>
+    </div>
     </div><!-- /set-pane-alerts -->
     <div id="set-pane-costs" hidden>
       <p class="cap" style="margin:2px 0 12px" data-i18n-html="costset.intro">Set your electricity price so the dashboard can turn power into money on the <b>💰 Costs</b> page. Don't know your rates? Pick your country for a typical, editable estimate.</p>
@@ -2190,6 +2201,22 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
       </div>
       <div id="intg_status" class="cap" style="margin-top:6px"></div>
     </div><!-- /set-pane-integrations -->
+
+    <!-- ── General sub-page ── -->
+    <div id="set-pane-general" hidden>
+      <p class="cap" style="margin:2px 0 12px" data-i18n-html="general.intro" data-i18n-def="General system settings. Changes take effect immediately — no restart required.">General system settings. Changes take effect immediately — no restart required.</p>
+      <div id="general-status" class="ins info" style="display:none"></div>
+      <div style="display:grid;grid-template-columns:1fr;gap:14px;max-width:680px">
+        <div>
+          <div class="flabel" data-i18n="general.retention_label" data-i18n-def="Data retention (days)">Data retention (days)</div>
+          <input type="number" id="al_retention_days" min="1" max="3650" step="1" class="field" style="max-width:160px">
+          <p class="cap" style="margin-top:4px" data-i18n-html="general.retention_cap" data-i18n-def="How many days of metric history to keep. Older rows are pruned every ~6 minutes. Default: 180.">How many days of metric history to keep. Older rows are pruned every ~6 minutes. Default: 180.</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+          <button class="rb on" id="al_save_general" data-i18n="btn.save">Save</button>
+        </div>
+      </div>
+    </div><!-- /set-pane-general -->
   </div>
 </section>
 
@@ -3794,7 +3821,10 @@ function renderHealth(){
       const r = c.remedy;
       const rem = r ? `<div class="diagrem">${r.where?`<div class="where">${esc(r.where)}</div>`:''}`
                       + `<pre>${esc(r.cmd||'')}</pre></div>` : '';
-      return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(I18N.t('diag.lbl.'+c.id, c.label))}</td>`
+      // GPU row (id 'nvidia', kept for capability lookup): its label is vendor-aware
+      // from the backend — "GPU (AMD)"/"GPU (NVIDIA)"/"GPU" — so render that directly
+      // instead of the static i18n string, which would wrongly say "NVIDIA GPU" on AMD.
+      return `<tr class="${c.status}"><td><span class="sdot" style="background:${SC[c.status]}"></span>${esc(c.id==='nvidia' ? c.label : I18N.t('diag.lbl.'+c.id, c.label))}</td>`
         + `<td><span class="badge ${c.status}">${I18N.t('sectag.'+c.status, SEC_TAG[c.status]||esc(c.status))}</span></td>`
         + `<td class="muted">${esc(c.detail||'')}${rem}</td></tr>`;
     }).join('');
@@ -3926,6 +3956,9 @@ function renderHealth(){
   document.getElementById('cttbl').onchange = e => {
     const sel = e.target.closest('.ct-policy'); if(!sel) return;
     const tr = sel.closest('.ctrow');
+    if(!confirm(`Change restart policy for "${tr.dataset.ct}" to "${sel.value}"?`)){
+      loadHealth(); return; // revert the select to server state
+    }
     setContainerRestartPolicy(tr.dataset.ct, sel.value);
   };
 
@@ -4544,6 +4577,7 @@ async function loadAlerts(){
   document.getElementById('al_email_user').value  = s.email_username||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
+  document.getElementById('al_retention_days').value = s.retention_days||'180';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
   document.getElementById('al_currency').value    = s.currency||'$';
   document.getElementById('al_kwh_night').value   = s.kwh_price_night||'';
@@ -4608,6 +4642,7 @@ function configuredChannels(s){
 }
 function fillBrief(s){
   document.getElementById('al_brief_enabled').checked = s.brief_enabled==='1';
+  document.getElementById('al_public_status_enabled').checked = s.public_status_enabled==='1';
   document.getElementById('al_brief_time').value = s.brief_time || '08:00';
   document.getElementById('al_brief_theme').value = (s.brief_theme==='light') ? 'light' : 'dark';
   const sel=document.getElementById('al_brief_channel');
@@ -4688,7 +4723,8 @@ function collectSettingsBody(){
     email_to:         document.getElementById('al_email_to').value.trim(),
     email_username:   document.getElementById('al_email_user').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
-    disk_alert_pct:   String(parseInt(document.getElementById('al_disk').value||'90',10)||90),
+    disk_alert_pct:   (v=>{const n=parseInt(v,10);return String(isNaN(n)?90:Math.max(0,Math.min(99,n)));})(document.getElementById('al_disk').value),
+    retention_days:   (v=>{const n=parseInt(v,10);return v.trim()===''?'180':String(isNaN(n)?180:Math.max(1,n));})(document.getElementById('al_retention_days').value),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
     currency:         document.getElementById('al_currency').value.trim()||'$',
     tariff_mode:      TARIFF_DUAL ? 'dual' : 'single',
@@ -4699,6 +4735,7 @@ function collectSettingsBody(){
     mlflow_uri:        (document.getElementById('al_mlflow_uri')||{}).value || '',
     country:          document.getElementById('al_country').value,
     brief_enabled:    document.getElementById('al_brief_enabled').checked ? '1' : '0',
+    public_status_enabled: document.getElementById('al_public_status_enabled').checked ? '1' : '0',
     brief_time:       document.getElementById('al_brief_time').value || '08:00',
     brief_channel:    document.getElementById('al_brief_channel').value || '',
     brief_theme:      document.getElementById('al_brief_theme').value || 'dark',
@@ -4773,7 +4810,8 @@ const AUTOSAVE_IDS=['al_enabled','al_ntfy_topic','al_ntfy_server','al_telegram_c
   'al_telegram_token','al_email_host','al_email_port','al_email_tls','al_email_from','al_email_to',
   'al_email_user','al_email_pass','al_discord','al_slack','al_webhook','al_minlevel','al_disk',
   'al_kwh','al_currency','al_kwh_night','al_night_start','al_night_end','al_idle_w','al_mlflow_uri',
-  'al_mlflow_token','al_country','al_brief_enabled','al_brief_time','al_brief_channel','al_brief_theme'];
+  'al_mlflow_token','al_country','al_brief_enabled','al_brief_time','al_brief_channel','al_brief_theme',
+  'al_public_status_enabled','al_retention_days'];
 function wireAutoSave(){
   AUTOSAVE_IDS.forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', scheduleAutoSave); });
   // Tariff mode is toggled by buttons (no change event) — autosave on those too.
@@ -6490,7 +6528,8 @@ function mcPaintStrip($){
     ? `<span style="color:${checks.some(c=>c.status==='fail')?'var(--crit)':'var(--ok)'}">${okN} / ${checks.length} ${I18N.t('mc.green','green')}</span>` : '';
   $('mc-diag').innerHTML = checks.map(c=>{
     const cls={ok:'mc-ok',info:'mc-info',warn:'mc-warn',fail:'mc-fail'}[c.status]||'mc-info';
-    const lbl=I18N.t('diag.lbl.'+c.id, c.label);
+    // GPU row label is vendor-aware from the backend (see diagnostics table above).
+    const lbl = c.id==='nvidia' ? c.label : I18N.t('diag.lbl.'+c.id, c.label);
     return `<div class="mc-diag"><span class="mc-dd ${cls}"></span><div><b>${esc(lbl)}</b><div class="mc-dsub">${esc(c.detail||'')}</div></div></div>`;
   }).join('') || '<div style="font-size:11px;color:var(--mut)">'+I18N.t('mc.no_checks','No checks reported.')+'</div>';
 }
@@ -7549,6 +7588,8 @@ document.getElementById('al_brief_test').onclick = briefTest;
 wireUptime();
 const al_save_costs = document.getElementById('al_save_costs');
 if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
+const al_save_general = document.getElementById('al_save_general');
+if(al_save_general) al_save_general.onclick = saveAlerts;
 wireAutoSave();   // settings also persist on field focus-out (no Save-button hunt)
 document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
 document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);

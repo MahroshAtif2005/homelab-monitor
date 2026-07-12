@@ -48,7 +48,7 @@ def test_overview_cards_safe(client):
 def test_status_field_valid(client):
     import json
     data = json.loads(client.get("/api/public-status").data)
-    assert data["status"] in ("ok", "warn", "crit")
+    assert data["status"] in ("ok", "warn", "crit", "maintenance")
 
 def test_lab_branding(client):
     import json
@@ -134,3 +134,95 @@ def test_monitors_key_is_not_the_blocked_services_key(client):
     assert "services" not in data            # the blocked private key
     assert "monitors" in data                 # our public uptime summary
     _wipe()
+
+
+def test_public_monitor_shows_in_maintenance(client):
+    _wipe()
+    _app.create_maintenance_window(
+        label="test window", kind="uptime", pattern="*",
+        start_ts=int(_time.time()) - 60, end_ts=int(_time.time()) + 3600
+    )
+    cid = _mk_check(True)
+    data = client.get("/api/public-status").get_json()
+    mon = next(m for m in data["monitors"] if m["id"] == cid)
+    assert mon["in_maintenance"] is True
+    assert data["status"] == "maintenance"
+    detail = client.get(f"/api/public-status/{cid}").get_json()
+    assert detail["in_maintenance"] is True
+    _app.DB.execute("DELETE FROM maintenance_windows")
+    _app.DB.commit()
+    _wipe()
+
+
+# ── Public status: maintenance window integration ──────────────────────────
+
+def test_public_monitor_in_maintenance_flag(client):
+    _wipe()
+    cid = _mk_check(True, "Immich")
+    now = int(_time.time())
+    _app.create_maintenance_window(
+        label="reboot", kind="uptime", pattern=cid,
+        start_ts=now - 60, end_ts=now + 3600
+    )
+    data = client.get("/api/public-status").get_json()
+    mon = next(m for m in data["monitors"] if m["id"] == cid)
+    assert mon["in_maintenance"] is True
+    assert data["monitors_summary"]["maintenance"] == 1
+    _wipe()
+
+def test_public_monitor_not_in_maintenance_by_default(client):
+    _wipe()
+    cid = _mk_check(True, "Immich")
+    data = client.get("/api/public-status").get_json()
+    mon = next(m for m in data["monitors"] if m["id"] == cid)
+    assert mon["in_maintenance"] is False
+    assert data["monitors_summary"]["maintenance"] == 0
+    _wipe()
+
+def test_public_detail_in_maintenance_flag(client):
+    _wipe()
+    cid = _mk_check(True, "Immich")
+    now = int(_time.time())
+    _app.create_maintenance_window(
+        label="reboot", kind="uptime", pattern=cid,
+        start_ts=now - 60, end_ts=now + 3600
+    )
+    d = client.get(f"/api/public-status/{cid}").get_json()
+    assert d["in_maintenance"] is True
+    _wipe()
+
+def test_public_overall_status_maintenance_not_crit(client):
+    """A down check fully covered by an active maintenance window should not
+    report the page as crit — it should report maintenance instead."""
+    _wipe()
+    cid = _mk_check(True, "Immich")
+    now = int(_time.time())
+    _seed(cid, [(now - 60, 0, 0.0)])   # currently down
+    _app.create_maintenance_window(
+        label="reboot", kind="uptime", pattern=cid,
+        start_ts=now - 3600, end_ts=now + 3600
+    )
+    data = client.get("/api/public-status").get_json()
+    assert data["status"] == "maintenance"
+    _wipe()
+
+def test_public_overall_status_still_crit_when_down_outside_maintenance(client):
+    """A down check with no active maintenance window should still report crit."""
+    _wipe()
+    cid = _mk_check(True, "Immich")
+    now = int(_time.time())
+    _seed(cid, [(now - 60, 0, 0.0)])   # currently down, no maintenance window
+    data = client.get("/api/public-status").get_json()
+    assert data["status"] == "crit"
+    _wipe()
+
+def test_public_status_enabled_via_settings_toggle(client_off):
+    # No PUBLIC_STATUS env var, but the Settings toggle is on -> should work.
+    _app.DB.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('public_status_enabled', '1')"
+    )
+    _app.DB.commit()
+    assert client_off.get("/api/public-status").status_code == 200
+    assert client_off.get("/public").status_code == 200
+    _app.DB.execute("DELETE FROM settings WHERE key='public_status_enabled'")
+    _app.DB.commit()

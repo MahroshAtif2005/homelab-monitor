@@ -26,6 +26,8 @@
     "night_start": "22:00",
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
+    "public_status_enabled": "0",
+    "retention_days": "180",
     "slack_webhook_url_set": false,
     "system_idle_watts": "",
     "tariff_mode": "single",
@@ -33,5 +35,5 @@
     "telegram_token_set": false,
     "webhook_url_set": false
   },
-  "version": "0.24.0"
+  "version": "0.25.0"
 }
