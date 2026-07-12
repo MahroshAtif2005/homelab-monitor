@@ -3802,6 +3802,9 @@ SETTING_DEFAULTS = {
     "brief_time":          "08:00",    # local time-of-day "HH:MM" to send
     "brief_channel":       "",         # one of: email|discord|telegram|ntfy|slack|webhook (must be configured)
     "brief_theme":         "dark",     # "dark" | "light" — palette for the HTML brief
+    # ── Public status page (#217 follow-up) — Settings-driven toggle so it
+    # doesn't require an env-var restart to turn on/off ─────────────────────
+    "public_status_enabled": "0",     # "0" / "1"
 }
 SETTING_SECRETS = {"discord_webhook_url", "telegram_token", "email_password", "slack_webhook_url", "webhook_url", "api_key", "mlflow_token"}   # never round-tripped to the UI in full
 
@@ -6151,9 +6154,11 @@ def _public_monitor(check, now):
     cert_status = None
     if cert_days is not None:
         cert_status = "red" if cert_days <= 7 else "amber" if cert_days <= 21 else "ok"
+    in_maint = _in_maintenance("uptime", cid) or _in_maintenance("uptime", check.get("label", ""))
     return {
         "id": cid, "label": check["label"], "type": check["type"],
         "host": _public_monitor_host(check), "state": state,
+        "in_maintenance": in_maint,
         "last_latency_ms": (last[2] if last else None),
         "last_checked": (last[0] if last else None),
         "uptime": win(86400), "uptime7": win(604800), "uptime90": win(7776000),
@@ -6278,10 +6283,20 @@ def _public_status_detail(cid, now):
 
 def _public_overall_status(cards, monitors):
     """ok only when every overview card is ok and no public monitor is down;
-    crit if a monitor is down; warn otherwise."""
+    crit if a monitor is down; maintenance if nothing is down but something
+    is covered by an active maintenance window; warn otherwise."""
     if any(m["state"] == "down" for m in monitors):
         return "crit"
-    return "ok" if all(c.get("status") == "ok" for c in cards) else "warn"
+    if all(c.get("status") == "ok" for c in cards):
+        if any(m.get("in_maintenance") for m in monitors):
+            return "maintenance"
+        return "ok"
+    return "warn"
+
+def _public_status_enabled():
+    """On if either the PUBLIC_STATUS env var or the Settings toggle is set --
+    env var kept for backward compatibility, Settings toggle needs no restart."""
+    return bool(_os.environ.get("PUBLIC_STATUS")) or get_settings().get("public_status_enabled") == "1"
 
 
 if __name__ == "__main__":
