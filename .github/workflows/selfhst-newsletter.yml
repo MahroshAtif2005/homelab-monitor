@@ -13,15 +13,23 @@ name: Announce release on selfh.st
 # New Release). Endpoint + field IDs are public, so they live in the file; the
 # only secret is the optional Discord webhook.
 #   secrets.SELFHST_DISCORD_WEBHOOK   (optional) Discord webhook for the result ping
+#
+# ── DISABLED 2026-07-14 ───────────────────────────────────────────────────────
+# Auto-submission to the selfh.st Self-Host Weekly is turned OFF. `on:` is an
+# empty map, so the workflow never runs — neither automatically on a release nor
+# manually via the "Run workflow" button. selfh.st entries will be submitted by
+# hand at https://selfh.st/submit/ when a release is worth featuring. The
+# original triggers are preserved (commented) below; to re-enable, restore them
+# under `on:` and delete the empty map.
 
-on:
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to (re)submit, e.g. v0.13.0'
-        required: true
+on: {}
+  # release:
+  #   types: [published]
+  # workflow_dispatch:
+  #   inputs:
+  #     tag:
+  #       description: 'Release tag to (re)submit, e.g. v0.13.0'
+  #       required: true
 
 permissions:
   contents: read
