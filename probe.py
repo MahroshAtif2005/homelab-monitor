@@ -435,8 +435,21 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
                     continue
         except OSError:
             continue
-        total = _int(os.path.join(dev, "mem_info_vram_total"))   # bytes
-        used  = _int(os.path.join(dev, "mem_info_vram_used"))    # bytes
+        vram_total = _int(os.path.join(dev, "mem_info_vram_total"))  # bytes
+        vram_used  = _int(os.path.join(dev, "mem_info_vram_used"))   # bytes
+        # APU / unified-memory iGPU (e.g. Ryzen AI Max / Strix Halo): the dedicated
+        # VRAM is a tiny BIOS carve-out (<= ~1 GiB) while the real working set — where
+        # models actually load — lives in GTT (system RAM mapped to the GPU). Reporting
+        # the 512 MB carve-out makes an idle 128 GB box read "29% full / VRAM ran low".
+        # When this looks like an APU (tiny VRAM + large GTT), report GTT so residency +
+        # pressure reflect reality. Discrete cards (large VRAM) are unaffected. Kept in
+        # lockstep with app.amd_gpus() — same heuristic, same numbers.
+        gtt_total = _int(os.path.join(dev, "mem_info_gtt_total"))    # bytes
+        gtt_used  = _int(os.path.join(dev, "mem_info_gtt_used"))     # bytes
+        if vram_total and gtt_total and vram_total <= (1 << 30):  # VRAM <= 1 GiB -> iGPU
+            total, used = gtt_total, (gtt_used or 0)
+        else:
+            total, used = vram_total, vram_used
         busy  = _int(os.path.join(dev, "gpu_busy_percent"))      # %
         temp = 0
         try:
