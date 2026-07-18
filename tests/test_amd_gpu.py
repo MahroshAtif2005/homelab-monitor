@@ -21,12 +21,18 @@ def _write(path, value):
 
 
 def _amd_card(drm, idx, *, total, used, busy, temp_mc=None, power_uw=None,
-              name=None, vendor="0x1002"):
-    """Lay down a single fake card<idx>/device/ node under <drm>."""
+              name=None, vendor="0x1002", gtt_total=None, gtt_used=None):
+    """Lay down a single fake card<idx>/device/ node under <drm>. `total`/`used` are
+    the dedicated-VRAM nodes; pass `gtt_total`/`gtt_used` to also emit the GTT nodes
+    an APU exposes (unified-memory pool mapped from system RAM)."""
     dev = os.path.join(drm, "card%d" % idx, "device")
     _write(os.path.join(dev, "vendor"), vendor + "\n")
     _write(os.path.join(dev, "mem_info_vram_total"), total)
     _write(os.path.join(dev, "mem_info_vram_used"), used)
+    if gtt_total is not None:
+        _write(os.path.join(dev, "mem_info_gtt_total"), gtt_total)
+    if gtt_used is not None:
+        _write(os.path.join(dev, "mem_info_gtt_used"), gtt_used)
     _write(os.path.join(dev, "gpu_busy_percent"), busy)
     if temp_mc is not None:
         _write(os.path.join(dev, "hwmon", "hwmon3", "temp1_input"), temp_mc)
@@ -73,6 +79,44 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(out["gpu"]["mem_used"], 2048)
         self.assertEqual(out["gpu"]["util"], 10)
         self.assertEqual(out["gpu"]["temp"], 40)
+
+    def test_apu_reports_gtt_not_vram_carveout(self):
+        # Ryzen AI Max / Strix Halo: 512 MiB dedicated VRAM carve-out, 124 GiB GTT pool
+        # (18 MiB in use on an idle box). The reader must report the GTT pool, not the
+        # tiny carve-out — otherwise the tile reads "29% full" and pressure math flags a
+        # permanent low-VRAM insight. Both the hub collector and the probe must agree.
+        _amd_card(self.drm, 0, total=512 * 1024**2, used=148 * 1024**2, busy=0,
+                  gtt_total=124 * 1024**3, gtt_used=18 * 1024**2, name="AMD Radeon 8060S")
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["mem_total"], 124 * 1024)   # 124 GiB, not 512 MiB
+        self.assertEqual(g["mem_used"], 18)            # GTT usage, not the 148 MiB carve-out
+        out = probe._amd_gpu_sysfs(drm_root=self.drm)
+        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
+        self.assertEqual(out["gpu"]["mem_used"], 18)
+
+    def test_apu_missing_gtt_used_degrades_to_zero(self):
+        # amdgpu exposes gtt_total but (rarely) not gtt_used → used must fall back to 0,
+        # never crash the round()/None math, while total still reflects the GTT pool.
+        _amd_card(self.drm, 0, total=512 * 1024**2, used=148 * 1024**2, busy=0,
+                  gtt_total=124 * 1024**3, name="AMD Radeon 8060S")
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["mem_total"], 124 * 1024)
+        self.assertEqual(g["mem_used"], 0)
+        out = probe._amd_gpu_sysfs(drm_root=self.drm)
+        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
+        self.assertEqual(out["gpu"]["mem_used"], 0)
+
+    def test_discrete_card_with_gtt_still_reports_vram(self):
+        # Discrete cards also expose a GTT pool, but with a large dedicated VRAM they must
+        # keep reporting VRAM exactly as before — no behaviour change for the common case.
+        _amd_card(self.drm, 0, total=24 * 1024**3, used=8 * 1024**3, busy=55,
+                  gtt_total=64 * 1024**3, gtt_used=1 * 1024**3, name="AMD Radeon RX 7900 XTX")
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["mem_total"], 24 * 1024)    # VRAM, not GTT
+        self.assertEqual(g["mem_used"], 8 * 1024)
+        out = probe._amd_gpu_sysfs(drm_root=self.drm)
+        self.assertEqual(out["gpu"]["mem_total"], 24 * 1024)
+        self.assertEqual(out["gpu"]["mem_used"], 8 * 1024)
 
     def test_non_amd_vendor_is_skipped(self):
         # An NVIDIA card (0x10de) in the same tree must be ignored by the AMD reader.
