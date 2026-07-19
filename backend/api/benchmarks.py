@@ -391,6 +391,13 @@ def bench_start():
     import app as _app
     if not _bench_enabled():
         return jsonify({"ok": False, "error": "benchmarking is disabled (BENCH_ENABLED/COPILOT_ENABLED)"}), 400
+    # Cheap early-out: if a job is already running, reject now — before paying the
+    # nvidia-smi inventory below. This is advisory; the atomic check-and-set at the
+    # reservation point stays authoritative for single-flight.
+    with _JOB_LOCK:
+        if _JOB["active"]:
+            return jsonify({"ok": False, "error": "a benchmark is already running",
+                            "job": {k: v for k, v in _JOB.items() if k != "cancel"}}), 409
     # Validate the request BEFORE touching the single-flight slot, so a bad request
     # never has to roll the slot back.
     body = request.get_json(silent=True) or {}
