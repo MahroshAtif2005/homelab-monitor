@@ -457,6 +457,42 @@ def get_experiment(run_id):
     return _get("/api/runs/" + urllib.parse.quote(str(run_id)))
 
 
+def get_benchmarks(range="30d", model=""):
+    """LLM Benchmark Lab results (the Benchmarks tab) — stored, rerunnable
+    benchmarks of the host's local models. Optionally filter by `model`.
+
+    Returns one row per benchmark run (a model measured across a context-size
+    ladder): `id`, `model`, `family`/`param_size`/`quant`/`size_gb`, `status`,
+    `created_at`, `duration`, and a `summary` with `best_gen_tps`,
+    `best_prompt_tps`, `min_load_ms`, `max_fit_ctx` (largest context that stays
+    fully in VRAM), `recommended_ctx`, `fit` (vram/partial/cpu), `vram_mb`,
+    `ram_offload_mb`, plus `energy_kwh`/`cost`. Answers "which local model is
+    fastest here, what actually fits in VRAM, and what context should I cap it to?".
+    """
+    q = "?range=" + urllib.parse.quote(str(range))
+    if model:
+        q += "&model=" + urllib.parse.quote(str(model))
+    d = _get("/api/bench" + q)
+    runs = d.get("runs") or []
+    return {
+        "range": d.get("range", range),
+        "currency": d.get("currency"),
+        "count": len(runs),
+        "job": d.get("job"),
+        "runs": runs,
+    }
+
+
+def get_benchmark(run_id):
+    """Full detail for one benchmark run by `run_id` (from `get_benchmarks`): every
+    measured point across the context ladder — `ctx`, `gen_tps`, `prompt_tps`,
+    `load_ms`, `ttft_ms`, `vram_mb`, `ram_offload_mb`, `fit`, and which GPU the
+    weights landed on — plus the derived `summary`. An unknown id surfaces as an
+    HTTP 404 error.
+    """
+    return _get("/api/bench/" + urllib.parse.quote(str(run_id)))
+
+
 def scan_disk(path="/", rescan=False, max_wait=60):
     """WizTree-style nested folder-size treemap for a host path (the Disks tab).
 

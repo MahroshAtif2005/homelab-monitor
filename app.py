@@ -99,6 +99,7 @@ from backend.api.experiments import bp as _experiments_bp
 from backend.api.uptime_api import bp as _uptime_api_bp
 from backend.api.hosts_api import bp as _hosts_api_bp
 from backend.api.integrations import bp as _integrations_bp
+from backend.api.benchmarks import bp as _benchmarks_bp
 app.register_blueprint(_system_bp)
 app.register_blueprint(_gpu_bp)
 app.register_blueprint(_costs_bp)
@@ -106,6 +107,7 @@ app.register_blueprint(_experiments_bp)
 app.register_blueprint(_uptime_api_bp)
 app.register_blueprint(_hosts_api_bp)
 app.register_blueprint(_integrations_bp)
+app.register_blueprint(_benchmarks_bp)
 
 # ── Prometheus gauges (defined once at module level) ──────────────────────────
 _GAUGES: dict = {}
@@ -279,6 +281,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
 );
+-- LLM Benchmark Lab (active, opt-in): one bench_runs row per (model, execution),
+-- one bench_points row per (context-size / gpu-layers) measurement. Stored so a
+-- benchmark need not be re-run often; a rerun simply inserts a fresh run (history).
+CREATE TABLE IF NOT EXISTS bench_runs(
+  id TEXT PRIMARY KEY, host TEXT, endpoint TEXT, model TEXT NOT NULL,
+  family TEXT, param_size TEXT, quant TEXT, size_bytes INTEGER,
+  status TEXT NOT NULL, config TEXT, summary TEXT, gpu TEXT, error TEXT,
+  created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,
+  energy_kwh REAL, cost REAL, avg_w REAL);
+CREATE TABLE IF NOT EXISTS bench_points(
+  run_id TEXT NOT NULL, ctx INTEGER, num_gpu INTEGER,
+  gen_tps REAL, prompt_tps REAL, load_ms REAL, ttft_ms REAL, total_ms REAL,
+  eval_count INTEGER, prompt_eval_count INTEGER,
+  vram_mb REAL, ram_offload_mb REAL, total_size_mb REAL, gpu_fraction REAL,
+  fit TEXT, gpus TEXT, ok INTEGER, err TEXT);
+CREATE INDEX IF NOT EXISTS idx_bench_points_run ON bench_points(run_id);
+CREATE INDEX IF NOT EXISTS idx_bench_runs_model ON bench_runs(model, created_at);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
