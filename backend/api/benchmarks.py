@@ -104,20 +104,18 @@ def _job_snapshot():
     return j
 
 
-def _ollama_ip():
-    return "127.0.0.1"
-
-
-def _native_ctx(model):
-    """Native context length for a model via cached /api/show meta (best-effort)."""
-    import app as _app
+def _native_ctx(model, endpoint):
+    """Native context length for a model, read from the SAME endpoint the job will
+    benchmark (POST /api/show). Best-effort — returns None on any failure, which
+    just means the default context ladder is used without the model's own ceiling."""
     try:
-        meta = _app._ollama_meta(_ollama_ip(), model) or {}
-        c = meta.get("ctx")
-        return int(c) if c and str(c).isdigit() else (c if isinstance(c, int) else None)
+        d = _post_json(endpoint, "/api/show", {"model": model}, timeout=8) or {}
+        for k, v in (d.get("model_info") or {}).items():
+            if k.endswith(".context_length"):
+                return int(v) if str(v).isdigit() else (v if isinstance(v, int) else None)
     except Exception as e:
         print(f"bench: native ctx lookup for {model} failed: {e}", flush=True)
-        return None
+    return None
 
 
 # ── worker ────────────────────────────────────────────────────────────────────
@@ -174,7 +172,7 @@ def _run_job(run_specs, cfg, host, endpoint):
                     pt.get("ok"), pt.get("err"), conn=_app.DB)
 
         try:
-            meta = {"ctx": _native_ctx(model)}
+            meta = {"ctx": _native_ctx(model, endpoint)}
             points, summary = bench.run_model_benchmark(
                 model, cfg, gen_fn, ps_fn, _smi_snapshot,
                 on_point=on_point, should_cancel=should_cancel, meta=meta)
@@ -264,7 +262,7 @@ def bench_get(rid):
 def bench_start():
     import app as _app
     if not _bench_enabled():
-        return jsonify({"ok": False, "error": "benchmarking disabled or ollama unreachable"}), 400
+        return jsonify({"ok": False, "error": "benchmarking is disabled (BENCH_ENABLED/COPILOT_ENABLED)"}), 400
     # Validate the request BEFORE touching the single-flight slot, so a bad request
     # never has to roll the slot back.
     body = request.get_json(silent=True) or {}

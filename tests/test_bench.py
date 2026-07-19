@@ -40,6 +40,13 @@ class TestPlanCtx(unittest.TestCase):
     def test_below_floor_dropped(self):
         self.assertNotIn(64, bench.plan_ctx_list([64, 4096], None))
 
+    def test_downsample_keeps_both_ends(self):
+        vals = [512 * i for i in range(1, 40)]   # 39 values, all <= MAX_CTX
+        out = bench.plan_ctx_list(vals, None)
+        self.assertEqual(len(out), bench.MAX_CTX_PER_MODEL)
+        self.assertEqual(out[0], min(vals))       # smallest preserved
+        self.assertEqual(out[-1], max(vals))      # largest preserved (not truncated)
+
 
 class TestTiming(unittest.TestCase):
     def test_tps_and_load(self):

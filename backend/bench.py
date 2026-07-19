@@ -84,7 +84,14 @@ def plan_ctx_list(requested, native_ctx):
         vals.add(ceiling)
     if not vals:
         vals.add(min(native or 4096, MAX_CTX))
-    return sorted(vals)[:MAX_CTX_PER_MODEL]
+    ordered = sorted(vals)
+    if len(ordered) <= MAX_CTX_PER_MODEL:
+        return ordered
+    # Too many: downsample evenly but keep both ends — the largest sizes (closest
+    # to spilling) are the whole point, so we must not just truncate them off.
+    step = (len(ordered) - 1) / (MAX_CTX_PER_MODEL - 1)
+    idxs = sorted({round(i * step) for i in range(MAX_CTX_PER_MODEL)})
+    return [ordered[i] for i in idxs]
 
 
 def parse_generate_timing(resp):
