@@ -78,3 +78,21 @@ stored-history sparkline. Reuse mc-panel/sic()/theme vars. No competitor names.
 - Per-GPU "which card" attribution is best-effort (nvidia-smi delta) — clean only when the GPU is
   otherwise idle; on a busy box (qwen churning) it returns empty and the UI hides it gracefully.
   Physical device pinning is advice-only (needs ollama server env). Future: real brand SVG logos.
+
+## v2 (2026-07-19, branch feat/bench-gpu-select) — GPU choice, setup display, compare
+Arsen: want to CHOOSE which card(s) each test runs on, show the setup in results, and overlay
+benchmarks on one chart to compare. Also discovered (via the Lab's first real use!) that ardi's
+ollama was pinned to the P2000 — fixed to the 3090 (7→133 tok/s), see [[reference_ardi_ollama_gpu]].
+
+- **Device selection mechanism:** ollama has no per-request GPU choice, so choosing card(s) spins up
+  a THROWAWAY ollama container pinned to them (Docker API create/start, `DeviceRequests` = chosen
+  GPU indices), mounting the same `vol_ollama` models, on a FREE port; run the sweep; force-remove.
+  Main ollama untouched. Gated behind ENABLE_CONTROLS (it launches a container). Reused the proven
+  `_docker_req` POST /containers/create pattern from the self-update flow.
+- **Robustness fix:** first cut reused a fixed port → 2nd back-to-back job failed to bind. Now a free
+  port per job + wait-until-old-container-gone. Validated: 3090 (132 tok/s) then P2000 (46 tok/s)
+  back-to-back both done, clean teardown, no leftover.
+- **Setup recorded/shown:** cfg stores `devices` + `device_label`; leaderboard rows + cards show
+  "⚙ RTX 3090"/"Quadro P2000".
+- **Compare view:** tick N stored runs → overlay tok/s-vs-ctx + VRAM-vs-ctx on one chart, legend
+  "model @ setup", distinct palette per run. Pure frontend over /api/bench/<id>.

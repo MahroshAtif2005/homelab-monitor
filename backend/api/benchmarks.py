@@ -37,6 +37,16 @@ _JOB = {"active": False, "cancel": False, "run_ids": [], "models": [],
 _GEN_TIMEOUT = 300     # a cold 30B load + generation can take a while
 _PS_TIMEOUT = 6
 
+# ── ephemeral GPU-pinned ollama (device selection) ────────────────────────────
+# To benchmark specific card(s) — ollama has no per-request device choice — we
+# spin up a throwaway ollama container pinned to the chosen GPU(s), reusing the
+# existing models volume, on a scratch port; run the sweep against it; tear it
+# down. The main ollama is never touched.
+import os as _os
+_BENCH_OLLAMA_IMAGE = _os.environ.get("BENCH_OLLAMA_IMAGE", "ollama/ollama:latest")
+_BENCH_OLLAMA_VOLUME = _os.environ.get("BENCH_OLLAMA_VOLUME", "vol_ollama")
+_BENCH_CONTAINER = "hlm-bench-ollama"
+
 
 def _bench_enabled():
     import app as _app
@@ -118,8 +128,126 @@ def _native_ctx(model, endpoint):
     return None
 
 
+# ── ephemeral GPU-pinned ollama lifecycle ─────────────────────────────────────
+def _free_port():
+    """An OS-assigned free TCP port. Using a fresh port per job avoids the
+    bind-time race where a just-removed container's host port is still in use."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _docker_rm_bench_container():
+    """Remove any leftover scratch container, then wait until it's actually gone
+    (a removed name lingers briefly, and reusing it would 409 on create)."""
+    import app as _app
+    try:
+        _app._docker_req("DELETE", f"/containers/{_BENCH_CONTAINER}?force=1", timeout=20)
+    except Exception as e:
+        print(f"bench: cleanup of stale scratch container failed: {e}", flush=True)
+    for _ in range(20):
+        try:
+            code, _raw = _app._docker_req("GET", f"/containers/{_BENCH_CONTAINER}/json", timeout=5)
+            if code == 404:
+                return
+        except Exception:
+            return
+        time.sleep(0.5)
+
+
+def _ephemeral_ollama_up(devices, port=None):
+    """Create + start an ollama container pinned to `devices` (GPU index strings),
+    sharing the models volume, on host networking at a free port. Returns
+    (id, base_url). Raises on failure. Caller MUST tear it down."""
+    import app as _app
+    port = port or _free_port()
+    _docker_rm_bench_container()  # clear any stale one first, and wait until gone
+    body = {
+        "Image": _BENCH_OLLAMA_IMAGE,
+        "Env": [f"OLLAMA_HOST=0.0.0.0:{port}", "OLLAMA_MAX_LOADED_MODELS=1",
+                "NVIDIA_DRIVER_CAPABILITIES=compute,utility"],
+        "HostConfig": {
+            "NetworkMode": "host",   # monitor is host-net too, so reach 127.0.0.1:port
+            "Binds": [f"{_BENCH_OLLAMA_VOLUME}:/root/.ollama"],  # same models, read-shared
+            "AutoRemove": False,     # we remove explicitly so errors stay inspectable
+            "DeviceRequests": [{"Driver": "nvidia",
+                                "DeviceIDs": [str(d) for d in devices],
+                                "Capabilities": [["gpu"]]}],
+        },
+    }
+    code, raw = _app._docker_req("POST", f"/containers/create?name={_BENCH_CONTAINER}", body=body, timeout=30)
+    if code not in (200, 201):
+        raise RuntimeError(f"create failed HTTP {code}: {raw[:200].decode('utf-8', 'replace')}")
+    cid = (json.loads(raw) or {}).get("Id")
+    code, raw = _app._docker_req("POST", f"/containers/{cid}/start", timeout=30)
+    if code not in (204, 304):
+        _ephemeral_ollama_down(cid)
+        raise RuntimeError(f"start failed HTTP {code}: {raw[:200].decode('utf-8', 'replace')}")
+    base_url = f"http://127.0.0.1:{port}"
+    # Wait until the scratch ollama answers (it mounts existing models, so no pull).
+    for _ in range(80):     # ~60s: cold container init on an old card can be slow
+        if _get_json(base_url, "/api/version", 3):
+            return cid, base_url
+        time.sleep(0.75)
+    _ephemeral_ollama_down(cid)
+    raise RuntimeError("scratch ollama did not become ready in time")
+
+
+def _ephemeral_ollama_down(cid):
+    """Force-remove the scratch container. Never removes the (named) models volume."""
+    import app as _app
+    try:
+        _app._docker_req("DELETE", f"/containers/{cid}?force=1", timeout=30)
+    except Exception as e:
+        print(f"bench: scratch container teardown failed: {e}", flush=True)
+
+
+def _device_label(devices, gpus):
+    """Human label for the chosen setup, e.g. 'RTX 3090' or 'P2000 + RTX 3090'."""
+    if not devices:
+        return "default (main ollama)"
+    by_idx = {g["idx"]: (g.get("name") or f"GPU {g['idx']}") for g in (gpus or [])}
+    names = [by_idx.get(int(d), f"GPU {d}") for d in devices]
+    return " + ".join(names)
+
+
 # ── worker ────────────────────────────────────────────────────────────────────
-def _run_job(run_specs, cfg, host, endpoint):
+def _run_job(run_specs, cfg, host, endpoint, devices=None):
+    import app as _app
+    cid = None
+    if devices:
+        try:
+            cid, endpoint = _ephemeral_ollama_up(devices)
+        except Exception as e:
+            print(f"bench: could not start GPU-pinned ollama: {e}", flush=True)
+            for spec in run_specs:
+                with _app.LOCK:
+                    bench_repo.finish_run(spec["id"], "error", None, int(time.time()),
+                                          None, None, None,
+                                          f"could not start GPU-pinned ollama: {e}"[:300], conn=_app.DB)
+                with _JOB_LOCK:
+                    _JOB["done_models"] += 1
+            with _JOB_LOCK:
+                _JOB["active"] = False
+                _JOB["current_model"] = None
+                _JOB["current_ctx"] = None
+            return
+    try:
+        _run_job_inner(run_specs, cfg, host, endpoint)
+    finally:
+        if cid:
+            _ephemeral_ollama_down(cid)
+        with _JOB_LOCK:
+            _JOB["active"] = False
+            _JOB["current_model"] = None
+            _JOB["current_ctx"] = None
+
+
+def _run_job_inner(run_specs, cfg, host, endpoint):
     import app as _app
     ctx_cost = None
     try:
@@ -203,11 +331,6 @@ def _run_job(run_specs, cfg, host, endpoint):
             with _JOB_LOCK:
                 _JOB["done_models"] += 1
 
-    with _JOB_LOCK:
-        _JOB["active"] = False
-        _JOB["current_model"] = None
-        _JOB["current_ctx"] = None
-
 
 # ── routes ────────────────────────────────────────────────────────────────────
 @bp.route("/api/bench/targets")
@@ -224,6 +347,8 @@ def bench_targets():
                     "models": out, "gpus": _gpu_inventory(),
                     "ctx_ladder": list(bench.DEFAULT_CTX_LADDER),
                     "default_gen_tokens": bench.DEFAULT_GEN_TOKENS,
+                    # Device selection spins up a scratch container → needs controls on.
+                    "device_select": bool(_app.ENABLE_CONTROLS),
                     "job": _job_snapshot()})
 
 
@@ -272,11 +397,24 @@ def bench_start():
     models = [m for m in ({str(x).strip() for x in models}) if m][:bench.MAX_MODELS_PER_JOB]
     if not models:
         return jsonify({"ok": False, "error": "no models selected"}), 400
+    # Optional GPU device selection: benchmark specific card(s) via a throwaway
+    # pinned ollama container. Empty -> use the main ollama as configured.
+    gpus = _gpu_inventory()
+    valid_idx = {g["idx"] for g in gpus}
+    raw_devices = body.get("devices") or []
+    if isinstance(raw_devices, (str, int)):
+        raw_devices = [raw_devices]
+    devices = sorted({int(d) for d in raw_devices
+                      if str(d).lstrip("-").isdigit() and int(d) in valid_idx})
+    if devices and not _app.ENABLE_CONTROLS:
+        return jsonify({"ok": False, "error": "GPU selection needs controls enabled (ENABLE_CONTROLS=1)"}), 400
     cfg = {
         "ctx_list": body.get("ctx_list") or None,
         "gen_tokens": _clamp_int(body.get("gen_tokens"), bench.DEFAULT_GEN_TOKENS, 16, 1024),
         "prompt_tokens": _clamp_int(body.get("prompt_tokens"), bench.DEFAULT_PROMPT_TOKENS, 32, 4096),
         "num_gpu": _opt_int(body.get("num_gpu")),
+        "devices": devices,
+        "device_label": _device_label(devices, gpus),
     }
     host = _app._clip(body.get("host") or "local", 64)
     endpoint = _default_endpoint()
@@ -296,10 +434,10 @@ def bench_start():
     try:
         reg, _ = _app._model_registry()
         reg_by = {m["name"]: m for m in reg}
-        # Snapshot the GPUs ONCE, outside the DB lock: it's an nvidia-smi subprocess
-        # (3s timeout) and identical for every model in the job — calling it per
-        # model inside _app.LOCK would stall the sampler and every other route.
-        gpu_json = json.dumps(_gpu_inventory(), separators=(",", ":"))
+        # Reuse the single GPU snapshot taken during validation (an nvidia-smi
+        # subprocess) — identical for every model, and calling it again inside
+        # _app.LOCK would stall the sampler and every other route.
+        gpu_json = json.dumps(gpus, separators=(",", ":"))
         cfg_json = json.dumps(cfg, separators=(",", ":"))
         run_specs = []
         with _app.LOCK:
@@ -315,7 +453,7 @@ def bench_start():
             _JOB["run_ids"] = [s["id"] for s in run_specs]
             _JOB["models"] = [s["model"] for s in run_specs]
             _JOB["total_models"] = len(run_specs)
-        threading.Thread(target=_run_job, args=(run_specs, cfg, host, endpoint), daemon=True).start()
+        threading.Thread(target=_run_job, args=(run_specs, cfg, host, endpoint, devices), daemon=True).start()
     except Exception as e:
         with _JOB_LOCK:
             _JOB["active"] = False
