@@ -168,7 +168,10 @@ def _ephemeral_ollama_up(devices, port=None):
     _docker_rm_bench_container()  # clear any stale one first, and wait until gone
     body = {
         "Image": _BENCH_OLLAMA_IMAGE,
-        "Env": [f"OLLAMA_HOST=0.0.0.0:{port}", "OLLAMA_MAX_LOADED_MODELS=1",
+        # Loopback only: the monitor reaches it via 127.0.0.1:<port> (host net),
+        # so there's no reason to expose an unauthenticated ollama on all host
+        # interfaces for the run's duration.
+        "Env": [f"OLLAMA_HOST=127.0.0.1:{port}", "OLLAMA_MAX_LOADED_MODELS=1",
                 "NVIDIA_DRIVER_CAPABILITIES=compute,utility"],
         "HostConfig": {
             "NetworkMode": "host",   # monitor is host-net too, so reach 127.0.0.1:port
