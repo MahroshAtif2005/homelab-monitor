@@ -150,6 +150,8 @@ def _run_job(run_specs, cfg, host, endpoint):
         if should_cancel():
             with _app.LOCK:
                 bench_repo.set_status(rid, "canceled", conn=_app.DB)
+            with _JOB_LOCK:
+                _JOB["done_models"] += 1   # keep progress honest through a cancel
             continue
         with _JOB_LOCK:
             _JOB["current_model"] = model
@@ -263,10 +265,8 @@ def bench_start():
     import app as _app
     if not _bench_enabled():
         return jsonify({"ok": False, "error": "benchmarking disabled or ollama unreachable"}), 400
-    with _JOB_LOCK:
-        if _JOB["active"]:
-            return jsonify({"ok": False, "error": "a benchmark is already running",
-                            "job": {k: v for k, v in _JOB.items() if k != "cancel"}}), 409
+    # Validate the request BEFORE touching the single-flight slot, so a bad request
+    # never has to roll the slot back.
     body = request.get_json(silent=True) or {}
     models = body.get("models") or []
     if isinstance(models, str):
@@ -282,30 +282,44 @@ def bench_start():
     }
     host = _app._clip(body.get("host") or "local", 64)
     endpoint = _default_endpoint()
-    # Build one run per model (metadata resolved from the registry).
-    reg, _ = _app._model_registry()
-    reg_by = {m["name"]: m for m in reg}
     now = int(time.time())
-    run_specs = []
-    with _app.LOCK:
-        for model in models:
-            rid = uuid.uuid4().hex
-            m = reg_by.get(model, {})
-            bench_repo.insert_run(
-                rid, host, endpoint, model, m.get("family"), m.get("param_size"),
-                m.get("quant"), m.get("size_bytes"), "queued",
-                json.dumps(cfg, separators=(",", ":")),
-                json.dumps(_gpu_inventory(), separators=(",", ":")),
-                now, None, conn=_app.DB)
-            run_specs.append({"id": rid, "model": model})
+    # Reserve the single-flight slot atomically: check-and-set under ONE lock
+    # acquisition, so two concurrent POSTs can't both pass the "is one running?"
+    # gate. The GPU is a shared resource — this guarantee is the whole point.
     with _JOB_LOCK:
-        _JOB.update({"active": True, "cancel": False,
-                     "run_ids": [s["id"] for s in run_specs],
-                     "models": [s["model"] for s in run_specs],
-                     "current_model": None, "current_ctx": None,
-                     "done_models": 0, "total_models": len(run_specs),
-                     "started_at": now, "endpoint": endpoint, "host": host, "error": None})
-    threading.Thread(target=_run_job, args=(run_specs, cfg, host, endpoint), daemon=True).start()
+        if _JOB["active"]:
+            return jsonify({"ok": False, "error": "a benchmark is already running",
+                            "job": {k: v for k, v in _JOB.items() if k != "cancel"}}), 409
+        _JOB.update({"active": True, "cancel": False, "run_ids": [], "models": [],
+                     "current_model": None, "current_ctx": None, "done_models": 0,
+                     "total_models": len(models), "started_at": now,
+                     "endpoint": endpoint, "host": host, "error": None})
+    # We now own the slot; any failure below must release it or it wedges "active".
+    try:
+        reg, _ = _app._model_registry()
+        reg_by = {m["name"]: m for m in reg}
+        run_specs = []
+        with _app.LOCK:
+            for model in models:
+                rid = uuid.uuid4().hex
+                m = reg_by.get(model, {})
+                bench_repo.insert_run(
+                    rid, host, endpoint, model, m.get("family"), m.get("param_size"),
+                    m.get("quant"), m.get("size_bytes"), "queued",
+                    json.dumps(cfg, separators=(",", ":")),
+                    json.dumps(_gpu_inventory(), separators=(",", ":")),
+                    now, None, conn=_app.DB)
+                run_specs.append({"id": rid, "model": model})
+        with _JOB_LOCK:
+            _JOB["run_ids"] = [s["id"] for s in run_specs]
+            _JOB["models"] = [s["model"] for s in run_specs]
+            _JOB["total_models"] = len(run_specs)
+        threading.Thread(target=_run_job, args=(run_specs, cfg, host, endpoint), daemon=True).start()
+    except Exception as e:
+        with _JOB_LOCK:
+            _JOB["active"] = False
+        print(f"bench: failed to launch job: {e}", flush=True)
+        return jsonify({"ok": False, "error": "failed to launch benchmark"}), 500
     return jsonify({"ok": True, "run_ids": [s["id"] for s in run_specs], "job": _job_snapshot()})
 
 
