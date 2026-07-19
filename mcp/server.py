@@ -59,7 +59,9 @@ INSTRUCTIONS = (
     "`get_history` (charted time-series), `get_costs`/`get_entity_cost` (power "
     "turned into money, per machine and per process/container/service/model), "
     "`get_experiments`/`get_experiment` (tracked runs priced by the GPU energy they "
-    "burned), `get_events`/`get_alerts` (OOM kills / threshold crossings), and "
+    "burned), `get_benchmarks`/`get_benchmark` (stored LLM benchmarks: tokens/sec, "
+    "what fits in VRAM vs spills to RAM, the optimal context cap), "
+    "`get_events`/`get_alerts` (OOM kills / threshold crossings), and "
     "`scan_disk(path)` (WizTree-style folder treemap). "
     "Resources expose Prometheus `/metrics`, `/healthz` and the CHANGELOG. This "
     "server never mutates the fleet."
@@ -240,6 +242,31 @@ def get_experiment(run_id: str) -> dict:
     An unknown id returns an HTTP 404 error.
     """
     return hc.get_experiment(run_id)
+
+
+@mcp.tool()
+@_track
+def get_benchmarks(range: str = "30d", model: str = "") -> dict:
+    """LLM Benchmark Lab results (the Benchmarks tab) — stored, rerunnable
+    benchmarks of the host's local models. Each run measures one model across a
+    context-size ladder: generation & prompt tokens/sec, load time, the VRAM↔RAM
+    split (how much spilled to system RAM), the largest context that still fits
+    fully in VRAM (the recommended cap), a fit verdict, and the energy/cost it
+    burned. Optionally filter by `model`. Answers "which local model is fastest
+    here, what fits in VRAM, and what context size should I cap it to?".
+    """
+    return hc.get_benchmarks(range, model)
+
+
+@mcp.tool()
+@_track
+def get_benchmark(run_id: str) -> dict:
+    """Full detail for one benchmark run by `run_id` (from `get_benchmarks`): every
+    measured point per context size — tokens/sec, load time, VRAM/RAM-offload, fit
+    verdict and which GPU the weights landed on — plus the derived summary. An
+    unknown id returns an HTTP 404 error.
+    """
+    return hc.get_benchmark(run_id)
 
 
 @mcp.tool()
