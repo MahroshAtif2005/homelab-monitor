@@ -1839,7 +1839,9 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
         <div id="bench-ctxchips" class="bench-chips" style="margin:6px 0"></div>
         <div class="flabel" style="margin-top:12px">Generated tokens (per measure)</div>
         <input type="number" id="bench-gentokens" class="field" value="128" min="16" max="1024" step="16" style="width:120px;margin:6px 0;font-size:12px;padding:6px 8px">
-        <div class="flabel" style="margin-top:12px">GPU placement</div>
+        <div class="flabel" style="margin-top:12px">Run on GPU(s) <span class="muted" id="bench-devhint" style="text-transform:none"></span></div>
+        <div id="bench-devchips" class="bench-chips" style="margin:6px 0"></div>
+        <div class="flabel" style="margin-top:12px">GPU placement (layers)</div>
         <select id="bench-gpumode" class="field" style="width:100%;margin:6px 0;font-size:12px;padding:6px 8px">
           <option value="auto">Auto (let ollama decide)</option>
           <option value="max">Max GPU (offload all layers)</option>
@@ -1875,6 +1877,19 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <div class="chartbox short"><canvas id="bench-sweep-vram"></canvas></div>
     </div>
     <p class="cap" id="bench-sweep-cap"></p>
+  </div>
+
+  <div class="card" id="bench-compare-card" hidden>
+    <div class="card-h">
+      <h2>🆚 Compare</h2>
+      <span class="muted" style="font-size:12px;font-weight:400;text-transform:none">— overlay runs to compare setups &amp; models on one chart</span>
+    </div>
+    <div id="bench-compare-pick" class="bench-chips" style="margin:8px 0 4px"></div>
+    <div class="bench-sweep-grid">
+      <div class="chartbox short"><canvas id="bench-cmp-tps"></canvas></div>
+      <div class="chartbox short"><canvas id="bench-cmp-vram"></canvas></div>
+    </div>
+    <p class="cap">Tick two or more runs to overlay tokens/sec and VRAM across context — e.g. the same model on the P2000 vs the 3090.</p>
   </div>
 
   <div id="bench-cards"></div>
@@ -7945,6 +7960,7 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !document.getEl
 .bench-fitleg b{font-weight:600}
 .bench-fitleg .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
 .bench-advice{margin-top:11px;font-size:12px;background:var(--warnbg);border:1px solid var(--warn);border-radius:8px;padding:8px 11px;color:var(--tx)}
+.bench-setup{font-size:10px;color:var(--mut);font-weight:400;margin-top:1px;line-height:1.2}
 .bench-cardfoot{display:flex;align-items:center;gap:10px;margin-top:13px;font-size:12px;color:var(--mut)}
 .bench-cardfoot .bcf-btns{margin-left:auto;display:flex;gap:7px}
 .bench-sweep-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -7960,6 +7976,8 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !document.getEl
 let BENCH_TARGETS=null, BENCH_LIST=null, BENCH_AT=0, BENCH_POLL=null;
 const BENCH_SEL=new Set();
 const BENCH_CTX=new Set([2048,4096,8192,16384,32768]);
+const BENCH_DEV=new Set();        // selected GPU indices; empty = default (main ollama)
+const BENCH_CMP=new Set();        // run ids selected for the compare overlay
 let BENCH_CTX_INIT=false, BENCH_SWEEP_MODEL=null, BENCH_SWEEP_CACHE={};
 
 const bEsc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -8015,7 +8033,30 @@ async function loadBenchTargets(){
   document.getElementById('bench-gpuinv').innerHTML = inv ? ('🖥 '+inv) : '';
   buildBenchModelList();
   buildBenchCtxChips();
+  buildBenchDevChips();
   syncBenchJobUI();
+}
+
+function buildBenchDevChips(){
+  const box=document.getElementById('bench-devchips'); if(!box||!BENCH_TARGETS) return;
+  const gpus=BENCH_TARGETS.gpus||[];
+  const hint=document.getElementById('bench-devhint');
+  if(!BENCH_TARGETS.device_select || gpus.length<1){
+    // No controls (can't spin up a scratch instance) → default only.
+    BENCH_DEV.clear();
+    box.innerHTML=`<span class="bench-chip on">Default (main ollama)</span>`;
+    if(hint) hint.textContent = gpus.length<2 ? '' : '— enable controls to pick a card';
+    return;
+  }
+  if(hint) hint.innerHTML='— picks a card via a throwaway pinned ollama';
+  const chip=(on,label,attr)=>`<span class="bench-chip ${on?'on':''}" ${attr}>${bEsc(label)}</span>`;
+  box.innerHTML = chip(BENCH_DEV.size===0,'Default (main ollama)','data-dev="default"')
+    + gpus.map(g=>chip(BENCH_DEV.has(g.idx), (g.name||('GPU '+g.idx)), 'data-dev="'+g.idx+'"')).join('');
+  box.querySelectorAll('.bench-chip').forEach(ch=>ch.onclick=()=>{
+    if(ch.dataset.dev==='default'){ BENCH_DEV.clear(); }
+    else { const i=+ch.dataset.dev; BENCH_DEV.has(i)?BENCH_DEV.delete(i):BENCH_DEV.add(i); }
+    buildBenchDevChips();   // re-render to sync the Default chip
+  });
 }
 
 function buildBenchModelList(){
@@ -8079,9 +8120,10 @@ async function startBench(){
   const gen=+document.getElementById('bench-gentokens').value||128;
   const mode=document.getElementById('bench-gpumode').value;
   const num_gpu = mode==='auto'?null:(mode==='max'?999:0);
+  const devices=[...BENCH_DEV].sort((a,b)=>a-b);
   const btn=document.getElementById('bench-run'); btn.disabled=true;
   let j; try{ j=await(await fetch('/api/bench',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({models,ctx_list:ctxList,gen_tokens:gen,num_gpu})})).json(); }
+    body:JSON.stringify({models,ctx_list:ctxList,gen_tokens:gen,num_gpu,devices})})).json(); }
   catch(e){ toast('critical','Benchmark failed to start: '+e); btn.disabled=false; return; }
   if(!j.ok){ toast('critical', j.error||'Could not start benchmark'); btn.disabled=false; return; }
   BENCH_AT=0; await renderBenchmarks(true);
@@ -8100,10 +8142,14 @@ function latestDonePerModel(runs){
   return by;
 }
 
+function benchSetup(r){ return ((r.config&&r.config.device_label)||'').replace('default (main ollama)','main ollama'); }
+const CMP_COLORS=['#4dabf7','#ff922b','#51cf66','#f783ac','#ffd43b','#9775fa','#22b8cf','#ff6b6b'];
+
 function renderBenchResults(data){
   const runs=data.runs||[], cur=data.currency||'$';
   const latest=latestDonePerModel(runs);
   const models=Object.values(latest).filter(r=>r.summary);
+  const allDone=runs.filter(r=>r.status==='done'&&r.summary);
   const active=runs.filter(r=>r.status==='running'||r.status==='queued');
   const empty=document.getElementById('bench-empty');
   empty.hidden = models.length>0 || active.length>0;
@@ -8129,10 +8175,10 @@ function renderBenchResults(data){
     const sorted=models.slice().sort((a,b)=>(b.summary.best_gen_tps||0)-(a.summary.best_gen_tps||0));
     const max=Math.max(...sorted.map(r=>r.summary.best_gen_tps||0))||1;
     lb.innerHTML=sorted.map(r=>{
-      const t=r.summary.best_gen_tps||0, w=Math.max(3,(t/max)*100), c=benchFam(r.model).c;
+      const t=r.summary.best_gen_tps||0, w=Math.max(3,(t/max)*100), c=benchFam(r.model).c, setup=benchSetup(r);
       return `<div class="bench-lrow"><div class="bl-name">${benchLogo(r.model,true)}<span title="${bEsc(r.model)}">${bEsc(r.model)}</span></div>
         <div class="bl-track"><i style="width:${w}%;background:${c}"></i></div>
-        <div class="bl-val">${bTps(t)} <small>tok/s</small></div></div>`;
+        <div class="bl-val">${bTps(t)} <small>tok/s</small>${setup?`<div class="bench-setup">⚙ ${bEsc(setup)}</div>`:''}</div></div>`;
     }).join('');
     document.getElementById('bench-leaderboard-sub').textContent=`— best generation speed per model (${sorted.length})`;
   } else lc.hidden=true;
@@ -8164,6 +8210,8 @@ function renderBenchResults(data){
     sel.value=BENCH_SWEEP_MODEL;
     renderBenchSweep(BENCH_SWEEP_MODEL);
   } else sc.hidden=true;
+
+  renderBenchCompare(allDone);
 }
 
 function benchCard(r,cur,totalVram){
@@ -8177,7 +8225,7 @@ function benchCard(r,cur,totalVram){
   const advice=s.gpu_advice?`<div class="bench-advice">${sic('flame')||'⚠'} ${bEsc(s.gpu_advice)}</div>`:'';
   return `<div class="bench-card">
     <div class="bc-head">${benchLogo(r.model)}<div style="min-width:0"><div class="bc-title" title="${bEsc(r.model)}">${bEsc(r.model)}</div>
-      <div class="bc-sub">${bEsc(meta||'')}</div></div><span style="margin-left:auto">${fitPill(f)}</span></div>
+      <div class="bc-sub">${bEsc(meta||'')}${benchSetup(r)?` · ⚙ ${bEsc(benchSetup(r))}`:''}</div></div><span style="margin-left:auto">${fitPill(f)}</span></div>
     <div class="bench-stats">
       <div class="bench-stat"><div class="v">${bTps(s.best_gen_tps)} <span style="font-size:12px;color:var(--mut);font-weight:400">tok/s</span></div><div class="l">Gen speed${s.best_ctx?(' @ '+bCtx(s.best_ctx)):''}</div></div>
       <div class="bench-stat"><div class="v">${bTps(s.best_prompt_tps)} <span style="font-size:12px;color:var(--mut);font-weight:400">tok/s</span></div><div class="l">Prompt eval</div></div>
@@ -8228,6 +8276,50 @@ async function renderBenchSweep(rid){
   document.getElementById('bench-sweep-cap').innerHTML =
     `Tokens/sec and the VRAM↔RAM split as context grows for <b>${bEsc(d.model)}</b>. `+
     (s.max_fit_ctx?`Everything up to <b>${bCtx(s.max_fit_ctx)}</b> stays fully in VRAM; beyond that it spills to system RAM and generation slows.`:`This model spills to RAM even at the smallest context tested.`);
+}
+
+function renderBenchCompare(allDone){
+  const card=document.getElementById('bench-compare-card'), pick=document.getElementById('bench-compare-pick');
+  if(!card) return;
+  if((allDone||[]).length<2){ card.hidden=true; BENCH_CMP.clear(); return; }
+  card.hidden=false;
+  const ids=new Set(allDone.map(r=>r.id));
+  [...BENCH_CMP].forEach(id=>{ if(!ids.has(id)) BENCH_CMP.delete(id); });
+  if(BENCH_CMP.size===0) allDone.slice(0,2).forEach(r=>BENCH_CMP.add(r.id));   // sensible default
+  pick.innerHTML=allDone.map(r=>{
+    const setup=benchSetup(r), lbl=r.model+(setup?(' · '+setup):'');
+    return `<span class="bench-chip ${BENCH_CMP.has(r.id)?'on':''}" data-cmp="${bEsc(r.id)}" title="${bAgo(r.created_at)}">${bEsc(lbl)}</span>`;
+  }).join('');
+  pick.querySelectorAll('[data-cmp]').forEach(ch=>ch.onclick=()=>{
+    const id=ch.dataset.cmp; BENCH_CMP.has(id)?BENCH_CMP.delete(id):BENCH_CMP.add(id); renderBenchCompare(allDone);
+  });
+  drawBenchCompare(allDone);
+}
+
+async function drawBenchCompare(allDone){
+  const chosen=allDone.filter(r=>BENCH_CMP.has(r.id));
+  const labelSet=new Set();
+  for(const r of chosen){
+    let d=BENCH_SWEEP_CACHE[r.id];
+    if(!d){ try{ d=await(await fetch('/api/bench/'+r.id)).json(); BENCH_SWEEP_CACHE[r.id]=d; }catch(e){ continue; } }
+    (d.points||[]).filter(p=>p.ok).forEach(p=>labelSet.add(p.ctx));
+  }
+  const labels=[...labelSet].sort((a,b)=>a-b), lab=labels.map(bCtx);
+  const dsT=[], dsV=[];
+  chosen.forEach((r,i)=>{
+    const d=BENCH_SWEEP_CACHE[r.id]; if(!d) return;
+    const byctx={}; (d.points||[]).filter(p=>p.ok).forEach(p=>byctx[p.ctx]=p);
+    const setup=benchSetup(r), name=r.model+(setup?(' @ '+setup):''), c=CMP_COLORS[i%CMP_COLORS.length];
+    dsT.push({label:name,data:labels.map(x=>byctx[x]?byctx[x].gen_tps:null),borderColor:c,backgroundColor:'transparent',tension:.3,pointRadius:3,spanGaps:true});
+    dsV.push({label:name,data:labels.map(x=>byctx[x]?byctx[x].vram_mb:null),borderColor:c,backgroundColor:'transparent',tension:.3,pointRadius:3,spanGaps:true});
+  });
+  const mut=cv('--mut'),grid=cv('--free');
+  const opt=t=>({responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+    scales:{x:{title:{display:true,text:'context',color:mut},grid:{color:grid},ticks:{color:mut}},
+      y:{title:{display:true,text:t,color:mut},grid:{color:grid},ticks:{color:mut},beginAtZero:true}},
+    plugins:{legend:{labels:{color:cv('--tx'),boxWidth:12,font:{size:10}}}}});
+  mk('bench-cmp-tps',{type:'line',data:{labels:lab,datasets:dsT},options:opt('tok/s'),plugins:[areaBg]});
+  mk('bench-cmp-vram',{type:'line',data:{labels:lab,datasets:dsV},options:opt('VRAM MB'),plugins:[areaBg]});
 }
 
 // static wiring (elements exist at parse time)
