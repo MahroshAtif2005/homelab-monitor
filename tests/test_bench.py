@@ -30,6 +30,16 @@ class TestPlanCtx(unittest.TestCase):
         many = list(range(1000, 40000, 500))
         self.assertLessEqual(len(bench.plan_ctx_list(many, None)), bench.MAX_CTX_PER_MODEL)
 
+    def test_hard_ceiling_when_native_unknown(self):
+        # A user-supplied absurd context is dropped even with no native ctx known.
+        out = bench.plan_ctx_list([4096, 10_000_000], None)
+        self.assertIn(4096, out)
+        self.assertTrue(all(c <= bench.MAX_CTX for c in out))
+        self.assertNotIn(10_000_000, out)
+
+    def test_below_floor_dropped(self):
+        self.assertNotIn(64, bench.plan_ctx_list([64, 4096], None))
+
 
 class TestTiming(unittest.TestCase):
     def test_tps_and_load(self):

@@ -298,6 +298,11 @@ def bench_start():
     try:
         reg, _ = _app._model_registry()
         reg_by = {m["name"]: m for m in reg}
+        # Snapshot the GPUs ONCE, outside the DB lock: it's an nvidia-smi subprocess
+        # (3s timeout) and identical for every model in the job — calling it per
+        # model inside _app.LOCK would stall the sampler and every other route.
+        gpu_json = json.dumps(_gpu_inventory(), separators=(",", ":"))
+        cfg_json = json.dumps(cfg, separators=(",", ":"))
         run_specs = []
         with _app.LOCK:
             for model in models:
@@ -306,9 +311,7 @@ def bench_start():
                 bench_repo.insert_run(
                     rid, host, endpoint, model, m.get("family"), m.get("param_size"),
                     m.get("quant"), m.get("size_bytes"), "queued",
-                    json.dumps(cfg, separators=(",", ":")),
-                    json.dumps(_gpu_inventory(), separators=(",", ":")),
-                    now, None, conn=_app.DB)
+                    cfg_json, gpu_json, now, None, conn=_app.DB)
                 run_specs.append({"id": rid, "model": model})
         with _JOB_LOCK:
             _JOB["run_ids"] = [s["id"] for s in run_specs]

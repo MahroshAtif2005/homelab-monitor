@@ -7947,10 +7947,6 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !document.getEl
 .bench-advice{margin-top:11px;font-size:12px;background:var(--warnbg);border:1px solid var(--warn);border-radius:8px;padding:8px 11px;color:var(--tx)}
 .bench-cardfoot{display:flex;align-items:center;gap:10px;margin-top:13px;font-size:12px;color:var(--mut)}
 .bench-cardfoot .bcf-btns{margin-left:auto;display:flex;gap:7px}
-.fitpill{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px}
-.fitpill.vram{background:var(--okbg);color:var(--ok);border:1px solid var(--ok)}
-.fitpill.partial{background:var(--warnbg);color:var(--warn);border:1px solid var(--warn)}
-.fitpill.cpu{background:var(--critbg);color:var(--crit);border:1px solid var(--crit)}
 .bench-sweep-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .bench-runrow{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--mut);padding:7px 0;border-top:1px solid var(--bd)}
 .bench-spin{width:13px;height:13px;border:2px solid var(--free);border-top-color:var(--accent);border-radius:50%;display:inline-block;animation:bench-spin .8s linear infinite;flex:none}
@@ -7992,7 +7988,8 @@ const BENCH_FAM=[
 function benchFam(name){ for(const [re,v] of BENCH_FAM) if(re.test(name||'')) return v; return {t:(name||'?').slice(0,2), c:colorFor(name||'?')}; }
 function benchLogo(name, sm){ const f=benchFam(name); return `<span class="blogo${sm?' sm':''}" style="background:${f.c}" title="${bEsc(name)}">${bEsc(f.t)}</span>`; }
 function isBenchmarkable(m){ return (m.size_gb!=null) && !/embed|bert|whisper|asr/i.test((m.family||'')+' '+m.name); }
-function fitPill(fit){ if(!fit) return ''; const lbl={vram:'Fits VRAM',partial:'Spills to RAM',cpu:'CPU only'}[fit]||fit; return `<span class="fitpill ${fit}">${lbl}</span>`; }
+function fitPill(fit){ if(!fit) return ''; const lbl={vram:'Fits VRAM',partial:'Spills to RAM',cpu:'CPU only'}[fit]||fit;
+  const cls={vram:'ok',partial:'warn',cpu:'crit'}[fit]||'info'; return `<span class="badge ${cls}">${lbl}</span>`; }
 
 async function renderBenchmarks(force){
   const launch=document.getElementById('bench-launch'); if(!launch) return;

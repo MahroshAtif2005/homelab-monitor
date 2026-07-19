@@ -26,6 +26,11 @@ DEFAULT_GEN_TOKENS = 128
 DEFAULT_PROMPT_TOKENS = 512
 MAX_MODELS_PER_JOB = 12
 MAX_CTX_PER_MODEL = 10
+# Absolute ceiling on any probed context, enforced even when a model's native
+# context can't be resolved — so a user-supplied num_ctx can't reach ollama
+# unbounded and ask it to allocate an absurd KV cache.
+MAX_CTX = 131072
+MIN_CTX = 256
 
 # Fit thresholds on the VRAM-resident fraction (size_vram / size).
 _FIT_FULL = 0.999
@@ -60,24 +65,25 @@ def plan_ctx_list(requested, native_ctx):
         native = None
     explicit = bool(requested)
     ladder = list(requested) if explicit else list(DEFAULT_CTX_LADDER)
+    # Never probe above the model's native context, and never above the absolute
+    # MAX_CTX ceiling even when the native size is unknown.
+    ceiling = min(native, MAX_CTX) if native else MAX_CTX
     vals = set()
     for v in ladder:
         try:
             iv = int(v)
         except (TypeError, ValueError):
             continue
-        if iv < 256:
-            continue
-        if native and iv > native:
+        if iv < MIN_CTX or iv > ceiling:
             continue
         vals.add(iv)
-    # For the default sweep, always probe the model's native ceiling too — the
-    # whole point is to find how far context can grow before it spills. An
-    # explicit user list is respected as-is.
+    # For the default sweep, always probe the model's native ceiling too (capped
+    # at MAX_CTX) — the whole point is to find how far context can grow before it
+    # spills. An explicit user list is respected as-is.
     if native and not explicit:
-        vals.add(native)
+        vals.add(ceiling)
     if not vals:
-        vals.add(native or 4096)
+        vals.add(min(native or 4096, MAX_CTX))
     return sorted(vals)[:MAX_CTX_PER_MODEL]
 
 
