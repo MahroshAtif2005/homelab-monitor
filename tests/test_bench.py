@@ -40,6 +40,18 @@ class TestPlanCtx(unittest.TestCase):
     def test_below_floor_dropped(self):
         self.assertNotIn(64, bench.plan_ctx_list([64, 4096], None))
 
+    def test_big_contexts_probed_when_native_supports_them(self):
+        # A long-context model (256k native) should get the 128k/256k rungs.
+        out = bench.plan_ctx_list(None, 262144)
+        self.assertIn(131072, out)
+        self.assertIn(262144, out)
+
+    def test_big_contexts_clamped_to_native(self):
+        # A 32k model never gets the big rungs.
+        out = bench.plan_ctx_list(None, 32768)
+        self.assertTrue(all(c <= 32768 for c in out))
+        self.assertNotIn(131072, out)
+
     def test_downsample_keeps_both_ends(self):
         vals = [512 * i for i in range(1, 40)]   # 39 values, all <= MAX_CTX
         out = bench.plan_ctx_list(vals, None)

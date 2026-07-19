@@ -21,15 +21,17 @@ import time
 
 # Context sizes we sweep by default (tokens). Filtered to <= the model's native
 # context, with the native size appended so the ceiling is always probed.
-DEFAULT_CTX_LADDER = (2048, 4096, 8192, 16384, 32768, 65536)
+DEFAULT_CTX_LADDER = (2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144)
 DEFAULT_GEN_TOKENS = 128
 DEFAULT_PROMPT_TOKENS = 512
 MAX_MODELS_PER_JOB = 12
 MAX_CTX_PER_MODEL = 10
 # Absolute ceiling on any probed context, enforced even when a model's native
 # context can't be resolved — so a user-supplied num_ctx can't reach ollama
-# unbounded and ask it to allocate an absurd KV cache.
-MAX_CTX = 131072
+# unbounded and ask it to allocate an absurd KV cache. 256k covers today's
+# long-context models (Qwen3/Llama YaRN, etc.); the per-model native clamp in
+# plan_ctx_list still drops rungs a given model can't actually do.
+MAX_CTX = 262144
 MIN_CTX = 256
 
 # Fit thresholds on the VRAM-resident fraction (size_vram / size).

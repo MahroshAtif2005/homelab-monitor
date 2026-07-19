@@ -34,8 +34,20 @@ _JOB = {"active": False, "cancel": False, "run_ids": [], "models": [],
         "total_models": 0, "started_at": None, "endpoint": None, "host": None,
         "error": None}
 
-_GEN_TIMEOUT = 300     # a cold 30B load + generation can take a while
+_GEN_TIMEOUT = 300     # base: a cold 30B load + generation can take a while
+_GEN_TIMEOUT_MAX = 1200
 _PS_TIMEOUT = 6
+
+
+def _gen_timeout(num_ctx):
+    """Scale the per-generate timeout with context size: a big KV cache — especially
+    one that spills to RAM — loads slowly, so the 128k/256k rungs shouldn't
+    spuriously time out. ~+30s per 8k of context, capped."""
+    try:
+        extra = (int(num_ctx) // 8192) * 30
+    except (TypeError, ValueError):
+        extra = 0
+    return min(_GEN_TIMEOUT_MAX, _GEN_TIMEOUT + extra)
 
 # ── ephemeral GPU-pinned ollama (device selection) ────────────────────────────
 # To benchmark specific card(s) — ollama has no per-request device choice — we
@@ -264,7 +276,7 @@ def _run_job_inner(run_specs, cfg, host, endpoint):
             opts["num_gpu"] = int(num_gpu)
         payload = {"model": model, "prompt": prompt, "stream": False,
                    "keep_alive": keep_alive, "options": opts}
-        return _post_json(endpoint, "/api/generate", payload, _GEN_TIMEOUT)
+        return _post_json(endpoint, "/api/generate", payload, _gen_timeout(num_ctx))
 
     def ps_fn():
         return _get_json(endpoint, "/api/ps", _PS_TIMEOUT)
