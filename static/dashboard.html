@@ -8082,8 +8082,8 @@ async function startBench(){
   const btn=document.getElementById('bench-run'); btn.disabled=true;
   let j; try{ j=await(await fetch('/api/bench',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({models,ctx_list:ctxList,gen_tokens:gen,num_gpu})})).json(); }
-  catch(e){ toast&&toast('Benchmark failed to start'); btn.disabled=false; return; }
-  if(!j.ok){ toast&&toast(j.error||'Could not start benchmark'); btn.disabled=false; return; }
+  catch(e){ toast('critical','Benchmark failed to start: '+e); btn.disabled=false; return; }
+  if(!j.ok){ toast('critical', j.error||'Could not start benchmark'); btn.disabled=false; return; }
   BENCH_AT=0; await renderBenchmarks(true);
 }
 
