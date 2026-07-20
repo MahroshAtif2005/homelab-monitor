@@ -295,7 +295,7 @@ def run_model_benchmark(model, cfg, generate_fn, ps_fn, smi_fn,
     for ctx in ctx_list:
         if should_cancel and should_cancel():
             break
-        point = {"ctx": ctx, "num_gpu": num_gpu, "ok": False, "err": None}
+        point = {"ctx": ctx, "num_gpu": num_gpu, "ok": False, "err": None, "oom": False}
         try:
             before = parse_smi_gpus(smi_fn() if smi_fn else "")
             # Warm-up load at this context (also forces a reload when num_ctx
@@ -327,15 +327,18 @@ def run_model_benchmark(model, cfg, generate_fn, ps_fn, smi_fn,
             if not point["ok"] and point["err"] is None:
                 point["err"] = "no timing returned"
         except Exception as e:  # one context failing must not sink the model
-            point["err"] = _friendly_err(str(e))
+            raw = str(e)
+            point["oom"] = _is_oom(raw)
+            point["err"] = _friendly_err(raw)
         points.append(point)
         if on_point:
             on_point(point)
-        if not point["ok"]:
-            # Contexts are swept ascending. If this one couldn't run — almost
-            # always because its KV cache didn't fit (ollama returns HTTP 500 /
-            # out-of-memory) — every larger context will fail too. Stop here
-            # instead of hammering the box with doomed, OOM-prone allocations.
+        if point.get("oom"):
+            # OOM is a hard ceiling on an ascending sweep: the KV cache didn't fit
+            # (ollama returns HTTP 500), so every larger context will fail too —
+            # stop rather than hammer the box with doomed allocations. A non-OOM
+            # failure (e.g. a malformed response) is transient: skip to the next
+            # context instead, so one bad point never sinks the whole sweep.
             break
         sleep(0.2)
 
@@ -343,9 +346,15 @@ def run_model_benchmark(model, cfg, generate_fn, ps_fn, smi_fn,
     return points, summary
 
 
+def _is_oom(msg):
+    """True when ollama's error indicates it couldn't allocate the KV cache."""
+    m = (msg or "").lower()
+    return "500" in m or "internal server error" in m or "out of memory" in m or "cannot allocate" in m
+
+
 def _friendly_err(msg):
     """Map ollama's opaque allocation failure to something a human can act on."""
     m = (msg or "")[:200]
-    if "500" in m or "Internal Server Error" in m or "out of memory" in m.lower():
+    if _is_oom(m):
         return "context too large for available memory — ollama couldn't allocate the KV cache"
     return m

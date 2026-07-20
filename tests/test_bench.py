@@ -242,6 +242,21 @@ class TestOrchestration(unittest.TestCase):
         bad = [p for p in points if not p["ok"]][0]
         self.assertIn("too large", bad["err"])        # friendly OOM message
 
+    def test_non_oom_failure_does_not_stop_sweep(self):
+        # A malformed (non-OOM) response at one context must NOT abort the sweep —
+        # only a real OOM is a hard ceiling.
+        def gen_fn(model, prompt, num_ctx, num_predict, num_gpu, keep_alive):
+            if num_predict <= 8:
+                return {"load_duration": 1_000_000_000}     # warm-up ok
+            if num_ctx == 8192:
+                return {}                                    # missing timing -> ok=False, not OOM
+            return {"eval_count": 100, "eval_duration": 1_000_000_000}
+        points, _ = bench.run_model_benchmark(
+            "m", {"ctx_list": [4096, 8192, 16384]}, gen_fn, lambda: {}, lambda: "",
+            sleep_fn=lambda s: None, meta={"ctx": 32768})
+        self.assertEqual([p["ctx"] for p in points], [4096, 8192, 16384])  # 16384 still attempted
+        self.assertFalse(next(p for p in points if p["ctx"] == 8192)["ok"])
+
     def test_one_bad_ctx_does_not_sink_run(self):
         def gen_fn(model, prompt, num_ctx, num_predict, num_gpu, keep_alive):
             if num_ctx == 4096:
