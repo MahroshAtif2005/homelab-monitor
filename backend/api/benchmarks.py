@@ -35,7 +35,7 @@ _JOB = {"active": False, "cancel": False, "run_ids": [], "models": [],
         "error": None}
 
 _GEN_TIMEOUT = 300     # base: a cold 30B load + generation can take a while
-_GEN_TIMEOUT_MAX = 1200
+_GEN_TIMEOUT_MAX = 600  # cap so a single stuck generate can't freeze the slot for long
 _PS_TIMEOUT = 6
 
 
