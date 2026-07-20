@@ -226,6 +226,22 @@ class TestOrchestration(unittest.TestCase):
             sleep_fn=lambda s: None, meta={"ctx": 8192})
         self.assertLess(len(points), 3)
 
+    def test_sweep_stops_after_a_failed_context(self):
+        # Ascending sweep: once a context OOMs, larger ones are not attempted.
+        def gen_fn(model, prompt, num_ctx, num_predict, num_gpu, keep_alive):
+            if num_ctx >= 8192:
+                raise RuntimeError("HTTP Error 500: Internal Server Error")
+            if num_predict <= 8:
+                return {"load_duration": 1_000_000_000}
+            return {"eval_count": 100, "eval_duration": 1_000_000_000}
+        points, _ = bench.run_model_benchmark(
+            "m", {"ctx_list": [2048, 4096, 8192, 16384]}, gen_fn, lambda: {}, lambda: "",
+            sleep_fn=lambda s: None, meta={"ctx": 32768})
+        ctxs = [p["ctx"] for p in points]
+        self.assertEqual(ctxs, [2048, 4096, 8192])   # 8192 recorded (failed), 16384 skipped
+        bad = [p for p in points if not p["ok"]][0]
+        self.assertIn("too large", bad["err"])        # friendly OOM message
+
     def test_one_bad_ctx_does_not_sink_run(self):
         def gen_fn(model, prompt, num_ctx, num_predict, num_gpu, keep_alive):
             if num_ctx == 4096:

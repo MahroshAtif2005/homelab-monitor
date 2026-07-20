@@ -8095,6 +8095,12 @@ function updateBenchRunBtn(){
   btn.disabled = jobActive || BENCH_SEL.size===0 || BENCH_CTX.size===0;
 }
 
+function bElapsed(startTs){
+  if(!startTs) return '';
+  const d=Math.max(0,Math.floor(Date.now()/1000-startTs)), m=Math.floor(d/60), s=d%60;
+  return m?`${m}m ${s}s`:`${s}s`;
+}
+
 function syncBenchJobUI(){
   const job=(BENCH_LIST&&BENCH_LIST.job)||(BENCH_TARGETS&&BENCH_TARGETS.job);
   const prog=document.getElementById('bench-progress'), cancel=document.getElementById('bench-cancel');
@@ -8105,8 +8111,10 @@ function syncBenchJobUI(){
     document.getElementById('bench-bar-fill').style.width=pct+'%';
     const cur=job.current_model?`${job.current_model}${job.current_ctx?(' · ctx '+bCtx(job.current_ctx)):''}`:'starting…';
     document.getElementById('bench-progress-label').innerHTML=`<span class="bench-spin"></span> Benchmarking <b>${bEsc(cur)}</b>`;
-    document.getElementById('bench-progress-pct').textContent=`${done}/${tot} models`;
-    if(!BENCH_POLL) BENCH_POLL=setInterval(()=>{ if(TAB==='benchmarks'){ BENCH_AT=0; renderBenchmarks(true); } }, 3000);
+    document.getElementById('bench-progress-pct').textContent=`${done}/${tot} models · ${bElapsed(job.started_at)}`;
+    // Poll job status independently of which tab is showing, so progress keeps
+    // advancing across tab switches and is current the instant you come back.
+    if(!BENCH_POLL) BENCH_POLL=setInterval(pollBenchProgress, 2500);
   } else {
     prog.hidden=true; cancel.hidden=true;
     if(BENCH_POLL){ clearInterval(BENCH_POLL); BENCH_POLL=null; }
@@ -8133,7 +8141,28 @@ async function cancelBench(){ try{ await fetch('/api/bench/cancel',{method:'POST
 
 async function loadBenchList(){
   let j; try{ j=await(await fetch('/api/bench?range=30d')).json(); }catch(e){ return; }
-  BENCH_LIST=j; renderBenchResults(j); syncBenchJobUI();
+  BENCH_LIST=j;
+  // A render error must never stop the progress UI from updating — sync the job
+  // state regardless, so a running benchmark always keeps reporting.
+  try{ renderBenchResults(j); }catch(e){ console.error('bench: render failed', e); }
+  syncBenchJobUI();
+}
+
+// Lightweight tick while a job runs: always advance the progress bar/elapsed, but
+// only rebuild the results + charts when a model actually finishes (or the job
+// ends) — so the charts don't flicker every 2.5s.
+async function pollBenchProgress(){
+  let j; try{ j=await(await fetch('/api/bench?range=30d')).json(); }catch(e){ return; }
+  const prevDone=(BENCH_LIST&&BENCH_LIST.job)?BENCH_LIST.job.done_models:-1;
+  const stillActive=j.job&&j.job.active;
+  const doneNow=j.job?j.job.done_models:0;
+  BENCH_LIST=j;
+  // Rebuild results/charts only when a model finished (or the job ended) AND the
+  // tab is actually visible — no point rendering charts onto a hidden canvas.
+  if((!stillActive || doneNow!==prevDone) && TAB==='benchmarks'){
+    try{ renderBenchResults(j); }catch(e){ console.error('bench: render failed', e); }
+  }
+  syncBenchJobUI();
 }
 
 function latestDonePerModel(runs){
@@ -8273,9 +8302,12 @@ async function renderBenchSweep(rid){
     {label:'RAM offload MB',data:off,borderColor:warn,backgroundColor:warn+'22',fill:true,tension:.3,pointRadius:3,yAxisID:'y'}]},
     options:baseOpts(false),plugins:[areaBg]});
   const s=d.summary||{};
+  const oom=(d.points||[]).filter(p=>!p.ok && /too large|memory/i.test(p.err||''));
+  const oomCtx=oom.length?Math.min(...oom.map(p=>p.ctx)):null;
   document.getElementById('bench-sweep-cap').innerHTML =
     `Tokens/sec and the VRAM↔RAM split as context grows for <b>${bEsc(d.model)}</b>. `+
-    (s.max_fit_ctx?`Everything up to <b>${bCtx(s.max_fit_ctx)}</b> stays fully in VRAM; beyond that it spills to system RAM and generation slows.`:`This model spills to RAM even at the smallest context tested.`);
+    (s.max_fit_ctx?`Everything up to <b>${bCtx(s.max_fit_ctx)}</b> stays fully in VRAM; beyond that it spills to system RAM and generation slows.`:`This model spills to RAM even at the smallest context tested.`)+
+    (oomCtx?` <b style="color:var(--warn)">${bCtx(oomCtx)} and above ran out of memory</b> — the KV cache couldn't be allocated, so larger contexts weren't tested.`:'');
 }
 
 function renderBenchCompare(allDone){
