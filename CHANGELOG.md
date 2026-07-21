@@ -7,6 +7,9 @@ release notes.
 
 ## [Unreleased]
 
+**Changed**
+- **Benchmark Lab results are now a compact, filterable, sortable table instead of cards.** Cards don't scale — with dozens of runs they're hard to scan. The results are now one table: one row per run with the model, setup (which GPU), gen/prompt tokens/sec (with an inline speed bar), load time, fit, max-VRAM/recommended context, the VRAM↔RAM split, energy and cost, and when it ran. Click any column to sort, type in the filter box to narrow by model/setup/fit, click a row to open its context sweep, and tick rows to overlay them in Compare. Running/failed rows show their status inline; the "weights spread onto a smaller card" hint moves to a ⚠ on the Fit cell (and a banner in the sweep).
+
 **Fixed**
 - **Benchmark Lab: a too-big context no longer hammers the box, and progress keeps reporting across tab switches.** Two issues from real use: (1) sweeping ascending contexts kept trying ever-larger sizes even after one had already failed to fit — so a 30B model under memory pressure would OOM (ollama HTTP 500) on 64k, then 128k, then 256k in a row. The sweep now stops at the first context that can't be allocated (larger ones can only fail too), and the opaque "HTTP 500" is reported as "context too large for available memory — ollama couldn't allocate the KV cache", with the sweep chart calling out the ceiling. (2) The running-job progress didn't visibly advance after switching tabs or reopening the dashboard: the poll is now independent of which tab is showing (so it keeps ticking and is current the instant you return), shows elapsed time, survives a render error, and no longer flickers the charts each tick. The per-generate timeout is also capped lower so a single stuck generation can't hold the single-flight slot for long.
 
