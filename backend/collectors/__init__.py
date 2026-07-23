@@ -200,17 +200,21 @@ def sample_once():
             svc = ct["name"]
             provider = provider_of.get(svc)
             smem = procs.get(svc)                         # MB this server holds on the GPU now
-            api_vram = any(v is not None for _, v in found)
-            for mdl, vram in found:
+            api_vram = any(v is not None for _, v, _ in found)
+            for mdl, vram, ram in found:
                 if vram is not None:                      # server reported its own VRAM (Ollama)
                     vram_val = round(vram)
+                    ram_val = round(ram) if ram else 0    # spill into system RAM (0 = fully on GPU)
                 elif not api_vram and len(found) == 1 and smem:
                     vram_val = round(smem)                # single model ↔ all the server's VRAM
+                    ram_val = None                        # attributed from nvidia-smi — spill unknown
                 else:
                     vram_val = None                        # server up but idle / can't attribute
-                models.append((svc, mdl, vram_val))
+                    ram_val = None
+                models.append((svc, mdl, vram_val, ram_val))
                 model_catalog.append({"service": svc, "provider": provider, "model": mdl,
-                                       "loaded": vram_val is not None, "vram_mb": vram_val})
+                                       "loaded": vram_val is not None, "vram_mb": vram_val,
+                                       "ram_mb": ram_val})
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = _app.sample_callers(conts, {c["name"] for c in ai})
@@ -278,8 +282,8 @@ def sample_once():
         pp_rows = _app._attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
-        _app.DB.executemany("INSERT INTO models VALUES(?,?,?,?)",
-                            [(ts, svc, mdl, vram) for svc, mdl, vram in models if vram is not None])
+        _app.DB.executemany("INSERT INTO models(ts,service,model,vram,ram) VALUES(?,?,?,?,?)",
+                            [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram in models if vram is not None])
         _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
                             [(ts, caller, server, n) for (caller, server), n in edges.items()])
         # Per-GPU history only when there's more than one card (single-GPU rigs are
@@ -349,7 +353,7 @@ def sample_once():
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  models=[{"service": s, "model": m, "vram": v, "ram": r} for s, m, v, r in models],
                   model_catalog=model_catalog,
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),

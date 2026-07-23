@@ -118,11 +118,59 @@ def query_proc_summary(since: int, conn=None) -> list:
 
 
 def query_model_summary(since: int, conn=None) -> list:
-    """Return (service, model, max_vram, avg_vram) from models since `since`."""
+    """Return (service, model, max_vram, avg_vram, max_ram_spill) from models since
+    `since`. max_ram_spill is the worst spill into system RAM (0 = never spilled;
+    NULL-ram rows count as 0 — spill is only known for servers that report it)."""
     c = conn or connection()
     return c.execute(
-        "SELECT service,model,MAX(vram),AVG(vram) FROM models WHERE ts>=? AND vram IS NOT NULL "
+        "SELECT service,model,MAX(vram),AVG(vram),MAX(COALESCE(ram,0)) "
+        "FROM models WHERE ts>=? AND vram IS NOT NULL "
         "GROUP BY service,model",
+        (since,)
+    ).fetchall()
+
+
+def query_model_runs(since: int, gap: int, conn=None) -> list:
+    """Reconstruct load sessions ("runs") per model from the residency samples:
+    a run is a contiguous stretch of rows where the model was loaded, split when
+    consecutive samples are more than `gap` seconds apart (the model was unloaded
+    in between — e.g. ollama keep-alive expired). Returns
+    (service, model, runs, runs_spilled, peak_ram) where runs_spilled counts
+    sessions that touched system RAM at any point."""
+    c = conn or connection()
+    return c.execute(
+        "WITH r AS ("
+        "  SELECT service, model, ts, COALESCE(ram,0) AS ram,"
+        "         CASE WHEN ts - LAG(ts) OVER (PARTITION BY service,model ORDER BY ts) > ?"
+        "              THEN 1 ELSE 0 END AS brk"
+        "  FROM models WHERE ts>=? AND vram IS NOT NULL),"
+        " s AS ("
+        "  SELECT service, model, ram,"
+        "         SUM(brk) OVER (PARTITION BY service,model ORDER BY ts) AS sess"
+        "  FROM r),"
+        " g AS ("
+        "  SELECT service, model, sess, MAX(ram) AS peak_ram"
+        "  FROM s GROUP BY service, model, sess)"
+        "SELECT service, model, COUNT(*),"
+        "       SUM(CASE WHEN peak_ram>0 THEN 1 ELSE 0 END), MAX(peak_ram) "
+        "FROM g GROUP BY service, model",
+        (gap, since)
+    ).fetchall()
+
+
+def query_model_callers(since: int, conn=None) -> list:
+    """Attribute callers to *models* by time overlap: a caller↔server connection
+    sample counts toward a model when that model was resident on the server at
+    the same tick. Approximate by design (a server hosting two models at once
+    credits both), but with one model resident at a time — the common case on a
+    single card — it answers "which app drove this model". Returns
+    (service, model, caller, overlap_samples)."""
+    c = conn or connection()
+    return c.execute(
+        "SELECT m.service, m.model, e.caller, COUNT(*) "
+        "FROM edges e JOIN models m ON m.ts=e.ts AND m.service=e.server "
+        "WHERE e.ts>=? AND m.vram IS NOT NULL "
+        "GROUP BY m.service, m.model, e.caller",
         (since,)
     ).fetchall()
 

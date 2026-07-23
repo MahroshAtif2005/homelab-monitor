@@ -19,11 +19,19 @@ def _http_json(ip, port, path, timeout=2):
     return json.loads(body) if status < 400 else None
 
 def probe_ollama(ip):
-    """Ollama: models loaded *now* (with live VRAM) from /api/ps; if none are loaded,
-    fall back to the pulled catalogue (/api/tags) so the server still shows as Idle."""
+    """Ollama: models loaded *now* from /api/ps — live VRAM plus any spill into
+    system RAM (`size` is the whole resident model, `size_vram` the GPU part; the
+    difference is CPU-offloaded — same split the Benchmark Lab calls ram_offload).
+    A model with size_vram=0 but size>0 is running fully on CPU: still Loaded.
+    If nothing is loaded, fall back to the pulled catalogue (/api/tags) so the
+    server still shows as Idle."""
     ps = _http_json(ip, 11434, "/api/ps")
-    loaded = [(m["name"], (m.get("size_vram") or 0) / 1048576 or None)
-              for m in (ps or {}).get("models", []) if m.get("name")]
+    loaded = []
+    for m in (ps or {}).get("models", []):
+        size, vram = m.get("size") or 0, m.get("size_vram") or 0
+        if not m.get("name") or (size <= 0 and vram <= 0):
+            continue
+        loaded.append((m["name"], vram / 1048576, max(0, size - vram) / 1048576))
     if loaded:
         return loaded
     tags = _http_json(ip, 11434, "/api/tags")
@@ -220,8 +228,10 @@ def probe_models(ct):
     # Host-networked servers have no per-container IP; the hub shares the host net
     # namespace, so localhost reaches them on their published/default port.
     ip = ct.get("ip") or "127.0.0.1"
+    # Normalize every probe's rows to (model, vram_mb, ram_spill_mb). Only Ollama
+    # reports the spill split today, so 2-wide rows get ram=None (= unknown).
     try:
-        found = [(m, v) for m, v in fn(ip) if m]
+        found = [(it[0], it[1], it[2] if len(it) > 2 else None) for it in fn(ip) if it[0]]
     except Exception as e:
         print(f"probes/probe_models error: {e}", flush=True)
         return []
@@ -232,7 +242,7 @@ def probe_models(ct):
     # the panel. Loaded models and small catalogues (e.g. your pulled Ollama models)
     # are kept verbatim.
     if len(idle) > CATALOG_MAX:
-        idle = [(f"{len(idle)} models available", None)]
+        idle = [(f"{len(idle)} models available", None, None)]
     return loaded + idle
 
 # ── Group 2: Host metrics probe ───────────────────────────────────────────────

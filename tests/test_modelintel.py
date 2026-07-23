@@ -84,7 +84,7 @@ class TestOllamaMeta(unittest.TestCase):
     def test_collect_only_fetches_loaded(self):
         app._OLLAMA_META.clear()
         ai = [{"name": "ollama", "image": "ollama/ollama", "ip": "1.2.3.4"}]
-        models = [("ollama", "loaded-model", 1234), ("ollama", "idle-model", None)]
+        models = [("ollama", "loaded-model", 1234, 0), ("ollama", "idle-model", None, None)]
         resp = {"details": {"parameter_size": "7B", "quantization_level": "Q8_0"},
                 "model_info": {}, "capabilities": []}
         with patch("app._http_post_json", return_value=resp) as pj:

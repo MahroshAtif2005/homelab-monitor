@@ -150,6 +150,7 @@ if _PROM_OK:
         "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
         "systemd_unit":      _make_gauge("homelab_systemd_unit_state",  "Systemd unit state (1=active)",     ["unit",  "state"]),
         "model_vram":        _make_gauge("homelab_model_loaded_vram_mb","Model VRAM loaded (MB)",             ["server", "model"]),
+        "model_ram":         _make_gauge("homelab_model_ram_spill_mb", "Model spill into system RAM (MB)",   ["server", "model"]),
         "models_installed":  _make_gauge("homelab_models_installed_total","AI models detected per provider (#219: loaded + idle catalogue)", ["provider"]),
     }
 LOCK = threading.Lock()
@@ -159,8 +160,10 @@ CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used R
 CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
 CREATE TABLE IF NOT EXISTS net_samples(ts INTEGER, iface TEXT, bytes_in INTEGER, bytes_out INTEGER);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
-CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL);
+CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL, ram REAL);
+CREATE INDEX IF NOT EXISTS idx_models_ts ON models(ts);
 CREATE TABLE IF NOT EXISTS edges(ts INTEGER, caller TEXT, server TEXT, conns INTEGER);
+CREATE INDEX IF NOT EXISTS idx_edges_ts ON edges(ts);
 CREATE TABLE IF NOT EXISTS events(ts INTEGER, service TEXT, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS disk_io_samples(ts INTEGER NOT NULL, device TEXT NOT NULL, read_mb_s REAL, write_mb_s REAL, util_pct REAL);
 CREATE INDEX IF NOT EXISTS idx_diskio_ts ON disk_io_samples(device, ts);
@@ -309,6 +312,8 @@ _RUNS_MIGRATIONS = ("key_id TEXT",)
 _UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
 # Per-check opt-in to the public status page (off by default).
 _UPTIME_CHECK_MIGRATIONS = ("public INTEGER NOT NULL DEFAULT 0",)
+# RAM-spill split for loaded models (ollama size - size_vram). NULL = unknown (non-ollama).
+_MODELS_MIGRATIONS = ("ram REAL",)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -342,7 +347,8 @@ def _apply_schema_migrations(conn):
     _apply_schema_migrations_impl(conn, _DB_SCHEMA,
                                   _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
                                   _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
-                                  _UPTIME_CHECK_MIGRATIONS)
+                                  _UPTIME_CHECK_MIGRATIONS,
+                                  models_migrations=_MODELS_MIGRATIONS)
     conn.executescript(_EDGE_STATE_MIGRATION)
 
 def _backfill_rollups(conn):
@@ -532,7 +538,7 @@ def collect_model_meta(ai, models):
     is_ollama = {ct["name"] for ct in ai
                  if "ollama" in (ct.get("name", "") + " " + ct.get("image", "")).lower()}
     out = {}
-    for svc, mdl, vram in models:
+    for svc, mdl, vram, _ram in models:
         if svc not in is_ollama or not mdl:
             continue
         if mdl in _OLLAMA_META:
