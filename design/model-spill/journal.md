@@ -33,3 +33,18 @@
 
 ## Log
 - Branch created; recon done (probe→collector→DB→/api/data→renderModels chain traced).
+- Implemented end-to-end; full suite on ardi (python:3.12 container): 528 passed,
+  6 failed — the same 6 fail on the origin/next baseline (maintenance-window +
+  no-silent-swallow), pre-existing and unrelated.
+- Deploy note: ardi:9801 was still held by the leftover build-off container
+  `homelab-monitor-next` (arena judged 2026-07-15) → stopped it (docker start
+  brings it back) so the dev instance could bind. Old local WIP in
+  /home/ardi/homelab-monitor-dev stashed as "pre-spill-deploy WIP" (its
+  os-upgrade half was already merged upstream as d1906a5).
+- Live verification on 9801: forced a real spill (nomic-embed-text with
+  num_gpu:0, 120s keep-alive) → now.models {vram:0, ram:359}, summary
+  {runs:1, runs_spilled:1, peak_ram:359}, warning insight, Prometheus
+  homelab_model_ram_spill_mb=359. Fully-CPU model now shows Loaded (was Idle).
+- UI verified via Playwright, no JS errors: AI Models rows show "1 · 1 spilled"
+  + Used-by pills (jarvis-server 50% on qwen3-coder:30b); GPU tab shows the
+  amber spill banner with per-model spilled-run counts.
