@@ -29,6 +29,21 @@ server's own API. Servers stay listed as **Idle** when their model unloads (noth
 flickers away), and a **"Driven by"** breakdown shows which services are calling each
 server. See the [full list of 30+ servers](model-servers.md).
 
+## Benchmark Lab
+
+Measure what your local models **actually** do on your GPUs, instead of guessing.
+Pick one or more ollama models and the Lab sweeps a ladder of context sizes,
+recording **generation & prompt tokens/sec**, load time, the **VRAM↔RAM split**
+(how much spilled to system RAM), a fit verdict, and the **largest context that
+still fits fully in VRAM** — the cap worth setting. Choose which GPU(s) to test
+(via a throwaway pinned ollama container — your main one is never touched),
+overlay stored runs to compare cards, and every run is priced by the same tariff
+engine as the rest of the app. Results are stored and sortable in a filterable
+table: benchmark once, re-run only when something changes. Benchmarking is an
+active, opt-in operation and single-flight, so it never stampedes the GPU.
+
+![Benchmark Lab](https://raw.githubusercontent.com/SikamikanikoBG/homelab-monitor/main/docs/screenshots/benchmark-lab.png)
+
 ## Containers
 
 Health of **every** Docker container with uptime, **RAM and GPU-VRAM in separate
