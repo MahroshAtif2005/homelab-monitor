@@ -3194,7 +3194,10 @@ function showTab(id){
   if(id==='security') renderSecurity();
   if(id==='services') renderServicesTab();
   if(id==='models'){ _wireRegistry(); loadRegistry(); }   // on-disk model inventory (load on view; no aggressive poll)
-  if(id==='benchmarks') renderBenchmarks(true);           // LLM Benchmark Lab (loads targets + stored runs on view)
+  // LLM Benchmark Lab lives in a later <script> block — on a deep link/reload
+  // straight into #benchmarks this runs before that block has parsed, so guard
+  // the call (the Lab block self-renders when it loads; see its static wiring).
+  if(id==='benchmarks' && typeof renderBenchmarks==='function') renderBenchmarks(true);
 }
 
 // ── Data loaders ────────────────────────────────────────────────────────────
@@ -8378,6 +8381,9 @@ async function drawBenchCompare(allDone){
   const flt=document.getElementById('bench-modelfilter'); if(flt) flt.oninput=buildBenchModelList;
   const sel=document.getElementById('bench-sweep-model'); if(sel) sel.onchange=()=>renderBenchSweep(sel.value);
   const rflt=document.getElementById('bench-results-filter'); if(rflt) rflt.oninput=()=>{ BENCH_FILTER=rflt.value; if(BENCH_LIST) renderBenchTable(BENCH_LIST.runs||[], (BENCH_LIST.currency||'$')); };
+  // Deep link/reload straight into #benchmarks: showTab already ran (before this
+  // block parsed) and skipped the guarded render — do the initial render now.
+  if(typeof TAB!=='undefined' && TAB==='benchmarks') renderBenchmarks(true);
 })();
 </script>
 
