@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.25.0"
+VERSION      = "0.26.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -99,6 +99,7 @@ from backend.api.experiments import bp as _experiments_bp
 from backend.api.uptime_api import bp as _uptime_api_bp
 from backend.api.hosts_api import bp as _hosts_api_bp
 from backend.api.integrations import bp as _integrations_bp
+from backend.api.benchmarks import bp as _benchmarks_bp
 app.register_blueprint(_system_bp)
 app.register_blueprint(_gpu_bp)
 app.register_blueprint(_costs_bp)
@@ -106,6 +107,7 @@ app.register_blueprint(_experiments_bp)
 app.register_blueprint(_uptime_api_bp)
 app.register_blueprint(_hosts_api_bp)
 app.register_blueprint(_integrations_bp)
+app.register_blueprint(_benchmarks_bp)
 
 # ── Prometheus gauges (defined once at module level) ──────────────────────────
 _GAUGES: dict = {}
@@ -279,6 +281,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
 );
+-- LLM Benchmark Lab (active, opt-in): one bench_runs row per (model, execution),
+-- one bench_points row per (context-size / gpu-layers) measurement. Stored so a
+-- benchmark need not be re-run often; a rerun simply inserts a fresh run (history).
+CREATE TABLE IF NOT EXISTS bench_runs(
+  id TEXT PRIMARY KEY, host TEXT, endpoint TEXT, model TEXT NOT NULL,
+  family TEXT, param_size TEXT, quant TEXT, size_bytes INTEGER,
+  status TEXT NOT NULL, config TEXT, summary TEXT, gpu TEXT, error TEXT,
+  created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,
+  energy_kwh REAL, cost REAL, avg_w REAL);
+CREATE TABLE IF NOT EXISTS bench_points(
+  run_id TEXT NOT NULL, ctx INTEGER, num_gpu INTEGER,
+  gen_tps REAL, prompt_tps REAL, load_ms REAL, ttft_ms REAL, total_ms REAL,
+  eval_count INTEGER, prompt_eval_count INTEGER,
+  vram_mb REAL, ram_offload_mb REAL, total_size_mb REAL, gpu_fraction REAL,
+  fit TEXT, gpus TEXT, ok INTEGER, err TEXT);
+CREATE INDEX IF NOT EXISTS idx_bench_points_run ON bench_points(run_id);
+CREATE INDEX IF NOT EXISTS idx_bench_runs_model ON bench_runs(model, created_at);
 """
 # cpu_power/dram_power: measured CPU package / DRAM watts via RAPL (#costs). NULL when unavailable.
 _SAMPLE_MIGRATIONS = ("cpu REAL", "ram_used REAL", "ram_total REAL", "load1 REAL", "ctemp REAL",
@@ -4795,8 +4814,21 @@ def amd_gpus(drm_root=None):
                     continue
         except OSError:
             continue
-        total  = _amd_read_int(os.path.join(dev, "mem_info_vram_total"))   # bytes
-        used   = _amd_read_int(os.path.join(dev, "mem_info_vram_used"))    # bytes
+        vram_total = _amd_read_int(os.path.join(dev, "mem_info_vram_total"))  # bytes
+        vram_used  = _amd_read_int(os.path.join(dev, "mem_info_vram_used"))   # bytes
+        # APU / unified-memory iGPU (e.g. Ryzen AI Max / Strix Halo): the dedicated
+        # VRAM is a tiny BIOS carve-out (<= ~1 GiB) while the real working set — where
+        # models actually load — lives in GTT (system RAM mapped to the GPU, up to
+        # nearly all system RAM). Reporting the 512 MB carve-out makes the dashboard
+        # read "29% full / VRAM ran low" on an idle 128 GB box. When this looks like an
+        # APU (tiny VRAM + large GTT), report GTT instead so residency + pressure
+        # reflect reality. Discrete cards (large VRAM) are unaffected.
+        gtt_total = _amd_read_int(os.path.join(dev, "mem_info_gtt_total"))    # bytes
+        gtt_used  = _amd_read_int(os.path.join(dev, "mem_info_gtt_used"))     # bytes
+        if vram_total and gtt_total and vram_total <= (1 << 30):  # VRAM <= 1 GiB -> iGPU
+            total, used = gtt_total, (gtt_used or 0)
+        else:
+            total, used = vram_total, vram_used
         busy   = _amd_read_int(os.path.join(dev, "gpu_busy_percent"))      # %
         temp_m = _amd_hwmon(dev, "temp1_input")     # millidegrees C
         powr_u = _amd_hwmon(dev, "power1_average")  # microwatts
