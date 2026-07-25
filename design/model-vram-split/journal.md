@@ -70,3 +70,18 @@
   idle 2-wide normalize, endpoint shape).
 - Local Windows python is 3.8 → suite must run on ardi in python:3.12
   container (same as spill work).
+- Full suite on ardi (python:3.12): **541 passed, 6 failed** — the same 6
+  pre-existing baseline failures (maintenance-window + no-silent-swallow),
+  unrelated. All new tests green.
+- Deployed to ardi:9801 (compose dev build). Live verification:
+  - `/api/ai/now` served the idle catalogue instantly; after an embed call the
+    loaded model appeared within ~2s with `ctx_now: 2048` (vs up to ~25s before).
+  - Next sampler pass attached `weights_mb: 262` for nomic-embed-text
+    (308MB resident → weights 262 + ctx/KV 46).
+  - Forced spill (num_gpu:0): insight now reads "~262 MB weights + ~97 MB
+    context/KV & buffers (running at 2,048 ctx) — a smaller context window
+    would shrink the KV cache and may fit VRAM."
+  - Playwright on the tab: **no JS errors**; split bar + caption
+    "weights 262 MB · ctx 97 MB" + "@ 2.0K ctx" chip render (after-ai-card.png,
+    after-ai-tab.png).
+- CHANGELOG Unreleased entries added. PR stacked on #243's branch.

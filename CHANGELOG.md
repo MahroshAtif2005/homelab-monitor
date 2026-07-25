@@ -7,6 +7,10 @@ release notes.
 
 ## [Unreleased]
 
+**Added**
+- **AI Models: a loaded model's memory is now split into *weights* vs *context/KV* — the answer to "why did it spill into RAM".** The Now cell gains a stacked split bar and caption (e.g. "weights 17.3 GB · ctx 3.4 GB"): weights are the model file itself (ollama `/api/tags` size), and the rest of the residency is the context/KV cache + buffers — the part that grows with the context window. The metadata chips now show the **runtime context** the load is actually running with (`@ 32K ctx`, from ollama's `/api/ps context_length`, model max in the tooltip), and the RAM-spill insight explains the split in words — including that a smaller context window shrinks the KV cache and may fit VRAM. No DB change; older ollama servers simply omit the runtime-ctx chip.
+- **AI Models tab refreshes in seconds now.** A new light `GET /api/ai/now` endpoint (no DB, no lock) re-probes just the ollama servers on demand — throttled server-side to once per ~3s — and the tab polls it every 5s while visible (local host, auto-refresh on). Loads, unloads, spill and ctx changes show up in a few seconds instead of the previous ~25s worst case (10s sampler + 15s global poll).
+
 **Changed**
 - **Benchmark Lab results are now a compact, filterable, sortable table instead of cards.** Cards don't scale — with dozens of runs they're hard to scan. The results are now one table: one row per run with the model, setup (which GPU), gen/prompt tokens/sec (with an inline speed bar), load time, fit, max-VRAM/recommended context, the VRAM↔RAM split, energy and cost, and when it ran. Click any column to sort, type in the filter box to narrow by model/setup/fit, click a row to open its context sweep, and tick rows to overlay them in Compare. Running/failed rows show their status inline; the "weights spread onto a smaller card" hint moves to a ⚠ on the Fit cell (and a banner in the sweep).
 
