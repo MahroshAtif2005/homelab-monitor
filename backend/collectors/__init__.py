@@ -192,16 +192,19 @@ def sample_once():
     ai = [c for c in conts if _match_probe(c)]
     models = []
     model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
+    ai_servers = []      # {name, ip, provider} — for the /api/ai/now throttled live re-probe
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
             found_lists = list(ex.map(probe_models, ai))
         provider_of = {c["name"]: _match_probe_key(c) for c in ai}
+        ai_servers = [{"name": c["name"], "ip": c.get("ip") or "127.0.0.1",
+                       "provider": provider_of.get(c["name"])} for c in ai]
         for ct, found in zip(ai, found_lists):
             svc = ct["name"]
             provider = provider_of.get(svc)
             smem = procs.get(svc)                         # MB this server holds on the GPU now
-            api_vram = any(v is not None for _, v, _ in found)
-            for mdl, vram, ram in found:
+            api_vram = any(v is not None for _, v, _, _ in found)
+            for mdl, vram, ram, ctx in found:
                 if vram is not None:                      # server reported its own VRAM (Ollama)
                     vram_val = round(vram)
                     ram_val = round(ram) if ram else 0    # spill into system RAM (0 = fully on GPU)
@@ -211,7 +214,8 @@ def sample_once():
                 else:
                     vram_val = None                        # server up but idle / can't attribute
                     ram_val = None
-                models.append((svc, mdl, vram_val, ram_val))
+                models.append((svc, mdl, vram_val, ram_val,
+                               ctx if vram_val is not None else None))
                 model_catalog.append({"service": svc, "provider": provider, "model": mdl,
                                        "loaded": vram_val is not None, "vram_mb": vram_val,
                                        "ram_mb": ram_val})
@@ -283,7 +287,7 @@ def sample_once():
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
         _app.DB.executemany("INSERT INTO models(ts,service,model,vram,ram) VALUES(?,?,?,?,?)",
-                            [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram in models if vram is not None])
+                            [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram, _ctx in models if vram is not None])
         _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
                             [(ts, caller, server, n) for (caller, server), n in edges.items()])
         # Per-GPU history only when there's more than one card (single-GPU rigs are
@@ -349,11 +353,15 @@ def sample_once():
             _app.sync_mlflow()
         except Exception as e:
             print("mlflow sync error:", e, flush=True)
+    # Private (not in LATEST → never serialized to clients): where the recognised
+    # AI servers live, so the /api/ai/now fast path can re-probe ollama on demand.
+    _app.AI_SERVERS = ai_servers
     _app.LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v, "ram": r} for s, m, v, r in models],
+                  models=[{"service": s, "model": m, "vram": v, "ram": r, "ctx_now": c}
+                          for s, m, v, r, c in models],
                   model_catalog=model_catalog,
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),

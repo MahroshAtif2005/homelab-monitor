@@ -1,8 +1,9 @@
 """Model RAM-spill visibility + per-model caller attribution.
 
 Covers the chain the feature rides on:
-  • probe_ollama parses /api/ps `size` vs `size_vram` into (name, vram, ram_spill)
-  • probe_models normalizes 2-wide probe rows (spill unknown) to 3-wide
+  • probe_ollama parses /api/ps `size` vs `size_vram` (+ runtime `context_length`)
+    into (name, vram, ram_spill, ctx_now)
+  • probe_models normalizes narrower probe rows (spill/ctx unknown) to 4-wide
   • query_model_summary / query_model_runs / query_model_callers derive the
     spill split, load sessions ("runs") and time-overlap caller attribution
   • the models-table ALTER migration adds `ram` to a pre-spill database
@@ -35,13 +36,13 @@ class TestProbeOllamaSpill(unittest.TestCase):
         ps = {"models": [{"name": "big:30b", "size": 20000 * MB, "size_vram": 15000 * MB}]}
         with patch("backend.probes._http_json", return_value=ps):
             rows = probes.probe_ollama("1.2.3.4")
-        self.assertEqual(rows, [("big:30b", 15000.0, 5000.0)])
+        self.assertEqual(rows, [("big:30b", 15000.0, 5000.0, None)])
 
     def test_fully_on_gpu_reports_zero_spill(self):
         ps = {"models": [{"name": "fits:8b", "size": 5000 * MB, "size_vram": 5000 * MB}]}
         with patch("backend.probes._http_json", return_value=ps):
             rows = probes.probe_ollama("1.2.3.4")
-        self.assertEqual(rows, [("fits:8b", 5000.0, 0.0)])
+        self.assertEqual(rows, [("fits:8b", 5000.0, 0.0, None)])
 
     def test_fully_on_cpu_is_still_loaded(self):
         # size_vram=0 used to collapse to the idle fallback; a fully-CPU-resident
@@ -49,7 +50,22 @@ class TestProbeOllamaSpill(unittest.TestCase):
         ps = {"models": [{"name": "cpu:70b", "size": 40000 * MB, "size_vram": 0}]}
         with patch("backend.probes._http_json", return_value=ps):
             rows = probes.probe_ollama("1.2.3.4")
-        self.assertEqual(rows, [("cpu:70b", 0.0, 40000.0)])
+        self.assertEqual(rows, [("cpu:70b", 0.0, 40000.0, None)])
+
+    def test_runtime_context_length_carried(self):
+        # ollama ≥0.6.x reports the num_ctx the load runs with — the KV-cache lever.
+        ps = {"models": [{"name": "big:30b", "size": 20000 * MB, "size_vram": 15000 * MB,
+                          "context_length": 65536}]}
+        with patch("backend.probes._http_json", return_value=ps):
+            rows = probes.probe_ollama("1.2.3.4")
+        self.assertEqual(rows, [("big:30b", 15000.0, 5000.0, 65536)])
+
+    def test_bogus_context_length_dropped(self):
+        ps = {"models": [{"name": "m", "size": 100 * MB, "size_vram": 100 * MB,
+                          "context_length": "weird"}]}
+        with patch("backend.probes._http_json", return_value=ps):
+            rows = probes.probe_ollama("1.2.3.4")
+        self.assertEqual(rows[0][3], None)
 
     def test_idle_catalogue_fallback_unchanged(self):
         def fake(ip, port, path, timeout=2):
@@ -66,19 +82,25 @@ class TestProbeModelsNormalize(unittest.TestCase):
         with patch.object(probes, "_match_probe",
                           return_value=lambda ip: [("m1", 100), ("m2", None)]):
             rows = probes.probe_models(self.CT)
-        self.assertEqual(rows, [("m1", 100, None), ("m2", None, None)])
+        self.assertEqual(rows, [("m1", 100, None, None), ("m2", None, None, None)])
 
-    def test_three_wide_rows_pass_through(self):
+    def test_four_wide_rows_pass_through(self):
+        with patch.object(probes, "_match_probe",
+                          return_value=lambda ip: [("m1", 100.0, 40.0, 8192)]):
+            rows = probes.probe_models(self.CT)
+        self.assertEqual(rows, [("m1", 100.0, 40.0, 8192)])
+
+    def test_three_wide_rows_get_unknown_ctx(self):
         with patch.object(probes, "_match_probe",
                           return_value=lambda ip: [("m1", 100.0, 40.0)]):
             rows = probes.probe_models(self.CT)
-        self.assertEqual(rows, [("m1", 100.0, 40.0)])
+        self.assertEqual(rows, [("m1", 100.0, 40.0, None)])
 
-    def test_collapsed_catalogue_is_three_wide(self):
+    def test_collapsed_catalogue_is_four_wide(self):
         idle = [(f"m{i}", None) for i in range(probes.CATALOG_MAX + 1)]
         with patch.object(probes, "_match_probe", return_value=lambda ip: idle):
             rows = probes.probe_models(self.CT)
-        self.assertEqual(rows, [(f"{probes.CATALOG_MAX + 1} models available", None, None)])
+        self.assertEqual(rows, [(f"{probes.CATALOG_MAX + 1} models available", None, None, None)])
 
 
 class TestModelRunsAndSummary(unittest.TestCase):

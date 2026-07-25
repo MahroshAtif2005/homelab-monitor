@@ -63,3 +63,17 @@ def api_models():
     })
 
 
+@bp.route("/api/ai/now")
+def api_ai_now():
+    import app as _app
+    """Light live snapshot for the AI Models tab's fast poll: loaded models with
+    the VRAM/RAM/ctx state (throttled on-demand ollama re-probe, ~3s TTL — see
+    ai_models_now) plus the sampler's latest meta/serving/callers. No DB, no
+    _app.LOCK, so it's safe to poll every few seconds."""
+    models, at = _app.ai_models_now()
+    return jsonify({"ts": _app.LATEST.get("ts"), "probed_at": int(at), "models": models,
+                    "model_meta": _app.LATEST.get("model_meta") or {},
+                    "serving": _app.LATEST.get("serving") or [],
+                    "callers": _app.LATEST.get("callers") or []})
+
+

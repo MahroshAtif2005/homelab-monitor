@@ -87,11 +87,21 @@ def api_data():
         # CPU — the single biggest silent tokens/sec killer, so surface it live.
         for m in (_app.LATEST.get("models") or []):
             if (m.get("ram") or 0) > 0:
+                detail = (f"{round(m['ram'])} MB of {m['service']}'s {m['model']} sits in "
+                          f"system RAM next to {round(m.get('vram') or 0)} MB in VRAM — "
+                          "layers offloaded to the CPU slow generation down.")
+                # When we know the weights size, say WHY it spilled: weights vs the
+                # context/KV share of the residency (ctx_now = the num_ctx loaded).
+                w = ((_app.LATEST.get("model_meta") or {}).get(m["model"]) or {}).get("weights_mb")
+                total = (m.get("vram") or 0) + m["ram"]
+                if w and total > w:
+                    ctx = m.get("ctx_now")
+                    detail += (f" The residency is ~{round(w)} MB weights + ~{round(total - w)} MB "
+                               f"context/KV & buffers{f' (running at {ctx:,} ctx)' if ctx else ''} — "
+                               "a smaller context window would shrink the KV cache and may fit VRAM.")
                 insights.append({"level": "warning",
                                  "title": f"{m['model']} is spilling into system RAM",
-                                 "detail": f"{round(m['ram'])} MB of {m['service']}'s {m['model']} sits in "
-                                           f"system RAM next to {round(m.get('vram') or 0)} MB in VRAM — "
-                                           "layers offloaded to the CPU slow generation down."})
+                                 "detail": detail})
         diskio_evs = [e for e in evs if e["kind"] == "diskio_spike"]
         if diskio_evs:
             latest_by_dev = {}
