@@ -1326,7 +1326,7 @@ def read_power(dwell=0.3):
     psys = per.get("psys")
     pkgs = [w for n, w in per.items() if n.startswith("package")]
     cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
-    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
+    drams = [w for n, w in per.items() if n == "dram"]
     out = {}
     if cpu_w is not None:
         out["cpu_power"] = round(cpu_w, 1)

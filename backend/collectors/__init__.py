@@ -249,7 +249,7 @@ def sample_once():
     except Exception as e:
         print(f"collectors/sample_once read_rapl_power error: {e}", flush=True)
         rapl = {}
-    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    cpu_power, dram_power = rapl.get("cpu_power"), rapl.get("dram_power")
     # Surface measured watts on the live snapshot so /metrics can export them.
     _app.LATEST["cpu_power"], _app.LATEST["dram_power"] = cpu_power, dram_power
     try:
