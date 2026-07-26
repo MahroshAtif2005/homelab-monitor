@@ -145,6 +145,8 @@ if _PROM_OK:
         "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
         "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
         "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_cpu_power":    _make_gauge("homelab_host_cpu_power_w",    "Host CPU package power, RAPL (W)"),
+        "host_dram_power":   _make_gauge("homelab_host_dram_power_w",   "Host DRAM power, RAPL (W)"),
         "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
         "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
         "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
@@ -398,6 +400,7 @@ _apply_schema_migrations(DB)
 _backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
+          "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background

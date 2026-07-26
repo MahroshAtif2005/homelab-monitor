@@ -250,6 +250,8 @@ def sample_once():
         print(f"collectors/sample_once read_rapl_power error: {e}", flush=True)
         rapl = {}
     cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    # Surface measured watts on the live snapshot so /metrics can export them.
+    _app.LATEST["cpu_power"], _app.LATEST["dram_power"] = cpu_power, dram_power
     try:
         top_cpu = _app.collect_top_processes()
     except Exception as e:
