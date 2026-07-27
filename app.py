@@ -5646,18 +5646,18 @@ def sync_mlflow():
 
 _CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
-def _docker_log_stream(name, tail, follow):
+def _docker_log_stream(name, tail, follow, timeout=20):
     """Yield Server-Sent Events of a container's logs over the Docker socket.
     Demuxes Docker's 8-byte stream framing (skipped for TTY containers); for
     follow=1 it keeps the connection open and emits a heartbeat every ~20s so a
-    closed browser EventSource is noticed and the socket torn down cleanly."""
-    c = http.client.HTTPConnection("localhost", timeout=None)
-    c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.sock.connect(DOCKER_SOCK)
-    if follow:
-        c.sock.settimeout(20)
-    path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
-            f"&tail={tail}&follow={'1' if follow else '0'}")
+    closed browser EventSource is noticed and the socket torn down cleanly.
+    Speaks HTTP/1.0 straight over the socket: a 1.0 response is streamed raw
+    (no chunked transfer-encoding), so a quiet-log heartbeat timeout simply
+    recv()s again. The previous http.client version could not resume its chunked
+    decoder after a timeout — the stdlib marks the socket file timed-out and
+    every later read raises "cannot read from timed out object" — so the stream
+    died with a traceback whenever a followed container went quiet."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     text = ""
     def lines_from(s):
         nonlocal text
@@ -5668,39 +5668,59 @@ def _docker_log_stream(name, tail, follow):
             out.append(line)
         return out
     try:
-        c.request("GET", path)
-        r = c.getresponse()
-        if r.status != 200:
-            yield f"event: srverror\ndata: {r.status} {r.reason}\n\n"
+        sock.connect(DOCKER_SOCK)
+        if follow:
+            sock.settimeout(timeout)
+        path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
+                f"&tail={tail}&follow={'1' if follow else '0'}")
+        sock.sendall(f"GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode())
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 65536:
+            data = sock.recv(4096)
+            if not data:
+                break
+            head += data
+        head, _, chunk = head.partition(b"\r\n\r\n")
+        st = head.split(b"\r\n", 1)[0].split(None, 2)   # e.g. b'HTTP/1.0 404 No such container'
+        code = int(st[1]) if len(st) > 1 and st[1].isdigit() else 0
+        if code != 200:
+            reason = st[2].decode("utf-8", "replace") if len(st) > 2 else "bad response from docker"
+            yield f"event: srverror\ndata: {code} {reason}\n\n"
             return
         framed, buf = None, b""
         while True:
+            if chunk:
+                if framed is None:
+                    framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
+                if framed:
+                    buf += chunk
+                    while len(buf) >= 8:
+                        size = int.from_bytes(buf[4:8], "big")
+                        if len(buf) < 8 + size:
+                            break
+                        payload, buf = buf[8:8 + size], buf[8 + size:]
+                        for line in lines_from(payload.decode("utf-8", "replace")):
+                            yield f"data: {line}\n\n"
+                else:
+                    for line in lines_from(chunk.decode("utf-8", "replace")):
+                        yield f"data: {line}\n\n"
             try:
-                chunk = r.read(4096)
+                chunk = sock.recv(4096)
             except socket.timeout:
+                chunk = b""
                 yield ": keep-alive\n\n"          # heartbeat → Flask sees a gone client
                 continue
             if not chunk:
                 break
-            if framed is None:
-                framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
-            if framed:
-                buf += chunk
-                while len(buf) >= 8:
-                    size = int.from_bytes(buf[4:8], "big")
-                    if len(buf) < 8 + size:
-                        break
-                    payload, buf = buf[8:8 + size], buf[8 + size:]
-                    for line in lines_from(payload.decode("utf-8", "replace")):
-                        yield f"data: {line}\n\n"
-            else:
-                for line in lines_from(chunk.decode("utf-8", "replace")):
-                    yield f"data: {line}\n\n"
         if text:
             yield f"data: {text}\n\n"
         yield "event: end\ndata: done\n\n"
+    except OSError as e:
+        # Docker socket unreachable / connection reset mid-stream: tell the log
+        # drawer instead of tracebacking through werkzeug into our own logs.
+        yield f"event: srverror\ndata: {e}\n\n"
     finally:
-        try: c.close()
+        try: sock.close()
         except Exception: pass
 
 
