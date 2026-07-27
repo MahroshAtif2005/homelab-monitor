@@ -3263,7 +3263,11 @@ function renderData(){
   document.getElementById('nowtbl').innerHTML = n.procs.length? n.procs.map(p=>
     `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${esc(p.service)}</td><td>${fmtMB(p.mem)}</td>
      <td style="width:42%"><span class="mini" style="width:${Math.max(2,p.mem/tot*100)}%;background:${colorFor(p.service)}"></span></td></tr>`).join('')
-    : '<tr><td class="muted">'+I18N.t('gpu.idle','GPU is idle.')+'</td></tr>';
+    : '<tr><td class="muted">'+(((n.util||0)>=5||(tot&&n.mem_used/tot>=0.1))
+        ? I18N.t('gpu.no_procdata','VRAM is in use, but no per-process breakdown is available on this host.')
+          +((n.gpu_vendor==='amd'||n.gpu_vendor==='hybrid')
+            ? ' '+I18N.t('gpu.no_procdata_amd','On AMD this needs kernel 5.19+ (DRM fdinfo).') : '')
+        : I18N.t('gpu.idle','GPU is idle.'))+'</td></tr>';
   document.getElementById('sumtbl').innerHTML = D.summary.length? D.summary.map(s=>
     `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${esc(s.service)}</td><td>${fmtMB(s.peak)}</td><td>${fmtMB(s.avg)}</td><td>${s.present}%</td></tr>`).join('')
     : '<tr><td class="muted">'+I18N.t('gpu.no_activity','No GPU activity yet.')+'</td></tr>';
