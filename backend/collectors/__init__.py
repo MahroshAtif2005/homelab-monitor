@@ -163,9 +163,7 @@ def sample_once():
         temp      = max(g["temp"] for g in gpus)
         # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
-        # the same objects held in `gpus`, so in-place enrichment shows through. AMD
-        # cards show the core panel (util/VRAM/temp/power); per-process AMD
-        # attribution is a follow-up (issue #1).
+        # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
             gpu_extra = _app._gpu_extra(nv_gpus)
@@ -180,6 +178,21 @@ def sample_once():
                         pass
         else:
             gpu_extra = {}
+        # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
+        # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
+        # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
+        # cost attribution all light up on AMD too. On a unified-memory APU the
+        # working set lives in GTT (see amd_gpus), so count both pools there;
+        # discrete cards count VRAM only, matching what mem_used reports.
+        if amd_cards:
+            unified = any(g.get("unified") for g in amd_cards)
+            for pid, mem in _app.amd_fdinfo_procs().items():
+                mb = mem["vram"] + (mem["gtt"] if unified else 0.0)
+                if mb < 1:
+                    continue   # sub-MB DRM clients (compositors idling etc.) are noise
+                svc = _app.service_for_pid(pid, nm)
+                procs[svc] = procs.get(svc, 0) + mb
+                gpu_pids[pid] = gpu_pids.get(pid, 0) + mb
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if _app.LATEST.get("gpu_avail"):

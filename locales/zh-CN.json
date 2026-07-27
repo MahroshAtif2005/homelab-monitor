@@ -304,6 +304,7 @@
   "gpu.pct_full": "{n}% 已用",
   "gpu.util_kpi": "GPU 利用率",
   "gpu.idle": "GPU 空闲。",
+  "gpu.no_procdata": "显存正在使用中，但此主机上无法按进程细分。AMD 需要内核 5.19+（DRM fdinfo）。",
   "gpu.no_activity": "暂无 GPU 活动。",
   "gpu.throttling_title": "GPU 正在降频 — 运行低于额定频率",
   "gpu.throttling_detail": "原因：<b>{reason}</b>。你的实际吞吐低于利用率 % 所暗示的 — 请检查散热或功耗上限。",

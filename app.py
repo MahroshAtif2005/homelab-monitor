@@ -4825,7 +4825,8 @@ def amd_gpus(drm_root=None):
         # reflect reality. Discrete cards (large VRAM) are unaffected.
         gtt_total = _amd_read_int(os.path.join(dev, "mem_info_gtt_total"))    # bytes
         gtt_used  = _amd_read_int(os.path.join(dev, "mem_info_gtt_used"))     # bytes
-        if vram_total and gtt_total and vram_total <= (1 << 30):  # VRAM <= 1 GiB -> iGPU
+        unified = bool(vram_total and gtt_total and vram_total <= (1 << 30))  # VRAM <= 1 GiB -> iGPU
+        if unified:
             total, used = gtt_total, (gtt_used or 0)
         else:
             total, used = vram_total, vram_used
@@ -4846,8 +4847,72 @@ def amd_gpus(drm_root=None):
             "mem_total": round(total / 1048576.0) if total is not None else 0.0,
             "power": round(powr_u / 1e6, 1) if powr_u is not None else 0.0,
             "temp":  round(temp_m / 1000.0, 1) if temp_m is not None else 0.0,
+            "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
         })
     return gpus
+
+def _fdinfo_kib(v):
+    """DRM fdinfo memory value ('123 KiB', '4 MiB') → KiB. amdgpu prints KiB, but
+    parse the unit defensively rather than assuming."""
+    p = v.split()
+    try:
+        n = float(p[0])
+    except (ValueError, IndexError):
+        return 0.0
+    return n * {"KiB": 1.0, "MiB": 1024.0, "GiB": 1048576.0}.get(p[1] if len(p) > 1 else "KiB", 1.0)
+
+def amd_fdinfo_procs(proc_root="/proc"):
+    """Per-PID AMD GPU memory from DRM fdinfo — the amdgpu counterpart of
+    `nvidia-smi --query-compute-apps`, which AMD has no equivalent of without ROCm
+    tools (and this project's AMD back-end is deliberately sysfs-only, issue #1).
+    Any process holding the GPU has /proc/<pid>/fd/N → /dev/dri/* and a matching
+    fdinfo file with `drm-driver: amdgpu` + `drm-memory-vram/gtt` lines (kernel
+    5.19+; older kernels lack the drm-memory-* keys and yield {}). Returns
+    {pid: {"vram": MB, "gtt": MB}}. A dup'd/inherited fd shares its DRM client
+    (same drm-client-id) with the original — counting both would double the
+    client's buffers — so clients are counted once per (pdev, client-id). Reads
+    the hub's own /proc: the hub runs in the host PID namespace, so host pids and
+    their fds are visible (same access service_for_pid relies on)."""
+    out = {}
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return {}
+    for pid in pids:
+        fddir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue   # process vanished, or fd table not readable
+        seen = set()   # (pdev, client-id) already counted for this pid
+        vram = gtt = 0.0   # KiB
+        for fd in fds:
+            try:
+                if not os.readlink(os.path.join(fddir, fd)).startswith("/dev/dri/"):
+                    continue
+                with open(os.path.join(proc_root, pid, "fdinfo", fd)) as f:
+                    txt = f.read(8192)
+            except OSError:
+                continue
+            drv = client = pdev = None
+            fv = fg = 0.0
+            for line in txt.splitlines():
+                k, _, val = line.partition(":")
+                val = val.strip()
+                if   k == "drm-driver":    drv = val
+                elif k == "drm-client-id": client = val
+                elif k == "drm-pdev":      pdev = val
+                # legacy + current key names for the same totals; equal when both present
+                elif k in ("drm-memory-vram", "drm-total-vram"): fv = _fdinfo_kib(val)
+                elif k in ("drm-memory-gtt",  "drm-total-gtt"):  fg = _fdinfo_kib(val)
+            if drv != "amdgpu" or client is None or (pdev, client) in seen:
+                continue
+            seen.add((pdev, client))
+            vram += fv
+            gtt  += fg
+        if vram or gtt:
+            out[int(pid)] = {"vram": vram / 1024.0, "gtt": gtt / 1024.0}
+    return out
 
 # Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
 # utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for

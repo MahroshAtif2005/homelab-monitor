@@ -280,6 +280,7 @@
   "gpu.pct_full": "{n}% full",
   "gpu.util_kpi": "GPU util",
   "gpu.idle": "GPU is idle.",
+  "gpu.no_procdata": "VRAM is in use, but no per-process breakdown is available on this host. On AMD this needs kernel 5.19+ (DRM fdinfo).",
   "gpu.no_activity": "No GPU activity yet.",
   "gpu.throttling_title": "GPU is throttling — running below rated clocks",
   "gpu.throttling_detail": "Reason: <b>{reason}</b>. Your real throughput is lower than the util % suggests — check cooling or the power limit.",
