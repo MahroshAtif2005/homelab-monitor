@@ -4839,6 +4839,14 @@ def amd_gpus(drm_root=None):
                 name = f.read().strip() or None
         except OSError:
             pass
+        # PCI address of the card (cardN/device is a symlink into /sys/devices/pci…):
+        # lets per-process fdinfo attribution match its drm-pdev to *this* card, so a
+        # hybrid APU + discrete-AMD host counts GTT only for the APU. None when the
+        # link doesn't resolve to a BDF (test fixtures, exotic buses) — attribution
+        # then falls back to the any-card-unified heuristic.
+        pdev = os.path.basename(os.path.realpath(dev))
+        if not re.fullmatch(r"[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", pdev):
+            pdev = None
         gpus.append({
             "idx": int(m.group(1)),
             "name": name or "AMD GPU %s" % m.group(1),
@@ -4848,6 +4856,7 @@ def amd_gpus(drm_root=None):
             "power": round(powr_u / 1e6, 1) if powr_u is not None else 0.0,
             "temp":  round(temp_m / 1000.0, 1) if temp_m is not None else 0.0,
             "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
+            "pdev": pdev,
         })
     return gpus
 
@@ -4868,11 +4877,14 @@ def amd_fdinfo_procs(proc_root="/proc"):
     Any process holding the GPU has /proc/<pid>/fd/N → /dev/dri/* and a matching
     fdinfo file with `drm-driver: amdgpu` + `drm-memory-vram/gtt` lines (kernel
     5.19+; older kernels lack the drm-memory-* keys and yield {}). Returns
-    {pid: {"vram": MB, "gtt": MB}}. A dup'd/inherited fd shares its DRM client
-    (same drm-client-id) with the original — counting both would double the
-    client's buffers — so clients are counted once per (pdev, client-id). Reads
-    the hub's own /proc: the hub runs in the host PID namespace, so host pids and
-    their fds are visible (same access service_for_pid relies on)."""
+    {pid: {pdev: {"vram": MB, "gtt": MB}}} — split per PCI device (pdev may be
+    None on kernels that omit drm-pdev) so the caller can apply the APU-vs-
+    discrete GTT policy per card, not host-wide. A dup'd/inherited fd shares its
+    DRM client (same drm-client-id) with the original — counting both would
+    double the client's buffers — so clients are counted once per
+    (pdev, client-id). Reads the hub's own /proc: the hub runs in the host PID
+    namespace, so host pids and their fds are visible (same access
+    service_for_pid relies on)."""
     out = {}
     try:
         pids = [p for p in os.listdir(proc_root) if p.isdigit()]
@@ -4885,7 +4897,7 @@ def amd_fdinfo_procs(proc_root="/proc"):
         except OSError:
             continue   # process vanished, or fd table not readable
         seen = set()   # (pdev, client-id) already counted for this pid
-        vram = gtt = 0.0   # KiB
+        devs = {}      # pdev -> [vram KiB, gtt KiB]
         for fd in fds:
             try:
                 if not os.readlink(os.path.join(fddir, fd)).startswith("/dev/dri/"):
@@ -4908,11 +4920,30 @@ def amd_fdinfo_procs(proc_root="/proc"):
             if drv != "amdgpu" or client is None or (pdev, client) in seen:
                 continue
             seen.add((pdev, client))
-            vram += fv
-            gtt  += fg
-        if vram or gtt:
-            out[int(pid)] = {"vram": vram / 1024.0, "gtt": gtt / 1024.0}
+            if fv or fg:
+                d = devs.setdefault(pdev, [0.0, 0.0])
+                d[0] += fv
+                d[1] += fg
+        if devs:
+            out[int(pid)] = {pdev: {"vram": v / 1024.0, "gtt": g / 1024.0}
+                             for pdev, (v, g) in devs.items()}
     return out
+
+def _amd_attrib_mb(devs, amd_cards):
+    """MB one pid holds across AMD cards, given its per-pdev fdinfo split. VRAM
+    always counts; GTT counts only on unified-memory (APU) devices — matched by
+    pdev so a discrete AMD card living next to an APU doesn't get its staging
+    buffers in GTT misread as VRAM. A pdev we can't match to a known card (kernel
+    omits drm-pdev, or sysfs didn't yield a BDF) falls back to the host-wide
+    any-card-unified heuristic."""
+    known   = {g["pdev"] for g in amd_cards if g.get("pdev")}
+    uni_set = {g["pdev"] for g in amd_cards if g.get("pdev") and g.get("unified")}
+    any_uni = any(g.get("unified") for g in amd_cards)
+    mb = 0.0
+    for pdev, m in devs.items():
+        uni = (pdev in uni_set) if (pdev and pdev in known) else any_uni
+        mb += m["vram"] + (m["gtt"] if uni else 0.0)
+    return mb
 
 # Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
 # utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for

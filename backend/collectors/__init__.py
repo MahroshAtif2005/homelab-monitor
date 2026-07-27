@@ -182,12 +182,12 @@ def sample_once():
         # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
         # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
         # cost attribution all light up on AMD too. On a unified-memory APU the
-        # working set lives in GTT (see amd_gpus), so count both pools there;
-        # discrete cards count VRAM only, matching what mem_used reports.
+        # working set lives in GTT (see amd_gpus), so GTT counts there — matched
+        # per-device by _amd_attrib_mb, so a discrete AMD card in the same box
+        # keeps counting VRAM only, matching what mem_used reports.
         if amd_cards:
-            unified = any(g.get("unified") for g in amd_cards)
-            for pid, mem in _app.amd_fdinfo_procs().items():
-                mb = mem["vram"] + (mem["gtt"] if unified else 0.0)
+            for pid, devs in _app.amd_fdinfo_procs().items():
+                mb = _app._amd_attrib_mb(devs, amd_cards)
                 if mb < 1:
                     continue   # sub-MB DRM clients (compositors idling etc.) are noise
                 svc = _app.service_for_pid(pid, nm)

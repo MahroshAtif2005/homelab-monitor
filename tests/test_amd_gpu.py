@@ -268,7 +268,7 @@ class TestAmdFdinfoProcs(unittest.TestCase):
                  _amdgpu_fdinfo(42, vram="524288 KiB", gtt="2048 KiB"))
         _write(os.path.join(self.proc, "self", "status"), "")   # non-numeric → ignored
         self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc),
-                         {100: {"vram": 512.0, "gtt": 2.0}})
+                         {100: {"0000:0b:00.0": {"vram": 512.0, "gtt": 2.0}}})
 
     def test_dup_fds_share_one_drm_client(self):
         # fds 3 and 4 are dup()s of the same DRM client (same pdev+client-id): its
@@ -276,7 +276,20 @@ class TestAmdFdinfoProcs(unittest.TestCase):
         self._fd(200, 3, "/dev/dri/renderD128", _amdgpu_fdinfo(7, vram="1048576 KiB"))
         self._fd(200, 4, "/dev/dri/renderD128", _amdgpu_fdinfo(7, vram="1048576 KiB"))
         self._fd(200, 5, "/dev/dri/renderD128", _amdgpu_fdinfo(8, vram="262144 KiB"))
-        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc)[200]["vram"], 1280.0)
+        self.assertEqual(
+            app.amd_fdinfo_procs(proc_root=self.proc)[200]["0000:0b:00.0"]["vram"],
+            1280.0)
+
+    def test_splits_by_pci_device(self):
+        # One process touching two AMD cards (e.g. APU + discrete): the split must
+        # survive per-pdev so the GTT policy can differ per card.
+        self._fd(150, 3, "/dev/dri/renderD128",
+                 _amdgpu_fdinfo(1, gtt="1048576 KiB", pdev="0000:c5:00.0"))
+        self._fd(150, 4, "/dev/dri/renderD129",
+                 _amdgpu_fdinfo(2, vram="262144 KiB", gtt="4096 KiB", pdev="0000:03:00.0"))
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc), {150: {
+            "0000:c5:00.0": {"vram": 0.0, "gtt": 1024.0},
+            "0000:03:00.0": {"vram": 256.0, "gtt": 4.0}}})
 
     def test_ignores_non_dri_fds_and_other_drm_drivers(self):
         self._fd(300, 3, "/var/log/syslog")                       # not a DRM fd
@@ -295,7 +308,7 @@ class TestAmdFdinfoProcs(unittest.TestCase):
         self._fd(500, 3, "/dev/dri/renderD129",
                  _amdgpu_fdinfo(12, vram="512 MiB", vram_key="drm-total-vram"))
         self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc),
-                         {500: {"vram": 512.0, "gtt": 0.0}})
+                         {500: {"0000:0b:00.0": {"vram": 512.0, "gtt": 0.0}}})
 
     def test_unreadable_fd_table_is_skipped(self):
         # A pid dir with no readable fd/ (vanished process / permission) is skipped
@@ -331,6 +344,40 @@ class TestAmdUnifiedFlag(unittest.TestCase):
         g0, g1 = app.amd_gpus(drm_root=drm)
         self.assertFalse(g0["unified"])
         self.assertTrue(g1["unified"])
+
+
+class TestAmdAttribMb(unittest.TestCase):
+    """_amd_attrib_mb — the per-card GTT policy applied to a pid's fdinfo split:
+    GTT counts only on unified (APU) devices, matched by PCI address, so a hybrid
+    APU + discrete-AMD host doesn't misread the dGPU's staging buffers as VRAM."""
+
+    APU  = {"pdev": "0000:c5:00.0", "unified": True}
+    DGPU = {"pdev": "0000:03:00.0", "unified": False}
+
+    def test_discrete_only_counts_vram_not_gtt(self):
+        devs = {"0000:03:00.0": {"vram": 8192.0, "gtt": 512.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU]), 8192.0)
+
+    def test_apu_counts_gtt_too(self):
+        devs = {"0000:c5:00.0": {"vram": 16.0, "gtt": 90000.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.APU]), 90016.0)
+
+    def test_hybrid_applies_policy_per_card(self):
+        # The review-flagged edge: one pid on both cards — the dGPU's GTT staging
+        # buffers must NOT be added just because an APU exists in the same box.
+        devs = {"0000:03:00.0": {"vram": 8192.0, "gtt": 512.0},
+                "0000:c5:00.0": {"vram": 16.0, "gtt": 90000.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU, self.APU]),
+                         8192.0 + 16.0 + 90000.0)
+
+    def test_unknown_pdev_falls_back_to_any_unified(self):
+        # Kernel omits drm-pdev (or sysfs gave no BDF): fall back to the host-wide
+        # heuristic — GTT counts iff any card is unified.
+        devs = {None: {"vram": 0.0, "gtt": 4096.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.APU]), 4096.0)
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU]), 0.0)
+        self.assertEqual(app._amd_attrib_mb(devs, [{"pdev": None, "unified": True}]),
+                         4096.0)
 
 
 if __name__ == "__main__":
