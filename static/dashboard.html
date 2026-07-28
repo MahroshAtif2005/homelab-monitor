@@ -5548,6 +5548,11 @@ async function loadFleet(){
   FLEET = j;
   renderHostBar();
   if(TAB==='overview'){ renderFleet(); renderMissionControl(); }
+  // A local-only tab viewed for a remote host renders from FLEET — repaint it
+  // now that fresh fleet data exists (first paint happens before /api/fleet
+  // returns, so without this the GPU tab shows a stale notice until the next
+  // 15s tick).
+  if(CURRENT_HOST!=='local' && LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 function renderHostBar(){
   if(!FLEET){ return; }
@@ -6292,7 +6297,7 @@ function mcBuildFleetGPU(){
     if(hg.gpus&&hg.gpus.length&&hg.gpus[0].mem_total!=null) hg.gpus.forEach(c=>list.push({host:hubLabel,name:c.name||'GPU',util:c.util||0,used:c.mem_used||0,total:c.mem_total||0,temp:c.temp||0,power:c.power||0}));
     else list.push({host:hubLabel,name:(hg.gpus&&hg.gpus[0]&&hg.gpus[0].name)||'GPU',util:hg.util||0,used:hg.mem_used||0,total:hg.mem_total||0,temp:hg.temp||0,power:hg.power||0});
   }
-  hosts.forEach(h=>{ if(!h.is_local && h.online && h.host && h.host.gpu){ const x=h.host.gpu; list.push({host:h.label||h.name,name:(h.host.hw&&h.host.hw.gpu_name)||'GPU',util:x.util||0,used:x.mem_used||0,total:x.mem_total||0,temp:x.temp||0,power:0}); } });
+  hosts.forEach(h=>{ if(!h.is_local && h.online && h.host && h.host.gpu){ const x=h.host.gpu; list.push({host:h.label||h.name,name:(h.host.hw&&h.host.hw.gpu_name)||'GPU',util:x.util||0,used:x.mem_used||0,total:x.mem_total||0,temp:x.temp||0,power:x.power||0}); } });
   const n=list.length;
   const usedT=list.reduce((a,x)=>a+x.used,0), totalT=list.reduce((a,x)=>a+x.total,0);
   const utilAvg=n?Math.round(list.reduce((a,x)=>a+x.util,0)/n):0;
@@ -7370,11 +7375,89 @@ function describeMissingCapability(tabId){
     detail:'Per-host support lands in the next slice.'};
 }
 
+// ── Per-host GPU (remote hosts) ───────────────────────────────────────────────
+// Newer probes ship a per-card `gpus` array (plus nvidia-smi's compute-app list
+// as `gpu_procs`) in the host snapshot, so the GPU tab renders the real thing
+// for a remote host instead of the "next slice" notice. Data comes straight
+// from FLEET — no extra fetch — and the 15s auto-refresh re-renders. Hosts
+// whose probe predates `gpus` fall back to the capability notice as before.
+function remoteGpuData(){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === CURRENT_HOST);
+  if(!h || !h.host || !Array.isArray(h.host.gpus) || !h.host.gpus.length) return null;
+  return {gpus: h.host.gpus, procs: h.host.gpu_procs||[], agg: h.host.gpu||{}, at: h.at, online: h.online};
+}
+function renderRemoteGpu(sec, rg){
+  let box = sec.querySelector('.remote-gpu');
+  if(!box){
+    box = document.createElement('div');
+    box.className = 'remote-gpu';
+    sec.insertBefore(box, sec.firstChild);
+  }
+  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
+  const gpus = rg.gpus, agg = rg.agg;
+  const memUsed  = agg.mem_used  != null ? agg.mem_used  : gpus.reduce((s,g)=>s+(g.mem_used||0),0);
+  const memTotal = agg.mem_total != null ? agg.mem_total : gpus.reduce((s,g)=>s+(g.mem_total||0),0);
+  const memPct = memTotal ? Math.round(memUsed/memTotal*100) : 0;
+  const util  = Math.round(agg.util||0);
+  const power = gpus.reduce((s,g)=>s+(g.power||0),0);
+  const temp  = gpus.reduce((m,g)=>Math.max(m,g.temp||0),0);
+  const names = [...new Set(gpus.map(g=>g.name||'GPU'))];
+  const model = names.length===1 ? (gpus.length>1?`${gpus.length}× ${names[0]}`:names[0]) : names.join(' + ');
+  const kpis=[
+    {v:fmtMB(memUsed)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(memTotal)+'</span>', l:I18N.t('gpu.vram_in_use','VRAM in use'), s:I18N.tf('gpu.pct_full','{n}% full',{n:memPct})},
+    {v:util+'%', l:I18N.t('gpu.util_kpi','GPU util'), s:Math.round(power)+' W · '+Math.round(temp)+'°C'},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const cards = gpus.map(g=>{
+    const mp = g.mem_total ? Math.round(g.mem_used/g.mem_total*100) : 0;
+    const u  = Math.round(g.util||0);
+    return `<div class="gpucard">
+      <div class="gpucard-h"><b>GPU ${g.idx!=null?g.idx:''}</b> <span class="muted">${esc(g.name||'')}</span>
+        <span class="gpucard-stats">${u}% util${g.power?` · ${Math.round(g.power)} W`:''} · ${Math.round(g.temp||0)}°C</span></div>
+      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('col.vram','VRAM')}</span>
+        <span class="gpucard-bar"><span style="width:${mp}%;background:${tint(mp)}"></span></span>
+        <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${mp}%</span></div>
+      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('gpu.percard_util','Util')}</span>
+        <span class="gpucard-bar"><span style="width:${Math.min(100,u)}%;background:${tint(u)}"></span></span>
+        <span class="gpucard-val">${u}%</span></div>
+    </div>`;
+  }).join('');
+  const procs = rg.procs.length ? rg.procs.map(p=>
+    `<tr><td><span class="dot" style="background:${colorFor(p.name||'?')}"></span>${esc(p.name||'?')} <span class="muted">· pid ${p.pid}</span></td><td>${fmtMB(p.mem||0)}</td>
+     <td style="width:42%"><span class="mini" style="width:${Math.max(2,(p.mem||0)/(memTotal||1)*100)}%;background:${colorFor(p.name||'?')}"></span></td></tr>`).join('')
+    : `<tr><td class="muted">${(util>=5||memPct>=10)
+        ? I18N.t('gpu.no_procdata','VRAM is in use, but no per-process breakdown is available on this host.')
+        : I18N.t('gpu.idle','GPU is idle.')}</td></tr>`;
+  const stale = rg.online ? '' : ` · <span style="color:var(--warn)">${I18N.t('rgpu.stale','host offline — showing last snapshot')}</span>`;
+  box.innerHTML =
+    `<div class="card"><h2>🎮 ${I18N.tf('rgpu.title','GPU on {host}',{host:esc(CURRENT_HOST)})}</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+      <div class="muted" style="margin:12px 0 8px">${esc(model)}</div>
+      ${cards}
+      <p class="cap">${I18N.tf('rgpu.cap','Live snapshot from the host poller · updated {t}',{t:relTime(rg.at)})}${stale}</p>
+    </div>
+    <div class="card"><h2>📋 ${I18N.t('rgpu.procs_title','Processes on the GPU')}</h2>
+      <table><tbody>${procs}</tbody></table>
+      <p class="cap">${I18N.t('rgpu.procs_cap','VRAM per compute process, read on the host. Service attribution and history charts need per-host storage — a later slice.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
 function renderLocalOnlyNotice(tabId){
   if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
   if(!sec) return;
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='none');
+  if(tabId === 'gpu'){
+    const rg = remoteGpuData();
+    if(rg){
+      const old = sec.querySelector('.scope-notice');
+      if(old) old.remove();
+      renderRemoteGpu(sec, rg);
+      return;
+    }
+  }
+  const panel = sec.querySelector('.remote-gpu');
+  if(panel) panel.remove();
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');
@@ -7390,6 +7473,8 @@ function clearLocalOnlyNotice(tabId){
   if(!sec) return;
   const n = sec.querySelector('.scope-notice');
   if(n) n.remove();
+  const p = sec.querySelector('.remote-gpu');
+  if(p) p.remove();
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
 }
 // Re-apply notices on host switch — necessary so that when the user
@@ -7868,6 +7953,7 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
+  if(TAB==='gpu' && CURRENT_HOST!=='local') renderLocalOnlyNotice('gpu');
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{

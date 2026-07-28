@@ -371,40 +371,79 @@ def _smi_int(v):
         return 0
 
 
-def _nvidia_gpu():
-    """First NVIDIA GPU's snapshot via nvidia-smi, or {} if no driver / no GPU."""
+def _nvidia_cards():
+    """Every NVIDIA GPU via nvidia-smi as [{idx,name,util,mem_used,mem_total,
+    power,temp}], [] if no driver / no GPU. Same query and field order as the
+    hub's own collector, so per-card shapes match across the fleet."""
     try:
         r = subprocess.run(
             ["nvidia-smi",
-             "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu,name",
+             "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, timeout=3,
         )
         if r.returncode != 0:
-            return {}
-        lines = [l for l in r.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
-        if not lines:
-            return {}
-        parts = [p.strip() for p in lines[0].split(",")]
-        if len(parts) < 5:
-            return {}
-        return {"gpu": {
-            "count":     len(lines),
-            "name":      parts[4],
-            "mem_used":  _smi_int(parts[0]),   # MB
-            "mem_total": _smi_int(parts[1]),   # MB
-            "util":      _smi_int(parts[2]),   # %
-            "temp":      _smi_int(parts[3]),   # °C
-        }}
+            return []
+        cards = []
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 7:
+                continue
+            cards.append({
+                "idx":       _smi_int(parts[0]),
+                "name":      parts[1] or "GPU %s" % parts[0],
+                "util":      _smi_int(parts[2]),   # %
+                "mem_used":  _smi_int(parts[3]),   # MB
+                "mem_total": _smi_int(parts[4]),   # MB
+                "power":     _smi_int(parts[5]),   # W
+                "temp":      _smi_int(parts[6]),   # °C
+                "vendor":    "nvidia",
+            })
+        return cards
     except Exception:
-        return {}
+        return []
+
+
+def _nvidia_procs():
+    """GPU compute processes via nvidia-smi as [{pid,name,mem}] (MB), heaviest
+    first, [] when unavailable. process_name is a full path and may contain
+    commas — pid is the first field and used_memory the last, so the middle is
+    rejoined before taking the basename."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, timeout=3,
+        )
+        if r.returncode != 0:
+            return []
+        agg = {}
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            name = ",".join(parts[1:-1]).replace("\\", "/").rsplit("/", 1)[-1]
+            pid = _smi_int(parts[0])
+            # nvidia-smi emits one row per (process, GPU) — a process spanning
+            # several cards appears once per card, so pool its VRAM per pid.
+            key = (pid, name[:64] or "?")
+            agg[key] = agg.get(key, 0) + _smi_int(parts[-1])
+        procs = [{"pid": k[0], "name": k[1], "mem": v} for k, v in agg.items()]
+        procs.sort(key=lambda p: -p["mem"])
+        return procs[:20]
+    except Exception:
+        return []
 
 
 def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
-    """First AMD GPU's snapshot from the in-kernel amdgpu sysfs interface — present
-    on any host with the open `amdgpu` driver, no ROCm tools required. Same shape
-    as _nvidia_gpu(); {} when no AMD card is present or sysfs is unreadable.
-    `drm_root` is injectable for tests."""
+    """Every AMD GPU from the in-kernel amdgpu sysfs interface — present on any
+    host with the open `amdgpu` driver, no ROCm tools required. Same card shape
+    as _nvidia_cards() (idx is assigned by read_gpu); [] when no AMD card is
+    present or sysfs is unreadable. `drm_root` is injectable for tests."""
     def _int(path):
         try:
             with open(path) as f:
@@ -423,7 +462,7 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
     try:
         entries = sorted(os.listdir(drm_root))
     except OSError:
-        return {}
+        return []
     cards = []
     for nm in entries:
         m = re.fullmatch(r"card(\d+)", nm or "")
@@ -473,25 +512,45 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
             "mem_used":  int(round(used / 1048576.0)) if used is not None else 0,
             "mem_total": int(round(total / 1048576.0)) if total is not None else 0,
             "util":      busy if busy is not None else 0,
+            "power":     0,   # amdgpu sysfs has no cheap universal power counter
             "temp":      temp,
+            "vendor":    "amd",
         })
-    if not cards:
-        return {}
-    return {"gpu": dict(cards[0], count=len(cards))}
+    return cards
 
 
 def read_gpu():
-    """First GPU's snapshot for the All-hosts table. NVIDIA via nvidia-smi and AMD
-    via the amdgpu sysfs interface (no ROCm needed). On a hybrid NVIDIA+AMD host we
-    keep the NVIDIA card as the representative but report the true total card count,
-    so the fleet table isn't blind to the AMD card(s). {} on a host with neither —
-    the GPU panel is simply hidden."""
-    nv, amd = _nvidia_gpu(), _amd_gpu_sysfs()
-    if nv and amd:
-        g = dict(nv["gpu"])
-        g["count"] = nv["gpu"].get("count", 1) + amd["gpu"].get("count", 1)
-        return {"gpu": g}
-    return nv or amd
+    """All of a host's GPUs for the hub. `gpus` is the per-card list (NVIDIA via
+    nvidia-smi, AMD via the amdgpu sysfs interface — no ROCm needed; a hybrid
+    box shows both, AMD re-indexed above the NVIDIA range like the hub's own
+    collector). `gpu` keeps the legacy aggregate shape for older hubs, now
+    pooled the same way the hub pools its local cards: VRAM + power summed,
+    util averaged, temp = hottest card. `gpu_procs` is the nvidia-smi
+    compute-apps list. {} on a host with neither vendor — the GPU panel is
+    simply hidden."""
+    nv, amd = _nvidia_cards(), _amd_gpu_sysfs()
+    base = (max(g["idx"] for g in nv) + 1) if nv else 0
+    for i, g in enumerate(amd):
+        g["idx"] = base + i
+    gpus = nv + amd
+    if not gpus:
+        return {}
+    agg = {
+        "count":     len(gpus),
+        "name":      gpus[0]["name"],
+        "vendor":    ("hybrid" if (nv and amd) else gpus[0]["vendor"]),
+        "mem_used":  sum(g["mem_used"] for g in gpus),
+        "mem_total": sum(g["mem_total"] for g in gpus),
+        "util":      int(round(sum(g["util"] for g in gpus) / len(gpus))),
+        "power":     sum(g["power"] for g in gpus),
+        "temp":      max(g["temp"] for g in gpus),
+    }
+    out = {"gpu": agg, "gpus": gpus}
+    if nv:
+        procs = _nvidia_procs()
+        if procs:
+            out["gpu_procs"] = procs
+    return out
 
 
 # ── System / Hardware / Network / Security inventory ──────────────────────────
@@ -660,7 +719,7 @@ def _count_physical_cores(cpuinfo):
     return len(pairs)
 
 
-def read_hw():
+def read_hw(gpu_agg=None):
     hw = {}
     ci = _read_text("/proc/cpuinfo") or ""
     mname = arm = vendor = None
@@ -715,7 +774,10 @@ def read_hw():
                                   "/sys/firmware/devicetree/base/model") or ""
     if machine:
         hw["machine"] = machine
-    g = read_gpu().get("gpu")
+    # main() passes the aggregate it already read (possibly {} on a GPU-less
+    # host) so nvidia-smi isn't shelled out to twice per probe cycle; only a
+    # standalone read_hw() call falls back to reading the GPU itself.
+    g = gpu_agg if gpu_agg is not None else read_gpu().get("gpu")
     if g and g.get("name"):
         hw["gpu_name"] = g["name"]
         if g.get("mem_total"):
@@ -1387,6 +1449,7 @@ def read_ollama_models():
 
 
 def main():
+    gpu_block = read_gpu()
     data = {
         "host": {
             **read_cpu(),
@@ -1395,10 +1458,10 @@ def main():
             **read_loadavg(),
             **read_uptime(),
             **read_temp(),
-            **read_gpu(),
+            **gpu_block,
             **read_systemd(),
             **read_os(),
-            **read_hw(),
+            **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
             **read_net(),
             **read_sec(),
             "disks": read_disks(),
@@ -1406,7 +1469,7 @@ def main():
         },
         "model_catalog": read_ollama_models(),
         "at": int(time.time()),
-        "probe_version": "0.8",
+        "probe_version": "0.9",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
