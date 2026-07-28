@@ -190,10 +190,42 @@ class TestAmdEnrich(unittest.TestCase):
         self.assertEqual(g["clk_mem"], 1000)
 
     def test_sclk_falls_back_to_hwmon_freq(self):
+        # Unlabelled freq1 (very old kernels): trusted as sclk.
         dev = self._card()
         _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 2_900_000_000)
         g = app.amd_gpus(drm_root=self.drm)[0]
         self.assertEqual(g["clk_sm"], 2900)
+
+    def test_labelled_freq_channels_are_matched_not_assumed(self):
+        # freq1 is usually sclk, but only the label says so: with freq1 labelled
+        # mclk, the sclk value must come from the channel actually labelled sclk,
+        # wherever it sits.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_label"), "mclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 1_000_000_000)
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq2_label"), "sclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq2_input"), 600_000_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["clk_sm"], 600)
+
+    def test_labelled_non_sclk_freq_is_not_misread(self):
+        # A labelled channel that is NOT sclk, and no sclk channel at all: better
+        # no clock than the wrong one.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_label"), "mclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 1_000_000_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertNotIn("clk_sm", g)
+
+    def test_labelled_channel_with_unreadable_input_keeps_scanning(self):
+        # hwmon3 has the right label but no readable input; hwmon4 carries the
+        # same label with a value. The scan must reach it, not give up.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp3_label"), "mem\n")
+        _write(os.path.join(dev, "hwmon", "hwmon4", "temp5_label"), "mem\n")
+        _write(os.path.join(dev, "hwmon", "hwmon4", "temp5_input"), 78_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["temp_mem"], 78.0)
 
     def test_no_starred_row_leaves_the_field_unset(self):
         dev = self._card()
@@ -296,6 +328,17 @@ class TestAmdPciName(unittest.TestCase):
     def test_unknown_device_and_foreign_vendor_yield_none(self):
         self.assertIsNone(app._amd_pci_name(self._dev("0xdead")))
         self.assertIsNone(app._amd_pci_name(self._dev("0x2684")))   # NVIDIA row ignored
+
+    def test_subsystem_rows_do_not_leak_into_the_table(self):
+        # A regressed \t\t guard would file the subsystem row under its vendor id.
+        self.assertNotIn("1002", app._amd_pci_names())
+
+    def test_empty_result_is_not_cached(self):
+        # pci.ids may appear after startup (bind mount added, package installed):
+        # a miss must be retried, only a parsed table is cached for good.
+        with mock.patch.object(app, "_PCI_IDS_PATHS", (os.path.join(self.tmp, "nope"),)):
+            self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+        self.assertEqual(app._amd_pci_name(self._dev("0x1586")), "AMD Strix Halo")
 
     def test_missing_ids_file_yields_none(self):
         app._AMD_PCI_NAMES = None

@@ -81,6 +81,47 @@ class TestMultiGpu(unittest.TestCase):
         self.assertEqual(app.LATEST["mem_total"], 24576 + 8192)  # pooled across vendors
         self.assertIn("AMD Radeon RX 7900 XTX", {g["name"] for g in gs})
 
+    def test_hybrid_gpu_extra_pools_both_vendors(self):
+        # The 'GPU right now' chips must aggregate across vendors: the power chip
+        # divides pooled draw by the pooled cap, so an NVIDIA-only aggregate would
+        # read >100% of cap as soon as the AMD card draws anything. Here the mocked
+        # smi returns no enrichment rows, so the AMD card's cap is the only one —
+        # it must survive into the aggregate rather than vanish.
+        amd = [{"idx": 0, "name": "AMD Radeon RX 7900 XTX", "util": 20.0,
+                "mem_used": 1024, "mem_total": 8192, "power": 40.0, "temp": 50.0,
+                "power_limit": 291.0, "clk_sm": 2400, "pstate": "auto"}]
+
+        def fake_smi(args):
+            # Unlike _sample_hybrid's mock, answer ONLY the base per-card query:
+            # feeding the same CSV to the enrichment query would hand the NVIDIA
+            # card a fake power cap and defeat the point of this test.
+            return ("0, NVIDIA GeForce RTX 3090, 50, 8000, 24576, 200, 60"
+                    if "memory.used" in " ".join(args) else "")
+
+        with patch("app.smi", side_effect=fake_smi), \
+             patch("app.amd_gpus", return_value=amd), \
+             patch("app.containers", return_value=[]), \
+             patch("app.sample_callers", return_value={}), \
+             patch("app.read_host", return_value={"cpu": 0, "ram_used": 0,
+                                                  "ram_total": 0, "load1": 0, "ctemp": 0}):
+            app.sample_once()
+        x = app.LATEST["gpu_extra"]
+        self.assertEqual(x["power_limit"], 291)
+        # The representative card (g0) is the NVIDIA one: its (absent) P-state must
+        # not be replaced by the AMD policy string on a hybrid box.
+        self.assertEqual(x["pstate"], "")
+        # Nobody measured mem-bandwidth utilisation → no fabricated 0% chip.
+        self.assertNotIn("mem_util", x)
+
+    def test_amd_only_gpu_extra_carries_the_enriched_fields(self):
+        amd = [{"idx": 0, "name": "AMD Strix Halo", "util": 0.0, "mem_used": 24655,
+                "mem_total": 126976, "power": 9.0, "temp": 33.0,
+                "clk_sm": 600, "pstate": "auto"}]
+        self._sample_hybrid("", amd, smi_error=FileNotFoundError("nvidia-smi"))
+        x = app.LATEST["gpu_extra"]
+        self.assertEqual(x["clk_sm"], 600)
+        self.assertEqual(x["pstate"], "auto")
+
     def test_amd_only_without_nvidia_smi(self):
         # The real bug: nvidia-smi missing entirely (FileNotFoundError) must NOT hide
         # an AMD card — before the fix the exception aborted the whole GPU half.

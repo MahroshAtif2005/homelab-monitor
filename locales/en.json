@@ -294,6 +294,8 @@
   "gpu.chip_power_t": "Draw vs the card power limit. Pinned at ~100% = power-capped.",
   "gpu.chip_pstate": "Perf state",
   "gpu.chip_pstate_t": "P0 = max performance; higher P-numbers = lower clocks.",
+  "gpu.chip_perflevel": "Perf level",
+  "gpu.chip_perflevel_t": "The amdgpu performance policy: auto lets the driver pick clocks, low/high pin them, manual means user-forced levels.",
   "gpu.chip_memtemp": "Mem temp",
   "gpu.throttling_tip": "Throttling: {x}",
   "gpu.throttling_badge": "throttling",

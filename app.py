@@ -4841,29 +4841,34 @@ def _amd_pci_names():
     HOST_ROOT bind mount (Fedora/Arch keep it in /usr/share/hwdata, Debian/Ubuntu
     in /usr/share/misc). {} when neither file is readable — callers fall back."""
     global _AMD_PCI_NAMES
-    if _AMD_PCI_NAMES is None:
+    if _AMD_PCI_NAMES is not None:
+        return _AMD_PCI_NAMES
+    for p in _PCI_IDS_PATHS:
         names = {}
-        for p in _PCI_IDS_PATHS:
-            try:
-                with open(_hp(p), encoding="utf-8", errors="replace") as f:
-                    in_amd = False
-                    for line in f:
-                        if line.startswith("#") or not line.strip():
-                            continue
-                        if not line.startswith("\t"):          # vendor row
-                            in_amd = line[:4].lower() == "1002"
-                        elif in_amd and not line.startswith("\t\t"):   # device row
-                            did, _, name = line.strip().partition("  ")
-                            if len(did) == 4 and name:
-                                names[did.lower()] = name.strip()
-                        elif in_amd is False and names:
-                            break                              # left the AMD block
-            except OSError:
-                continue
-            if names:
-                break
-        _AMD_PCI_NAMES = names
-    return _AMD_PCI_NAMES
+        try:
+            with open(_hp(p), encoding="utf-8", errors="replace") as f:
+                in_amd = False
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    if not line.startswith("\t"):          # vendor row
+                        in_amd = line[:4].lower() == "1002"
+                    elif in_amd and not line.startswith("\t\t"):   # device row
+                        did, _, name = line.strip().partition("  ")
+                        if re.fullmatch(r"[0-9a-fA-F]{4}", did) and name:
+                            names[did.lower()] = name.strip()
+                    elif in_amd is False and names:
+                        break                              # left the AMD block
+        except OSError:
+            continue        # unreadable, or died mid-file — discard the partial parse
+        if names:
+            # Cache only a complete non-empty table: when no pci.ids is readable
+            # yet (bind mount added later, package installed) the next sample
+            # retries — two failed opens every tick, not a name stuck at fallback
+            # until restart.
+            _AMD_PCI_NAMES = names
+            return names
+    return {}
 
 def _amd_pci_name(dev):
     """Card name from pci.ids for kernels that expose no product_name (every APU,
@@ -4994,10 +4999,22 @@ def _amd_hwmon_labeled(dev, prefix, label):
                                 continue
                     except OSError:
                         continue
-                    return _amd_read_int(os.path.join(hdir, e[:-6] + "_input"))
+                    v = _amd_read_int(os.path.join(hdir, e[:-6] + "_input"))
+                    if v is not None:      # unreadable input: keep scanning — another
+                        return v           # hwmon dir may carry the same label
     except OSError:
         pass
     return None
+
+def _amd_hwmon_has(dev, fname):
+    """Whether any of the card's hwmon dirs contains `fname`."""
+    try:
+        for h in sorted(os.listdir(os.path.join(dev, "hwmon"))):
+            if os.path.exists(os.path.join(dev, "hwmon", h, fname)):
+                return True
+    except OSError:
+        pass
+    return False
 
 def _amd_enrich_card(g, dev):
     """Best-effort AMD counterpart of _enrich_gpus: attach mem_util/clk_sm/clk_mem/
@@ -5018,7 +5035,12 @@ def _amd_enrich_card(g, dev):
     and read independently."""
     clk = _amd_dpm_mhz(dev, "pp_dpm_sclk")
     if clk is None:
-        hz = _amd_hwmon(dev, "freq1_input")            # sclk in Hz
+        # hwmon fallback, by label like everything else here: freq1 is usually
+        # sclk but nothing guarantees the ordering. A bare freq1_input is trusted
+        # only when the channel is unlabelled (very old kernels).
+        hz = _amd_hwmon_labeled(dev, "freq", "sclk")
+        if hz is None and not _amd_hwmon_has(dev, "freq1_label"):
+            hz = _amd_hwmon(dev, "freq1_input")        # Hz
         clk = round(hz / 1e6) if hz else None
     if clk is not None:
         g["clk_sm"] = clk

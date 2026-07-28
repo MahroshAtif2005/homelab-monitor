@@ -167,7 +167,6 @@ def sample_once():
         # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
-            gpu_extra = _app._gpu_extra(nv_gpus)
             for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
                 if line.strip():
                     pid, mem = (p.strip() for p in line.split(","))
@@ -177,12 +176,13 @@ def sample_once():
                         gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
                     except ValueError:
                         pass
-        else:
-            # The AMD cards arrive already enriched (amd_gpus reads clocks/perf
-            # level/cap in its per-card pass), so the aggregate 'GPU right now'
-            # chips work the same as on NVIDIA. On a hybrid box the NVIDIA branch
-            # above keeps the aggregate — one representative dict, as before.
-            gpu_extra = _app._gpu_extra(amd_cards) if amd_cards else {}
+        # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
+        # NVIDIA cards were enriched just above, AMD ones arrive already enriched
+        # (amd_gpus reads clocks/perf level/cap in its per-card pass). The pooled
+        # sums must span vendors — an NVIDIA-only aggregate on a hybrid box
+        # compares total draw (both vendors) against the NVIDIA cap alone, and the
+        # power chip reads >100% whenever the AMD card draws anything.
+        gpu_extra = _app._gpu_extra(gpus)
         # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
         # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
         # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
