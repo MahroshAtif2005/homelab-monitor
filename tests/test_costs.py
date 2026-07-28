@@ -22,7 +22,7 @@ class TestRapl(unittest.TestCase):
             r2 = app.read_rapl_power()
         self.assertEqual(r1, {})
         # de = (1e8 - 9e8) + 1e9 = 2e8 µJ over 10 s = 20 W
-        self.assertAlmostEqual(r2["cpu_w"], 20.0, places=1)
+        self.assertAlmostEqual(r2["cpu_power"], 20.0, places=1)
 
     def test_absent_degrades_to_empty(self):
         with patch("app._rapl_domains", return_value={}):
@@ -37,8 +37,8 @@ class TestRapl(unittest.TestCase):
              patch("app.time.monotonic", side_effect=[0.0, 10.0]):   # one call per invocation
             app.read_rapl_power()
             r = app.read_rapl_power()
-        self.assertAlmostEqual(r["cpu_w"], 65.0, places=1)    # 650 J / 10 s
-        self.assertAlmostEqual(r["dram_w"], 13.0, places=1)   # 130 J / 10 s
+        self.assertAlmostEqual(r["cpu_power"], 65.0, places=1)    # 650 J / 10 s
+        self.assertAlmostEqual(r["dram_power"], 13.0, places=1)   # 130 J / 10 s
 
 
 class TestAttribution(unittest.TestCase):

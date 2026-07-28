@@ -1255,10 +1255,91 @@ def read_sec():
     }}
 
 
+# ── CPU package power via RAPL (Intel/AMD powercap) ──────────────────────────
+# app.py keeps cross-call state to derive watts; the probe runs once per poll
+# over SSH and can't, so it reads the cumulative energy counter twice around a
+# short dwell (same trick read_cpu uses) and derives instantaneous watts.
+# Package-only, MEASURED — not wall power. Degrades to {} when RAPL is absent.
+RAPL_ROOT = os.environ.get("RAPL_ROOT", "/sys/class/powercap")
+
+def _rapl_uj(path):
+    try:
+        with open(os.path.join(path, "energy_uj")) as f:
+            e = int(f.read().strip())
+        with open(os.path.join(path, "max_energy_range_uj")) as f:
+            m = int(f.read().strip())
+        return e, m
+    except (OSError, ValueError):
+        return None
+
+def _rapl_domains():
+    out = {}
+    try:
+        for top in sorted(glob.glob(os.path.join(RAPL_ROOT, "intel-rapl:*"))):
+            if os.path.basename(top).startswith("intel-rapl-mmio"):
+                continue
+            nm = (_read_text(os.path.join(top, "name")) or "").strip()
+            if nm:
+                out[top] = nm
+            for sub in sorted(glob.glob(os.path.join(top, "intel-rapl:*:*"))):
+                snm = (_read_text(os.path.join(sub, "name")) or "").strip()
+                if snm:
+                    out[sub] = snm
+    except Exception:
+        pass
+    return out
+
+def read_power(dwell=0.3):
+    """Instantaneous RAPL watts via two reads dwell seconds apart. Returns
+    {"cpu_power": W, "dram_power": W} (key omitted if that domain is absent),
+    or {} when RAPL is unavailable. Mirrors app.read_rapl_power: psys if present
+    else sum(package-*); dram = sum of dram sub-domains."""
+    domains = _rapl_domains()
+    if not domains:
+        return {}
+    first = {}
+    for path in domains:
+        rd = _rapl_uj(path)
+        if rd is not None:
+            first[path] = (rd[0], rd[1], time.monotonic())
+    if not first:
+        return {}
+    time.sleep(dwell)
+    per = {}
+    for path, name in domains.items():
+        if path not in first:
+            continue
+        rd = _rapl_uj(path)
+        if rd is None:
+            continue
+        e1, mrange = rd
+        e0, _m0, t0 = first[path]
+        dt = time.monotonic() - t0
+        if dt <= 0:
+            continue
+        de = e1 - e0
+        if de < 0:                 # uint counter wraparound
+            de += mrange
+        per[name] = max(0.0, de / 1e6 / dt)
+    if not per:
+        return {}
+    psys = per.get("psys")
+    pkgs = [w for n, w in per.items() if n.startswith("package")]
+    cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
+    drams = [w for n, w in per.items() if n == "dram"]
+    out = {}
+    if cpu_w is not None:
+        out["cpu_power"] = round(cpu_w, 1)
+    if drams:
+        out["dram_power"] = round(sum(drams), 1)
+    return out
+
+
 def main():
     data = {
         "host": {
             **read_cpu(),
+            **read_power(),
             **read_meminfo(),
             **read_loadavg(),
             **read_uptime(),
@@ -1273,7 +1354,7 @@ def main():
             "hostname": socket.gethostname(),
         },
         "at": int(time.time()),
-        "probe_version": "0.7",
+        "probe_version": "0.8",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

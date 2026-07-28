@@ -145,6 +145,8 @@ if _PROM_OK:
         "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
         "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
         "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_cpu_power":    _make_gauge("homelab_host_cpu_power_w",    "Host CPU package power, RAPL (W)"),
+        "host_dram_power":   _make_gauge("homelab_host_dram_power_w",   "Host DRAM power, RAPL (W)"),
         "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
         "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
         "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
@@ -398,6 +400,7 @@ _apply_schema_migrations(DB)
 _backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
+          "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
@@ -995,8 +998,8 @@ def _rapl_domains():
     return out
 
 def read_rapl_power():
-    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_w (psys if present
-    else sum of package-* domains), dram_w (sum of dram sub-domains), domains{name:w}.
+    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_power (psys if present
+    else sum of package-* domains), dram_power (sum of dram sub-domains), domains{name:w}.
     First call after start seeds state and returns {} (no prior delta)."""
     domains = _rapl_domains()
     if not domains:
@@ -1025,10 +1028,10 @@ def read_rapl_power():
     psys = per.get("psys")
     pkgs = [w for n, w in per.items() if n.startswith("package")]
     cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
-    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
-    dram_w = round(sum(drams), 1) if drams else None
-    return {"cpu_w": (round(cpu_w, 1) if cpu_w is not None else None),
-            "dram_w": dram_w, "domains": {n: round(w, 1) for n, w in per.items()}}
+    drams = [w for n, w in per.items() if n == "dram"]
+    dram_power = round(sum(drams), 1) if drams else None
+    return {"cpu_power": (round(cpu_w, 1) if cpu_w is not None else None),
+            "dram_power": dram_power, "domains": {n: round(w, 1) for n, w in per.items()}}
 
 _POWER_PROC_TOPN  = 8
 _POWER_PROC_MIN_W = 0.5
@@ -3343,6 +3346,12 @@ def _local_now_snapshot():
     for k in ("os", "hw", "net", "sec"):
         if H.get(k):
             out[k] = H[k]
+    # RAPL power — top-level in LATEST (not inside host), so pull explicitly.
+    # Mirrors the shape probe.py emits for remotes (cpu_power/dram_power in host).
+    for k in ("cpu_power", "dram_power"):
+        v = (LATEST or {}).get(k)
+        if v is not None:
+            out[k] = v
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.

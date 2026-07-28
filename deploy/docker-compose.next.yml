@@ -59,6 +59,7 @@ services:
       # two sockets (see website/configuration.md#write-actions).
       - /var/run/docker.sock:/var/run/docker.sock
       - /:/rootfs:ro                                    # read-only host fs for disk usage
+      - /sys/class/powercap:/sys/class/powercap:ro      # RAPL CPU/DRAM power counters
       - ./data-next:/data                               # separate history DB — never touches prod's ./data
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
 
