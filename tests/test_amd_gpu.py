@@ -333,12 +333,23 @@ class TestAmdPciName(unittest.TestCase):
         # A regressed \t\t guard would file the subsystem row under its vendor id.
         self.assertNotIn("1002", app._amd_pci_names())
 
-    def test_empty_result_is_not_cached(self):
+    def test_missing_file_is_not_cached(self):
         # pci.ids may appear after startup (bind mount added, package installed):
         # a miss must be retried, only a parsed table is cached for good.
         with mock.patch.object(app, "_PCI_IDS_PATHS", (os.path.join(self.tmp, "nope"),)):
             self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
         self.assertEqual(app._amd_pci_name(self._dev("0x1586")), "AMD Strix Halo")
+
+    def test_readable_amd_less_file_is_cached_as_empty(self):
+        # The other side of the retry rule: a file consumed to the end that has
+        # no AMD block won't grow one — cache the empty result instead of
+        # re-parsing the whole file per card per tick.
+        bare = os.path.join(self.tmp, "bare.ids")
+        _write(bare, "10de  NVIDIA Corporation\n\t2684  AD102 [GeForce RTX 4090]\n")
+        with mock.patch.object(app, "_PCI_IDS_PATHS", (bare,)):
+            self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+        # Still None: the empty parse was cached, the good file is not re-read.
+        self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
 
     def test_missing_ids_file_yields_none(self):
         app._AMD_PCI_NAMES = None

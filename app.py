@@ -4843,6 +4843,7 @@ def _amd_pci_names():
     global _AMD_PCI_NAMES
     if _AMD_PCI_NAMES is not None:
         return _AMD_PCI_NAMES
+    complete_empty = False
     for p in _PCI_IDS_PATHS:
         names = {}
         try:
@@ -4862,12 +4863,16 @@ def _amd_pci_names():
         except OSError:
             continue        # unreadable, or died mid-file — discard the partial parse
         if names:
-            # Cache only a complete non-empty table: when no pci.ids is readable
-            # yet (bind mount added later, package installed) the next sample
-            # retries — two failed opens every tick, not a name stuck at fallback
-            # until restart.
             _AMD_PCI_NAMES = names
             return names
+        complete_empty = True
+    # Cache decides by what happened: a file we consumed to the end but that had
+    # no AMD block won't grow one — cache the empty table rather than re-parsing
+    # the whole file per card per tick. No file readable at all stays uncached:
+    # a bind mount added later (or a package install) should be picked up, and
+    # the retry is just two failed opens.
+    if complete_empty:
+        _AMD_PCI_NAMES = {}
     return {}
 
 def _amd_pci_name(dev):
@@ -5184,7 +5189,11 @@ def _enrich_gpus(gpus):
             g = by_idx.get(int(_gpu_num(p[0])))
             if not g:
                 continue
-            g["mem_util"]    = _gpu_num(p[1])
+            # '[N/A]' must leave mem_util ABSENT, not 0: _gpu_extra averages only
+            # the cards that measured, and the UI hides the chip on absence — a
+            # coerced 0 would read as a confident "0% mem-bandwidth".
+            if p[1] and not p[1].startswith("["):
+                g["mem_util"] = _gpu_num(p[1])
             g["clk_sm"]      = _gpu_num(p[2])
             g["clk_mem"]     = _gpu_num(p[3])
             g["power_limit"] = _gpu_num(p[4])
@@ -5220,17 +5229,24 @@ def _gpu_extra(gpus):
     out = {
         "clk_sm":    round(g0.get("clk_sm", 0)),
         "clk_mem":   round(g0.get("clk_mem", 0)),
-        "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
         "pstate":    g0.get("pstate", ""),
         "temp_mem":  round(max((g.get("temp_mem", 0) for g in gpus), default=0)),
         "throttled": any(g.get("throttled") for g in gpus),
         "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
     }
-    # mem-bandwidth utilisation only when some card actually measured it: cards
-    # without the counter (AMD APUs have no mem_busy_percent) must not surface a
-    # fabricated 0% chip — 0 measured and 0 unknown are different claims.
-    if any("mem_util" in g for g in gpus):
-        out["mem_util"] = round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus))
+    # The power chip divides the POOLED draw by this cap, so the cap is published
+    # only when every card contributed one: with a card of unknown cap (AMD APUs
+    # have no power1_cap, NVIDIA can say '[N/A]') the ratio would exceed 100%
+    # merely because the denominator is missing a card the numerator includes.
+    if all(g.get("power_limit", 0) > 0 for g in gpus):
+        out["power_limit"] = round(sum(g["power_limit"] for g in gpus))
+    # mem-bandwidth utilisation averaged over the cards that actually measured it:
+    # cards without the counter (AMD APUs have no mem_busy_percent, NVIDIA can say
+    # '[N/A]') must neither surface a fabricated 0% chip nor dilute a measured
+    # value — 0 measured and 0 unknown are different claims.
+    measured = [g["mem_util"] for g in gpus if "mem_util" in g]
+    if measured:
+        out["mem_util"] = round(sum(measured) / len(measured))
     return out
 
 def service_for_pid(pid, nm):

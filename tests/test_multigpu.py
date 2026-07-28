@@ -92,11 +92,12 @@ class TestMultiGpu(unittest.TestCase):
                 "power_limit": 291.0, "clk_sm": 2400, "pstate": "auto"}]
 
         def fake_smi(args):
-            # Unlike _sample_hybrid's mock, answer ONLY the base per-card query:
-            # feeding the same CSV to the enrichment query would hand the NVIDIA
-            # card a fake power cap and defeat the point of this test.
-            return ("0, NVIDIA GeForce RTX 3090, 50, 8000, 24576, 200, 60"
-                    if "memory.used" in " ".join(args) else "")
+            a = " ".join(args)
+            if "memory.used" in a:      # the base per-card query
+                return "0, NVIDIA GeForce RTX 3090, 50, 8000, 24576, 200, 60"
+            if "power.limit" in a:      # the enrichment query: give NVIDIA its own cap
+                return "0, 12, 1500, 9000, 350, 70, P2"
+            return ""                   # compute-apps: nothing
 
         with patch("app.smi", side_effect=fake_smi), \
              patch("app.amd_gpus", return_value=amd), \
@@ -106,12 +107,68 @@ class TestMultiGpu(unittest.TestCase):
                                                   "ram_total": 0, "load1": 0, "ctemp": 0}):
             app.sample_once()
         x = app.LATEST["gpu_extra"]
-        self.assertEqual(x["power_limit"], 291)
-        # The representative card (g0) is the NVIDIA one: its (absent) P-state must
-        # not be replaced by the AMD policy string on a hybrid box.
-        self.assertEqual(x["pstate"], "")
-        # Nobody measured mem-bandwidth utilisation → no fabricated 0% chip.
-        self.assertNotIn("mem_util", x)
+        self.assertEqual(x["power_limit"], 350 + 291)   # BOTH vendors' caps, summed
+        # The representative card (g0) is the NVIDIA one: its P-state must not be
+        # replaced by the AMD policy string on a hybrid box.
+        self.assertEqual(x["pstate"], "P2")
+        # Only NVIDIA measured mem-bandwidth utilisation: its value must come
+        # through undiluted, not averaged against the APU's absent counter.
+        self.assertEqual(x["mem_util"], 12)
+
+    def test_hybrid_partial_power_cap_hides_the_chip(self):
+        # The AMD card has no cap here: publishing the NVIDIA-only cap would let
+        # the UI divide BOTH vendors' pooled draw by half a denominator.
+        amd = [{"idx": 0, "name": "AMD Strix Halo", "util": 0.0, "mem_used": 24655,
+                "mem_total": 126976, "power": 40.0, "temp": 33.0}]
+
+        def fake_smi(args):
+            a = " ".join(args)
+            if "memory.used" in a:
+                return "0, NVIDIA GeForce RTX 3090, 50, 8000, 24576, 200, 60"
+            if "power.limit" in a:
+                return "0, 12, 1500, 9000, 350, 70, P2"
+            return ""
+
+        with patch("app.smi", side_effect=fake_smi), \
+             patch("app.amd_gpus", return_value=amd), \
+             patch("app.containers", return_value=[]), \
+             patch("app.sample_callers", return_value={}), \
+             patch("app.read_host", return_value={"cpu": 0, "ram_used": 0,
+                                                  "ram_total": 0, "load1": 0, "ctemp": 0}):
+            app.sample_once()
+        self.assertNotIn("power_limit", app.LATEST["gpu_extra"])
+
+    def test_compute_apps_failure_keeps_chips_and_amd_attribution(self):
+        # The compute-apps query is a separate nvidia-smi round-trip: when it dies
+        # (timeout, wedged driver) the sample must keep the GPU chips and still run
+        # the AMD fdinfo attribution that follows it.
+        amd = [{"idx": 0, "name": "AMD Strix Halo", "util": 0.0, "mem_used": 24655,
+                "mem_total": 126976, "power": 9.0, "temp": 33.0,
+                "clk_sm": 600, "pstate": "auto",
+                "unified": True, "pdev": "0000:67:00.0"}]
+
+        def fake_smi(args):
+            a = " ".join(args)
+            if "memory.used" in a:
+                return "0, NVIDIA GeForce RTX 3090, 50, 8000, 24576, 200, 60"
+            if "power.limit" in a:
+                return "0, 12, 1500, 9000, 350, 70, P2"
+            if "compute-apps" in a:
+                raise TimeoutError("nvidia-smi hung")
+            return ""
+
+        with patch("app.smi", side_effect=fake_smi), \
+             patch("app.amd_gpus", return_value=amd), \
+             patch("app.amd_fdinfo_procs", return_value={4242: {"0000:67:00.0": {"vram": 0.0, "gtt": 22500.0}}}), \
+             patch("app.service_for_pid", return_value="host:llama-server"), \
+             patch("app.containers", return_value=[]), \
+             patch("app.sample_callers", return_value={}), \
+             patch("app.read_host", return_value={"cpu": 0, "ram_used": 0,
+                                                  "ram_total": 0, "load1": 0, "ctemp": 0}):
+            app.sample_once()
+        self.assertEqual(app.LATEST["gpu_extra"].get("clk_sm"), 1500)   # chips survived
+        self.assertIn({"service": "host:llama-server", "mem": 22500},
+                      app.LATEST["procs"])
 
     def test_amd_only_gpu_extra_carries_the_enriched_fields(self):
         amd = [{"idx": 0, "name": "AMD Strix Halo", "util": 0.0, "mem_used": 24655,

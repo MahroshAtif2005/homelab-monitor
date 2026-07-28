@@ -167,15 +167,21 @@ def sample_once():
         # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
-            for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                if line.strip():
-                    pid, mem = (p.strip() for p in line.split(","))
-                    svc = _app.service_for_pid(pid, nm)
-                    procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                    try:
-                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                    except ValueError:
-                        pass
+            try:
+                # Best-effort on its own: a timeout or malformed row in this extra
+                # query must cost this sample's NVIDIA attribution, not the GPU
+                # chips below it nor the AMD fdinfo attribution that follows.
+                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+                    if line.strip():
+                        pid, mem = (p.strip() for p in line.split(","))
+                        svc = _app.service_for_pid(pid, nm)
+                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
+                        try:
+                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
         # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
         # NVIDIA cards were enriched just above, AMD ones arrive already enriched
         # (amd_gpus reads clocks/perf level/cap in its per-card pass). The pooled
