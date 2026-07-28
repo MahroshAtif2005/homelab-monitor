@@ -5165,6 +5165,7 @@ function renderHosts(hosts){
     return `<div class="hostrow ${overall}" data-h="${esc(h.name)}">
       <div class="hd">
         <span class="nm">${esc(h.name)}</span>
+        <button class="btn-mini hbtn-ren" data-h="${esc(h.name)}" title="${I18N.t('hosts.rename','Rename host')}">✎</button>
         <span class="tg" data-tg="${esc(h.ssh_target)}">${esc(h.ssh_target)}</span>
         <button class="btn-mini hbtn-edit" data-h="${esc(h.name)}" title="${I18N.t('hosts.edit_target','Edit SSH target')}">✎</button>
         ${badge}${osBadge}
@@ -5182,7 +5183,45 @@ function renderHosts(hosts){
   wrap.querySelectorAll('.hbtn-test').forEach(b => b.onclick = () => testHost(b.dataset.h));
   wrap.querySelectorAll('.hbtn-del').forEach(b => b.onclick  = () => deleteHost(b.dataset.h));
   wrap.querySelectorAll('.hbtn-edit').forEach(b => b.onclick = () => beginEditHost(b.dataset.h));
+  wrap.querySelectorAll('.hbtn-ren').forEach(b => b.onclick = () => beginRenameHost(b.dataset.h));
   wireRemedyButtons();
+}
+
+// Inline-rename a host (same pattern as beginEditHost). The backend re-keys its
+// poll cache and moves experiment/benchmark history, so all we do here is keep
+// the selection: if the renamed host is the active one, follow it.
+function beginRenameHost(name){
+  const row = document.querySelector(`.hostrow[data-h="${CSS.escape(name)}"]`);
+  if(!row) return;
+  const nm = row.querySelector('.nm');
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'tg-edit'; input.value = name;
+  input.spellcheck = false; input.autocomplete = 'off';
+  nm.replaceWith(input); input.focus(); input.select();
+  const renBtn = row.querySelector('.hbtn-ren'); if(renBtn) renBtn.style.display='none';
+  let done = false;
+  const finish = async (commit) => {
+    if(done) return; done = true;
+    const v = input.value.trim();
+    if(!commit || v === name || !v){ await loadHosts(); return; }
+    let j; try{ j = await(await fetch(`/api/hosts/${encodeURIComponent(name)}`,
+      {method:'PATCH', headers:{'Content-Type':'application/json'},
+       body: JSON.stringify({name: v})})).json(); }
+    catch(e){ showHostStatus('critical',I18N.t('hosts.edit_failed','Edit failed: ')+e); await loadHosts(); return; }
+    if(!j.ok){ showHostStatus('critical', j.error || I18N.t('hosts.edit_failed2','Edit failed.')); await loadHosts(); return; }
+    if(CURRENT_HOST === name){
+      CURRENT_HOST = v;
+      localStorage.setItem('hl_host', v);
+    }
+    showHostStatus('ok',I18N.tf('toast.host_renamed','Renamed to {name}.',{name:v}));
+    await loadHosts();
+    loadFleet();
+  };
+  input.addEventListener('keydown', e => {
+    if(e.key==='Enter'){ e.preventDefault(); finish(true); }
+    else if(e.key==='Escape'){ e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 function beginEditHost(name){
