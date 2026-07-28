@@ -233,6 +233,17 @@ class TestAmdEnrich(unittest.TestCase):
         self.assertEqual(x["clk_sm"], 2900)
         self.assertEqual(x["pstate"], "auto")
         self.assertFalse(x["throttled"])
+        # No card measured mem-bandwidth utilisation (APUs have no
+        # mem_busy_percent): the aggregate must omit the field entirely, not
+        # report a fabricated 0% — the UI hides the chip only when it's absent.
+        self.assertNotIn("mem_util", x)
+
+    def test_gpu_extra_keeps_measured_zero_mem_util(self):
+        # A measured 0% is a real claim and must survive the presence filter.
+        dev = self._card()
+        _write(os.path.join(dev, "mem_busy_percent"), 0)
+        x = app._gpu_extra(app.amd_gpus(drm_root=self.drm))
+        self.assertEqual(x["mem_util"], 0)
 
 
 class TestAmdPciName(unittest.TestCase):

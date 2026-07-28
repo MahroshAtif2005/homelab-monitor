@@ -5195,8 +5195,7 @@ def _gpu_extra(gpus):
     if not gpus:
         return {}
     g0 = gpus[0]
-    return {
-        "mem_util":  round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus)),
+    out = {
         "clk_sm":    round(g0.get("clk_sm", 0)),
         "clk_mem":   round(g0.get("clk_mem", 0)),
         "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
@@ -5205,6 +5204,12 @@ def _gpu_extra(gpus):
         "throttled": any(g.get("throttled") for g in gpus),
         "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
     }
+    # mem-bandwidth utilisation only when some card actually measured it: cards
+    # without the counter (AMD APUs have no mem_busy_percent) must not surface a
+    # fabricated 0% chip — 0 measured and 0 unknown are different claims.
+    if any("mem_util" in g for g in gpus):
+        out["mem_util"] = round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus))
+    return out
 
 def service_for_pid(pid, nm):
     try:
