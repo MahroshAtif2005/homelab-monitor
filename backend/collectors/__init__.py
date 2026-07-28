@@ -1,3 +1,4 @@
+import socket
 """
 backend/collectors — background worker functions extracted from app.py (Phase 3.2).
 
@@ -204,7 +205,7 @@ def sample_once():
     # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
     ai = [c for c in conts if _match_probe(c)]
     models = []
-    model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
+    model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
             found_lists = list(ex.map(probe_models, ai))
@@ -222,8 +223,14 @@ def sample_once():
                 else:
                     vram_val = None                        # server up but idle / can't attribute
                 models.append((svc, mdl, vram_val))
-                model_catalog.append({"service": svc, "provider": provider, "model": mdl,
-                                       "loaded": vram_val is not None, "vram_mb": vram_val})
+                model_catalog.append({
+                    "host": socket.gethostname(),
+                    "service": svc,
+                    "provider": provider,
+                    "model": mdl,
+                    "loaded": vram_val is not None,
+                    "vram_mb": vram_val,
+                })
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = _app.sample_callers(conts, {c["name"] for c in ai})

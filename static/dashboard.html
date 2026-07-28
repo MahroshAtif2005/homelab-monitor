@@ -3615,10 +3615,7 @@ function _registryDate(s){
 let REGISTRY_LAST=null;   // last /api/models payload — re-filtered client-side, no refetch
 function renderRegistry(j){
   const card=document.getElementById('registry-card'); if(!card) return;
-  // Registry is local-host only — hide entirely on remote hosts (#219 fleet-wide
-  // merge is a follow-up; ollama disk detail + the per-container catalog both
-  // only reflect the hub itself today).
-  if(CURRENT_HOST!=='local'){ card.hidden=true; return; }
+  // Model registry is fleet-aware (#219): every entry carries its host.
   card.hidden=false;
   if(j) REGISTRY_LAST=j;
   const body=document.getElementById('registry-body');
@@ -3642,38 +3639,54 @@ function renderRegistry(j){
   const q=(document.getElementById('registry-filter')||{}).value||'';
   const needle=q.trim().toLowerCase();
   const models=needle
-    ? all.filter(m=>(m.name||'').toLowerCase().includes(needle) || (m.provider||'').toLowerCase().includes(needle))
+    ? all.filter(m=>(m.name||'').toLowerCase().includes(needle)
+        || (m.provider||'').toLowerCase().includes(needle)
+        || (m.host||'').toLowerCase().includes(needle))
     : all;
   if(!models.length){
     body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.no_match','No models match your filter.')+'</div>';
     return;
   }
-  const rows=models.map(m=>{
-    const meta=[m.param_size,m.quant].filter(Boolean).map(esc).join(' · ')
-      || (m.family?esc(m.family):'<span class="muted">—</span>');
-    const loaded=m.loaded
-      ? '<span class="badge ok">'+I18N.t('registry.loaded','Loaded')+(m.vram_mb!=null?' · '+esc(fmtMB(m.vram_mb)):'')+'</span>'
-      : '<span class="badge info">'+I18N.t('registry.ondisk','On disk')+'</span>';
-    return '<tr><td>'+copyable(m.name)+'</td>'
-      +'<td><span class="pill" style="text-transform:none">'+esc(m.provider||'—')+'</span></td>'
-      +'<td>'+(m.size_bytes!=null?esc(fmtBytes(m.size_bytes)):'<span class="muted">—</span>')+'</td>'
-      +'<td>'+meta+'</td>'
-      +'<td>'+loaded+'</td>'
-      +'<td><span class="muted">'+esc(_registryDate(m.modified))+'</span></td></tr>';
+
+  const groups={};
+  models.forEach(m=>{
+    const host=m.host||'local';
+    const provider=m.provider||'—';
+    groups[host]=groups[host]||{};
+    groups[host][provider]=groups[host][provider]||[];
+    groups[host][provider].push(m);
+  });
+
+  body.innerHTML=Object.entries(groups).map(([host,providers])=>{
+    const tables=Object.entries(providers).map(([provider,items])=>{
+      const rows=items.map(m=>{
+        const meta=[m.param_size,m.quant].filter(Boolean).map(esc).join(' · ')
+          || (m.family?esc(m.family):'<span class="muted">—</span>');
+        const loaded=m.loaded
+          ? '<span class="badge ok">'+I18N.t('registry.loaded','Loaded')+(m.vram_mb!=null?' · '+esc(fmtMB(m.vram_mb)):'')+'</span>'
+          : '<span class="badge info">'+I18N.t('registry.ondisk','On disk')+'</span>';
+        return '<tr><td>'+copyable(m.name)+'</td>'
+          +'<td>'+(m.size_bytes!=null?esc(fmtBytes(m.size_bytes)):'<span class="muted">—</span>')+'</td>'
+          +'<td>'+meta+'</td>'
+          +'<td>'+loaded+'</td>'
+          +'<td><span class="muted">'+esc(_registryDate(m.modified))+'</span></td></tr>';
+      }).join('');
+      return '<h4 style="margin:8px 0">'+esc(provider)+'</h4>'
+        +'<table style="margin-top:4px"><thead><tr>'
+        +'<th>'+I18N.t('registry.col_model','Model')+'</th>'
+        +'<th>'+I18N.t('registry.col_size','Size')+'</th>'
+        +'<th>'+I18N.t('registry.col_meta','Params · Quant')+'</th>'
+        +'<th>'+I18N.t('registry.col_status','Status')+'</th>'
+        +'<th>'+I18N.t('registry.col_modified','Modified')+'</th>'
+        +'</tr></thead><tbody>'+rows+'</tbody></table>';
+    }).join('');
+    return '<div class="card" style="margin:8px 0"><h3>'+esc(host)+'</h3>'+tables+'</div>';
   }).join('');
-  body.innerHTML='<table style="margin-top:4px"><thead><tr>'
-    +'<th>'+I18N.t('registry.col_model','Model')+'</th>'
-    +'<th>'+I18N.t('registry.col_provider','Provider')+'</th>'
-    +'<th>'+I18N.t('registry.col_size','Size')+'</th>'
-    +'<th>'+I18N.t('registry.col_meta','Params · Quant')+'</th>'
-    +'<th>'+I18N.t('registry.col_status','Status')+'</th>'
-    +'<th>'+I18N.t('registry.col_modified','Modified')+'</th>'
-    +'</tr></thead><tbody>'+rows+'</tbody></table>';
 }
 let REGISTRY_BUSY=false;
 async function loadRegistry(){
   const card=document.getElementById('registry-card');
-  if(CURRENT_HOST!=='local'){ if(card) card.hidden=true; return; }
+  if(card) card.hidden=false;
   if(REGISTRY_BUSY) return; REGISTRY_BUSY=true;
   let j; try{ j=await(await fetch('/api/models')).json(); }
   catch(e){ j={enabled:false,ollama_reachable:false,models:[]}; }

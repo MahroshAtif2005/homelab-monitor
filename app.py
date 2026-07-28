@@ -5523,7 +5523,15 @@ def _fetch_model_registry():
 def _model_registry(now=None):
     """Cached registry accessor. Serves a fresh fetch at most once per _REGISTRY_TTL
     so a chatty UI can't hammer ollama. Returns (models, reachable). Network I/O
-    happens OUTSIDE the cache lock."""
+    happens OUTSIDE the cache lock.
+
+    Double-checked locking: after a cache-miss triggers a fetch, we re-check the
+    cache under the lock again before writing. Without this, a burst of concurrent
+    callers that all observe a stale cache at the same time each independently
+    fetch in parallel (N simultaneous HTTP round-trips to ollama), defeating the
+    TTL rate-limit on every cache expiry under load. With it, only the first
+    caller past the gate fetches; everyone else who raced in behind it gets the
+    winner's fresh result instead of triggering their own redundant fetch."""
     now = now or time.time()
     with _REGISTRY_LOCK:
         c = _REGISTRY_CACHE
@@ -5531,6 +5539,13 @@ def _model_registry(now=None):
             return list(c["models"]), c["reachable"]
     models, reachable = _fetch_model_registry()
     with _REGISTRY_LOCK:
+        c = _REGISTRY_CACHE
+        # Someone else may have already refreshed the cache while we were
+        # fetching (network I/O happens outside the lock, so this window is
+        # real). If so, defer to their result instead of overwriting it with
+        # our possibly-slightly-older one.
+        if c and (now - c["ts"]) < _REGISTRY_TTL:
+            return list(c["models"]), c["reachable"]
         globals()["_REGISTRY_CACHE"] = {
             "ts": now, "models": models, "reachable": reachable}
     return list(models), reachable
@@ -5554,12 +5569,12 @@ def _merge_registry(ollama_models, catalog):
         provider = c.get("provider") or "other"
         if not name or provider == "ollama":
             continue
-        key = (name, provider)
+        key = (name, provider, c.get("host") or "local")
         if key in seen:
             continue
         seen.add(key)
         out.append({
-            "name": name, "provider": provider, "host": "local",
+            "name": name, "provider": provider, "host": c.get("host") or "local",
             "size_bytes": None, "size_gb": None, "family": None,
             "param_size": None, "quant": None, "modified": None,
             "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),

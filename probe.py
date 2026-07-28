@@ -10,6 +10,7 @@ JSON shape is a deliberate subset of the hub's own /api/health.now block so the
 UI can render local and remote with the same code paths.
 """
 import json, os, re, socket, subprocess, sys, time, glob, errno
+import http.client
 
 # ss listen-row parser, mirrored from app.py so service ports can be attributed
 # on the remote without depending on the iproute2 *Python* bindings.
@@ -1335,6 +1336,56 @@ def read_power(dwell=0.3):
     return out
 
 
+def read_ollama_models():
+    """Detect ollama on this host (#219 fleet-wide, Ollama slice): loaded models
+    from /api/ps (with live VRAM), falling back to the on-disk catalogue
+    (/api/tags) so models still show up even when none are currently loaded.
+    Read-only, short timeout, stdlib only -- silently returns [] if ollama isn't
+    running here. Shape matches what backend/probes' local model_catalog uses,
+    so the hub can merge local + remote entries with the same code path."""
+    def _http_json(path, timeout=2):
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", 11434, timeout=timeout)
+            try:
+                c.request("GET", path)
+                r = c.getresponse()
+                body = r.read()
+                status = r.status
+            finally:
+                c.close()
+            return json.loads(body) if status < 400 else None
+        except Exception:
+            return None
+
+    hostname = socket.gethostname()
+    out = []
+    ps = _http_json("/api/ps")
+    for m in (ps or {}).get("models", []) if isinstance(ps, dict) else []:
+        name = m.get("name")
+        if not name:
+            continue
+        vram = m.get("size_vram") or 0
+        out.append({
+            "host": hostname, "service": "ollama", "provider": "ollama",
+            "model": name, "loaded": True,
+            "vram_mb": round(vram / 1048576) if vram else None,
+        })
+    if out:
+        return out
+    # Nothing loaded right now -- fall back to the on-disk catalogue so the
+    # server still shows up as Idle rather than vanishing entirely.
+    tags = _http_json("/api/tags")
+    for m in (tags or {}).get("models", []) if isinstance(tags, dict) else []:
+        name = m.get("name")
+        if not name:
+            continue
+        out.append({
+            "host": hostname, "service": "ollama", "provider": "ollama",
+            "model": name, "loaded": False, "vram_mb": None,
+        })
+    return out
+
+
 def main():
     data = {
         "host": {
@@ -1353,6 +1404,7 @@ def main():
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
+        "model_catalog": read_ollama_models(),
         "at": int(time.time()),
         "probe_version": "0.8",
     }
