@@ -5509,6 +5509,11 @@ async function loadFleet(){
   FLEET = j;
   renderHostBar();
   if(TAB==='overview'){ renderFleet(); renderMissionControl(); }
+  // A local-only tab viewed for a remote host renders from FLEET — repaint it
+  // now that fresh fleet data exists (first paint happens before /api/fleet
+  // returns, so without this the GPU tab shows a stale notice until the next
+  // 15s tick).
+  if(CURRENT_HOST!=='local' && LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 function renderHostBar(){
   if(!FLEET){ return; }
