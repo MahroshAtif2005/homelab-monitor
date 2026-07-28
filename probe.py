@@ -459,7 +459,7 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
     try:
         entries = sorted(os.listdir(drm_root))
     except OSError:
-        return {}
+        return []
     cards = []
     for nm in entries:
         m = re.fullmatch(r"card(\d+)", nm or "")
