@@ -1,3 +1,4 @@
+import socket
 """
 backend/collectors — background worker functions extracted from app.py (Phase 3.2).
 
@@ -163,9 +164,7 @@ def sample_once():
         temp      = max(g["temp"] for g in gpus)
         # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
-        # the same objects held in `gpus`, so in-place enrichment shows through. AMD
-        # cards show the core panel (util/VRAM/temp/power); per-process AMD
-        # attribution is a follow-up (issue #1).
+        # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
             gpu_extra = _app._gpu_extra(nv_gpus)
@@ -180,6 +179,21 @@ def sample_once():
                         pass
         else:
             gpu_extra = {}
+        # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
+        # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
+        # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
+        # cost attribution all light up on AMD too. On a unified-memory APU the
+        # working set lives in GTT (see amd_gpus), so GTT counts there — matched
+        # per-device by _amd_attrib_mb, so a discrete AMD card in the same box
+        # keeps counting VRAM only, matching what mem_used reports.
+        if amd_cards:
+            for pid, devs in _app.amd_fdinfo_procs().items():
+                mb = _app._amd_attrib_mb(devs, amd_cards)
+                if mb < 1:
+                    continue   # sub-MB DRM clients (compositors idling etc.) are noise
+                svc = _app.service_for_pid(pid, nm)
+                procs[svc] = procs.get(svc, 0) + mb
+                gpu_pids[pid] = gpu_pids.get(pid, 0) + mb
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if _app.LATEST.get("gpu_avail"):
@@ -191,7 +205,7 @@ def sample_once():
     # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
     ai = [c for c in conts if _match_probe(c)]
     models = []
-    model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
+    model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
             found_lists = list(ex.map(probe_models, ai))
@@ -209,8 +223,14 @@ def sample_once():
                 else:
                     vram_val = None                        # server up but idle / can't attribute
                 models.append((svc, mdl, vram_val))
-                model_catalog.append({"service": svc, "provider": provider, "model": mdl,
-                                       "loaded": vram_val is not None, "vram_mb": vram_val})
+                model_catalog.append({
+                    "host": socket.gethostname(),
+                    "service": svc,
+                    "provider": provider,
+                    "model": mdl,
+                    "loaded": vram_val is not None,
+                    "vram_mb": vram_val,
+                })
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = _app.sample_callers(conts, {c["name"] for c in ai})
@@ -249,7 +269,13 @@ def sample_once():
     except Exception as e:
         print(f"collectors/sample_once read_rapl_power error: {e}", flush=True)
         rapl = {}
-    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    cpu_power, dram_power = rapl.get("cpu_power"), rapl.get("dram_power")
+    # Surface measured watts on the live snapshot so /metrics can export them.
+    # Only overwrite on a real reading — a transient {} from read_rapl_power keeps the last good value.
+    if cpu_power is not None:
+        _app.LATEST["cpu_power"] = cpu_power
+    if dram_power is not None:
+        _app.LATEST["dram_power"] = dram_power
     try:
         top_cpu = _app.collect_top_processes()
     except Exception as e:

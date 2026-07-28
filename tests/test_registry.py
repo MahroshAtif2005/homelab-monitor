@@ -141,13 +141,18 @@ class TestMergeRegistry(unittest.TestCase):
         self.assertTrue(all(m["provider"] == "ollama" and m["host"] == "local" for m in out))
 
     def test_vllm_catalog_entry_merged_in(self):
-        catalog = [{"service": "vllm-server", "provider": "vllm", "model": "mistral-7b-instruct",
-                    "loaded": True, "vram_mb": 5200}]
+        catalog = [{"host": "gpu-node-01",
+                    "service": "vllm-server",
+                    "provider": "vllm",
+                    "model": "mistral-7b-instruct",
+                    "loaded": True,
+                    "vram_mb": 5200}]
         out = app._merge_registry([], catalog)
         self.assertEqual(len(out), 1)
         m = out[0]
         self.assertEqual(m["name"], "mistral-7b-instruct")
         self.assertEqual(m["provider"], "vllm")
+        self.assertEqual(m["host"], "gpu-node-01")
         self.assertTrue(m["loaded"])
         self.assertEqual(m["vram_mb"], 5200)
         self.assertIsNone(m["size_bytes"])   # vLLM's /v1/models has no on-disk size
@@ -164,6 +169,20 @@ class TestMergeRegistry(unittest.TestCase):
     def test_catalog_entries_missing_model_name_skipped(self):
         catalog = [{"service": "x", "provider": "vllm", "model": None}]
         self.assertEqual(app._merge_registry([], catalog), [])
+
+    def test_same_model_same_provider_different_hosts_kept(self):
+        catalog = [
+            {"host": "gpu-node-01", "service": "a", "provider": "vllm",
+             "model": "llama3", "loaded": True, "vram_mb": 1000},
+            {"host": "gpu-node-02", "service": "b", "provider": "vllm",
+             "model": "llama3", "loaded": False, "vram_mb": None},
+        ]
+        out = app._merge_registry([], catalog)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(
+            {m["host"] for m in out},
+            {"gpu-node-01", "gpu-node-02"}
+        )
 
     def test_same_name_two_providers_both_kept(self):
         catalog = [{"service": "a", "provider": "vllm", "model": "llama3", "loaded": True, "vram_mb": 1},

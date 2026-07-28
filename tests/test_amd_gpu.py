@@ -68,17 +68,39 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["temp"], 54.3)
         self.assertEqual(g["power"], 42.0)
 
-    def test_probe_representative_matches(self):
+    def test_probe_card_matches(self):
         _amd_card(self.drm, 0, total=16 * 1024**3, used=2 * 1024**3, busy=10,
                   temp_mc=40000, name="AMD Instinct MI210")
-        out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertIn("gpu", out)
-        self.assertEqual(out["gpu"]["count"], 1)
-        self.assertEqual(out["gpu"]["name"], "AMD Instinct MI210")
-        self.assertEqual(out["gpu"]["mem_total"], 16384)
-        self.assertEqual(out["gpu"]["mem_used"], 2048)
-        self.assertEqual(out["gpu"]["util"], 10)
-        self.assertEqual(out["gpu"]["temp"], 40)
+        cards = probe._amd_gpu_sysfs(drm_root=self.drm)
+        self.assertEqual(len(cards), 1)
+        g = cards[0]
+        self.assertEqual(g["name"], "AMD Instinct MI210")
+        self.assertEqual(g["mem_total"], 16384)
+        self.assertEqual(g["mem_used"], 2048)
+        self.assertEqual(g["util"], 10)
+        self.assertEqual(g["temp"], 40)
+        self.assertEqual(g["vendor"], "amd")
+
+    def test_probe_read_gpu_aggregates_all_cards(self):
+        # Two cards: the legacy `gpu` aggregate must pool them (VRAM summed, util
+        # averaged, temp = hottest) instead of reporting only card 0 — a 3×3090
+        # rig must not read as a single 24 GB card. `gpus` carries the per-card
+        # list with hub-collector field names.
+        _amd_card(self.drm, 0, total=16 * 1024**3, used=2 * 1024**3, busy=10,
+                  temp_mc=40000, name="AMD Instinct MI210")
+        _amd_card(self.drm, 1, total=16 * 1024**3, used=6 * 1024**3, busy=30,
+                  temp_mc=60000, name="AMD Instinct MI210")
+        real = probe._amd_gpu_sysfs(drm_root=self.drm)
+        with mock.patch("probe._nvidia_cards", return_value=[]), \
+             mock.patch("probe._amd_gpu_sysfs", return_value=real):
+            out = probe.read_gpu()
+        g = out["gpu"]
+        self.assertEqual(g["count"], 2)
+        self.assertEqual(g["mem_total"], 32768)
+        self.assertEqual(g["mem_used"], 8192)
+        self.assertEqual(g["util"], 20)
+        self.assertEqual(g["temp"], 60)
+        self.assertEqual([c["idx"] for c in out["gpus"]], [0, 1])
 
     def test_apu_reports_gtt_not_vram_carveout(self):
         # Ryzen AI Max / Strix Halo: 512 MiB dedicated VRAM carve-out, 124 GiB GTT pool
@@ -91,8 +113,8 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 124 * 1024)   # 124 GiB, not 512 MiB
         self.assertEqual(g["mem_used"], 18)            # GTT usage, not the 148 MiB carve-out
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 18)
+        self.assertEqual(out[0]["mem_total"], 124 * 1024)
+        self.assertEqual(out[0]["mem_used"], 18)
 
     def test_apu_missing_gtt_used_degrades_to_zero(self):
         # amdgpu exposes gtt_total but (rarely) not gtt_used → used must fall back to 0,
@@ -103,8 +125,8 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 124 * 1024)
         self.assertEqual(g["mem_used"], 0)
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 0)
+        self.assertEqual(out[0]["mem_total"], 124 * 1024)
+        self.assertEqual(out[0]["mem_used"], 0)
 
     def test_discrete_card_with_gtt_still_reports_vram(self):
         # Discrete cards also expose a GTT pool, but with a large dedicated VRAM they must
@@ -115,14 +137,14 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 24 * 1024)    # VRAM, not GTT
         self.assertEqual(g["mem_used"], 8 * 1024)
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 24 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 8 * 1024)
+        self.assertEqual(out[0]["mem_total"], 24 * 1024)
+        self.assertEqual(out[0]["mem_used"], 8 * 1024)
 
     def test_non_amd_vendor_is_skipped(self):
         # An NVIDIA card (0x10de) in the same tree must be ignored by the AMD reader.
         _amd_card(self.drm, 0, total=8 * 1024**3, used=0, busy=0, vendor="0x10de")
         self.assertEqual(app.amd_gpus(drm_root=self.drm), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), [])
 
     def test_missing_optional_fields_degrade_to_zero(self):
         # No hwmon (temp/power) and no product_name → still a valid card, zeros + fallback name.
@@ -136,12 +158,12 @@ class TestAmdSysfs(unittest.TestCase):
 
     def test_no_gpu_returns_empty(self):
         self.assertEqual(app.amd_gpus(drm_root=self.drm), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), [])
 
     def test_unreadable_root_is_safe(self):
         missing = os.path.join(self.tmp, "does-not-exist")
         self.assertEqual(app.amd_gpus(drm_root=missing), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), [])
 
 
 class TestVendorAwareDiagnostics(unittest.TestCase):
@@ -219,6 +241,165 @@ class TestEbusyRetry(unittest.TestCase):
     def test_other_oserror_is_not_retried(self):
         # A genuinely absent node (ENOENT) → None, no retry loop.
         self.assertIsNone(app._amd_read_int("/definitely/not/here"))
+
+
+def _amdgpu_fdinfo(client, vram=None, gtt=None, driver="amdgpu", pdev="0000:0b:00.0",
+                   vram_key="drm-memory-vram", gtt_key="drm-memory-gtt"):
+    """A realistic /proc/<pid>/fdinfo/<fd> body for a DRM fd. `vram`/`gtt` are the
+    literal value strings after the key (e.g. '524288 KiB') so unit-parsing tests
+    can pass MiB/garbage; None omits the key (pre-5.19 kernels)."""
+    lines = ["pos:\t0", "flags:\t02100002", "mnt_id:\t24", "ino:\t209",
+             "drm-driver:\t%s" % driver, "drm-client-id:\t%s" % client,
+             "drm-pdev:\t%s" % pdev]
+    if vram is not None:
+        lines.append("%s:\t%s" % (vram_key, vram))
+    if gtt is not None:
+        lines.append("%s:\t%s" % (gtt_key, gtt))
+    return "\n".join(lines) + "\n"
+
+
+class TestAmdFdinfoProcs(unittest.TestCase):
+    """Per-process AMD VRAM attribution from DRM fdinfo — the amdgpu counterpart of
+    `nvidia-smi --query-compute-apps` (app.amd_fdinfo_procs). Built on a fake /proc
+    tree; the fd "symlinks" are regular files holding their target path and
+    os.readlink is patched to read them, so the fixture also builds on hosts where
+    creating real symlinks needs privilege (Windows dev boxes)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.proc = os.path.join(self.tmp, "proc")
+        os.makedirs(self.proc)
+        p = mock.patch("os.readlink", side_effect=self._readlink)
+        p.start()
+        self.addCleanup(p.stop)
+
+    @staticmethod
+    def _readlink(path, *a, **k):
+        with open(path) as f:
+            return f.read()
+
+    def _fd(self, pid, fd, target, fdinfo=None):
+        _write(os.path.join(self.proc, str(pid), "fd", str(fd)), target)
+        if fdinfo is not None:
+            _write(os.path.join(self.proc, str(pid), "fdinfo", str(fd)), fdinfo)
+
+    def test_attributes_vram_and_gtt_per_pid(self):
+        # One llama.cpp-style process holding 512 MiB VRAM + 2 MiB GTT.
+        self._fd(100, 3, "/dev/dri/renderD128",
+                 _amdgpu_fdinfo(42, vram="524288 KiB", gtt="2048 KiB"))
+        _write(os.path.join(self.proc, "self", "status"), "")   # non-numeric → ignored
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc),
+                         {100: {"0000:0b:00.0": {"vram": 512.0, "gtt": 2.0}}})
+
+    def test_dup_fds_share_one_drm_client(self):
+        # fds 3 and 4 are dup()s of the same DRM client (same pdev+client-id): its
+        # 1 GiB must be counted once. fd 5 is a second, distinct client (+256 MiB).
+        self._fd(200, 3, "/dev/dri/renderD128", _amdgpu_fdinfo(7, vram="1048576 KiB"))
+        self._fd(200, 4, "/dev/dri/renderD128", _amdgpu_fdinfo(7, vram="1048576 KiB"))
+        self._fd(200, 5, "/dev/dri/renderD128", _amdgpu_fdinfo(8, vram="262144 KiB"))
+        self.assertEqual(
+            app.amd_fdinfo_procs(proc_root=self.proc)[200]["0000:0b:00.0"]["vram"],
+            1280.0)
+
+    def test_splits_by_pci_device(self):
+        # One process touching two AMD cards (e.g. APU + discrete): the split must
+        # survive per-pdev so the GTT policy can differ per card.
+        self._fd(150, 3, "/dev/dri/renderD128",
+                 _amdgpu_fdinfo(1, gtt="1048576 KiB", pdev="0000:c5:00.0"))
+        self._fd(150, 4, "/dev/dri/renderD129",
+                 _amdgpu_fdinfo(2, vram="262144 KiB", gtt="4096 KiB", pdev="0000:03:00.0"))
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc), {150: {
+            "0000:c5:00.0": {"vram": 0.0, "gtt": 1024.0},
+            "0000:03:00.0": {"vram": 256.0, "gtt": 4.0}}})
+
+    def test_ignores_non_dri_fds_and_other_drm_drivers(self):
+        self._fd(300, 3, "/var/log/syslog")                       # not a DRM fd
+        self._fd(300, 4, "/dev/dri/card0",
+                 _amdgpu_fdinfo(9, vram="8192 KiB", driver="i915"))  # Intel iGPU
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc), {})
+
+    def test_pre_519_kernel_without_memory_keys_yields_nothing(self):
+        # Older kernels emit drm-driver/client-id but no drm-memory-* — the pid must
+        # be absent entirely, not reported as a zero-MB ghost.
+        self._fd(400, 3, "/dev/dri/renderD128", _amdgpu_fdinfo(11))
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc), {})
+
+    def test_newer_total_keys_and_mib_units(self):
+        # Kernels that print drm-total-vram (and a MiB unit) parse identically.
+        self._fd(500, 3, "/dev/dri/renderD129",
+                 _amdgpu_fdinfo(12, vram="512 MiB", vram_key="drm-total-vram"))
+        self.assertEqual(app.amd_fdinfo_procs(proc_root=self.proc),
+                         {500: {"0000:0b:00.0": {"vram": 512.0, "gtt": 0.0}}})
+
+    def test_unreadable_fd_table_is_skipped(self):
+        # A pid dir with no readable fd/ (vanished process / permission) is skipped
+        # without aborting the scan of the remaining pids.
+        os.makedirs(os.path.join(self.proc, "600"))
+        self._fd(601, 3, "/dev/dri/renderD128", _amdgpu_fdinfo(13, vram="1024 KiB"))
+        self.assertEqual(list(app.amd_fdinfo_procs(proc_root=self.proc)), [601])
+
+    def test_fdinfo_kib_unit_parsing(self):
+        self.assertEqual(app._fdinfo_kib("1024 KiB"), 1024.0)
+        self.assertEqual(app._fdinfo_kib("4 MiB"), 4096.0)
+        self.assertEqual(app._fdinfo_kib("2 GiB"), 2 * 1048576.0)
+        self.assertEqual(app._fdinfo_kib("1024"), 1024.0)   # unit-less → KiB
+        self.assertEqual(app._fdinfo_kib("garbage"), 0.0)
+        self.assertEqual(app._fdinfo_kib(""), 0.0)
+
+
+class TestAmdUnifiedFlag(unittest.TestCase):
+    """amd_gpus() must mark APU/GTT-mode cards with unified=True so the collector
+    knows to count GTT in per-process attribution — and discrete cards False so a
+    dGPU's staging buffers in GTT are not misread as VRAM."""
+
+    def test_unified_flag_marks_apu_only(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        drm = os.path.join(tmp, "drm")
+        # card0: discrete 24 GiB card that also exposes a GTT pool.
+        _amd_card(drm, 0, total=24 * 1024**3, used=1 * 1024**3, busy=0,
+                  gtt_total=64 * 1024**3, gtt_used=0)
+        # card1: Strix-Halo-style APU — 512 MiB carve-out, 124 GiB GTT.
+        _amd_card(drm, 1, total=512 * 1024**2, used=148 * 1024**2, busy=0,
+                  gtt_total=124 * 1024**3, gtt_used=18 * 1024**2)
+        g0, g1 = app.amd_gpus(drm_root=drm)
+        self.assertFalse(g0["unified"])
+        self.assertTrue(g1["unified"])
+
+
+class TestAmdAttribMb(unittest.TestCase):
+    """_amd_attrib_mb — the per-card GTT policy applied to a pid's fdinfo split:
+    GTT counts only on unified (APU) devices, matched by PCI address, so a hybrid
+    APU + discrete-AMD host doesn't misread the dGPU's staging buffers as VRAM."""
+
+    APU  = {"pdev": "0000:c5:00.0", "unified": True}
+    DGPU = {"pdev": "0000:03:00.0", "unified": False}
+
+    def test_discrete_only_counts_vram_not_gtt(self):
+        devs = {"0000:03:00.0": {"vram": 8192.0, "gtt": 512.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU]), 8192.0)
+
+    def test_apu_counts_gtt_too(self):
+        devs = {"0000:c5:00.0": {"vram": 16.0, "gtt": 90000.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.APU]), 90016.0)
+
+    def test_hybrid_applies_policy_per_card(self):
+        # The review-flagged edge: one pid on both cards — the dGPU's GTT staging
+        # buffers must NOT be added just because an APU exists in the same box.
+        devs = {"0000:03:00.0": {"vram": 8192.0, "gtt": 512.0},
+                "0000:c5:00.0": {"vram": 16.0, "gtt": 90000.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU, self.APU]),
+                         8192.0 + 16.0 + 90000.0)
+
+    def test_unknown_pdev_falls_back_to_any_unified(self):
+        # Kernel omits drm-pdev (or sysfs gave no BDF): fall back to the host-wide
+        # heuristic — GTT counts iff any card is unified.
+        devs = {None: {"vram": 0.0, "gtt": 4096.0}}
+        self.assertEqual(app._amd_attrib_mb(devs, [self.APU]), 4096.0)
+        self.assertEqual(app._amd_attrib_mb(devs, [self.DGPU]), 0.0)
+        self.assertEqual(app._amd_attrib_mb(devs, [{"pdev": None, "unified": True}]),
+                         4096.0)
 
 
 if __name__ == "__main__":

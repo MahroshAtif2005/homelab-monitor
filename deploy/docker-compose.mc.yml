@@ -47,5 +47,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /:/rootfs:ro
+      - /sys/class/powercap:/sys/class/powercap:ro      # RAPL CPU/DRAM power counters
       - ../data-mc:/data                                 # separate history DB — never touches prod/next
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro

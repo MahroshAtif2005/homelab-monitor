@@ -66,17 +66,18 @@ once the fix is done.
 That's it — the hub picks up the host on its next poll cycle (~10 s) and the
 **Overview** row populates.
 
-## What's local-only (for now)
+## What's per-host, what's local-only (for now)
 
-Per-host **System**, **Network**, **Security** and **Services** tabs work for
-any registered remote. **GPU / AI Models / Containers** tabs are local-only
-this slice and tell you exactly why for the active host — read from that host's
-own capability check:
+Per-host **System**, **Network**, **Security**, **Services** and — since
+v0.27.0 — **GPU** tabs work for any registered remote. The GPU tab shows every
+card the host has (per-card VRAM, utilisation, power, temperature) plus the
+processes holding the memory; per-host GPU *history* charts are the next
+slice. The **AI Models** registry is fleet-aware too (models grouped by host).
+**Containers** stays local-only this slice, and each tab tells you exactly why
+for the active host — read from that host's own capability check:
 
 - *"cloudy has no NVIDIA GPU"* — `nvidia-smi` was absent during Test.
 - *"Docker is not installed on cloudy"* — `docker` CLI wasn't found.
-- *"Per-host GPU view is on the way"* — host has the capability; per-host
-  collection lands in the next release.
 
 Tracking the full multi-machine design in
 [**Issue #35**](https://github.com/SikamikanikoBG/homelab-monitor/issues/35) —

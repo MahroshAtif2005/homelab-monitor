@@ -73,6 +73,7 @@ services:
       # Use docker-compose.readonly.yml to lock this back down to :ro.
       - /var/run/docker.sock:/var/run/docker.sock
       - /:/rootfs:ro                                    # read-only host fs for disk usage
+      - /sys/class/powercap:/sys/class/powercap:ro      # RAPL CPU/DRAM power counters
       - ./data:/data                                    # SQLite history persists here
       # systemd service health + (by default) service controls. Read-write for
       # the same reason as the docker socket above — see docker-compose.readonly.yml

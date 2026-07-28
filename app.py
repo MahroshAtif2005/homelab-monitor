@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.26.0"
+VERSION      = "0.27.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -145,6 +145,8 @@ if _PROM_OK:
         "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
         "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
         "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_cpu_power":    _make_gauge("homelab_host_cpu_power_w",    "Host CPU package power, RAPL (W)"),
+        "host_dram_power":   _make_gauge("homelab_host_dram_power_w",   "Host DRAM power, RAPL (W)"),
         "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
         "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
         "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
@@ -398,6 +400,7 @@ _apply_schema_migrations(DB)
 _backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
+          "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Current state of the "status" monitors (Docker + systemd). The background
@@ -995,8 +998,8 @@ def _rapl_domains():
     return out
 
 def read_rapl_power():
-    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_w (psys if present
-    else sum of package-* domains), dram_w (sum of dram sub-domains), domains{name:w}.
+    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_power (psys if present
+    else sum of package-* domains), dram_power (sum of dram sub-domains), domains{name:w}.
     First call after start seeds state and returns {} (no prior delta)."""
     domains = _rapl_domains()
     if not domains:
@@ -1025,10 +1028,10 @@ def read_rapl_power():
     psys = per.get("psys")
     pkgs = [w for n, w in per.items() if n.startswith("package")]
     cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
-    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
-    dram_w = round(sum(drams), 1) if drams else None
-    return {"cpu_w": (round(cpu_w, 1) if cpu_w is not None else None),
-            "dram_w": dram_w, "domains": {n: round(w, 1) for n, w in per.items()}}
+    drams = [w for n, w in per.items() if n == "dram"]
+    dram_power = round(sum(drams), 1) if drams else None
+    return {"cpu_power": (round(cpu_w, 1) if cpu_w is not None else None),
+            "dram_power": dram_power, "domains": {n: round(w, 1) for n, w in per.items()}}
 
 _POWER_PROC_TOPN  = 8
 _POWER_PROC_MIN_W = 0.5
@@ -3121,6 +3124,37 @@ def delete_host(name):
         rowcount = _hosts_repo.delete(name, conn=DB)
     return rowcount > 0
 
+def rename_host(old, new):
+    """Rename a registered host. The hosts row moves as-is (SSH target, tags,
+    poll calibration, last check), the in-memory poll cache is re-keyed so the
+    UI doesn't fall back to "no data yet" for a poll interval, and experiment /
+    benchmark history recorded under the old name follows so per-host filters
+    don't silently split. Returns (host_dict, error_or_None)."""
+    from backend.db.repos import hosts as _hosts_repo
+    new = (new or "").strip()
+    if not _HOST_NAME_RE.match(new):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if new.lower() == "local":
+        return None, "'local' is reserved for the hub itself."
+    if new == old:
+        return None, "Nothing to update."
+    with LOCK:
+        try:
+            rowcount = _hosts_repo.rename(old, new, conn=DB)
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{new}' already exists."
+        if rowcount == 0:
+            return None, f"No host named '{old}'."
+        DB.execute("UPDATE runs SET host=? WHERE host=?", (new, old))
+        DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
+        DB.commit()
+    with HOST_DATA_LOCK:
+        if old in HOST_DATA:
+            HOST_DATA[new] = HOST_DATA.pop(old)
+    with LOCK:
+        row = _hosts_repo.get(new, conn=DB)
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
@@ -3343,6 +3377,12 @@ def _local_now_snapshot():
     for k in ("os", "hw", "net", "sec"):
         if H.get(k):
             out[k] = H[k]
+    # RAPL power — top-level in LATEST (not inside host), so pull explicitly.
+    # Mirrors the shape probe.py emits for remotes (cpu_power/dram_power in host).
+    for k in ("cpu_power", "dram_power"):
+        v = (LATEST or {}).get(k)
+        if v is not None:
+            out[k] = v
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.
@@ -4825,7 +4865,8 @@ def amd_gpus(drm_root=None):
         # reflect reality. Discrete cards (large VRAM) are unaffected.
         gtt_total = _amd_read_int(os.path.join(dev, "mem_info_gtt_total"))    # bytes
         gtt_used  = _amd_read_int(os.path.join(dev, "mem_info_gtt_used"))     # bytes
-        if vram_total and gtt_total and vram_total <= (1 << 30):  # VRAM <= 1 GiB -> iGPU
+        unified = bool(vram_total and gtt_total and vram_total <= (1 << 30))  # VRAM <= 1 GiB -> iGPU
+        if unified:
             total, used = gtt_total, (gtt_used or 0)
         else:
             total, used = vram_total, vram_used
@@ -4838,6 +4879,14 @@ def amd_gpus(drm_root=None):
                 name = f.read().strip() or None
         except OSError:
             pass
+        # PCI address of the card (cardN/device is a symlink into /sys/devices/pci…):
+        # lets per-process fdinfo attribution match its drm-pdev to *this* card, so a
+        # hybrid APU + discrete-AMD host counts GTT only for the APU. None when the
+        # link doesn't resolve to a BDF (test fixtures, exotic buses) — attribution
+        # then falls back to the any-card-unified heuristic.
+        pdev = os.path.basename(os.path.realpath(dev))
+        if not re.fullmatch(r"[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", pdev):
+            pdev = None
         gpus.append({
             "idx": int(m.group(1)),
             "name": name or "AMD GPU %s" % m.group(1),
@@ -4846,8 +4895,95 @@ def amd_gpus(drm_root=None):
             "mem_total": round(total / 1048576.0) if total is not None else 0.0,
             "power": round(powr_u / 1e6, 1) if powr_u is not None else 0.0,
             "temp":  round(temp_m / 1000.0, 1) if temp_m is not None else 0.0,
+            "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
+            "pdev": pdev,
         })
     return gpus
+
+def _fdinfo_kib(v):
+    """DRM fdinfo memory value ('123 KiB', '4 MiB') → KiB. amdgpu prints KiB, but
+    parse the unit defensively rather than assuming."""
+    p = v.split()
+    try:
+        n = float(p[0])
+    except (ValueError, IndexError):
+        return 0.0
+    return n * {"KiB": 1.0, "MiB": 1024.0, "GiB": 1048576.0}.get(p[1] if len(p) > 1 else "KiB", 1.0)
+
+def amd_fdinfo_procs(proc_root="/proc"):
+    """Per-PID AMD GPU memory from DRM fdinfo — the amdgpu counterpart of
+    `nvidia-smi --query-compute-apps`, which AMD has no equivalent of without ROCm
+    tools (and this project's AMD back-end is deliberately sysfs-only, issue #1).
+    Any process holding the GPU has /proc/<pid>/fd/N → /dev/dri/* and a matching
+    fdinfo file with `drm-driver: amdgpu` + `drm-memory-vram/gtt` lines (kernel
+    5.19+; older kernels lack the drm-memory-* keys and yield {}). Returns
+    {pid: {pdev: {"vram": MB, "gtt": MB}}} — split per PCI device (pdev may be
+    None on kernels that omit drm-pdev) so the caller can apply the APU-vs-
+    discrete GTT policy per card, not host-wide. A dup'd/inherited fd shares its
+    DRM client (same drm-client-id) with the original — counting both would
+    double the client's buffers — so clients are counted once per
+    (pdev, client-id). Reads the hub's own /proc: the hub runs in the host PID
+    namespace, so host pids and their fds are visible (same access
+    service_for_pid relies on)."""
+    out = {}
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return {}
+    for pid in pids:
+        fddir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue   # process vanished, or fd table not readable
+        seen = set()   # (pdev, client-id) already counted for this pid
+        devs = {}      # pdev -> [vram KiB, gtt KiB]
+        for fd in fds:
+            try:
+                if not os.readlink(os.path.join(fddir, fd)).startswith("/dev/dri/"):
+                    continue
+                with open(os.path.join(proc_root, pid, "fdinfo", fd)) as f:
+                    txt = f.read(8192)
+            except OSError:
+                continue
+            drv = client = pdev = None
+            fv = fg = 0.0
+            for line in txt.splitlines():
+                k, _, val = line.partition(":")
+                val = val.strip()
+                if   k == "drm-driver":    drv = val
+                elif k == "drm-client-id": client = val
+                elif k == "drm-pdev":      pdev = val
+                # legacy + current key names for the same totals; equal when both present
+                elif k in ("drm-memory-vram", "drm-total-vram"): fv = _fdinfo_kib(val)
+                elif k in ("drm-memory-gtt",  "drm-total-gtt"):  fg = _fdinfo_kib(val)
+            if drv != "amdgpu" or client is None or (pdev, client) in seen:
+                continue
+            seen.add((pdev, client))
+            if fv or fg:
+                d = devs.setdefault(pdev, [0.0, 0.0])
+                d[0] += fv
+                d[1] += fg
+        if devs:
+            out[int(pid)] = {pdev: {"vram": v / 1024.0, "gtt": g / 1024.0}
+                             for pdev, (v, g) in devs.items()}
+    return out
+
+def _amd_attrib_mb(devs, amd_cards):
+    """MB one pid holds across AMD cards, given its per-pdev fdinfo split. VRAM
+    always counts; GTT counts only on unified-memory (APU) devices — matched by
+    pdev so a discrete AMD card living next to an APU doesn't get its staging
+    buffers in GTT misread as VRAM. A pdev we can't match to a known card (kernel
+    omits drm-pdev, or sysfs didn't yield a BDF) falls back to the host-wide
+    any-card-unified heuristic."""
+    known   = {g["pdev"] for g in amd_cards if g.get("pdev")}
+    uni_set = {g["pdev"] for g in amd_cards if g.get("pdev") and g.get("unified")}
+    any_uni = any(g.get("unified") for g in amd_cards)
+    mb = 0.0
+    for pdev, m in devs.items():
+        uni = (pdev in uni_set) if (pdev and pdev in known) else any_uni
+        mb += m["vram"] + (m["gtt"] if uni else 0.0)
+    return mb
 
 # Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
 # utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for
@@ -5418,7 +5554,15 @@ def _fetch_model_registry():
 def _model_registry(now=None):
     """Cached registry accessor. Serves a fresh fetch at most once per _REGISTRY_TTL
     so a chatty UI can't hammer ollama. Returns (models, reachable). Network I/O
-    happens OUTSIDE the cache lock."""
+    happens OUTSIDE the cache lock.
+
+    Double-checked locking: after a cache-miss triggers a fetch, we re-check the
+    cache under the lock again before writing. Without this, a burst of concurrent
+    callers that all observe a stale cache at the same time each independently
+    fetch in parallel (N simultaneous HTTP round-trips to ollama), defeating the
+    TTL rate-limit on every cache expiry under load. With it, only the first
+    caller past the gate fetches; everyone else who raced in behind it gets the
+    winner's fresh result instead of triggering their own redundant fetch."""
     now = now or time.time()
     with _REGISTRY_LOCK:
         c = _REGISTRY_CACHE
@@ -5426,6 +5570,13 @@ def _model_registry(now=None):
             return list(c["models"]), c["reachable"]
     models, reachable = _fetch_model_registry()
     with _REGISTRY_LOCK:
+        c = _REGISTRY_CACHE
+        # Someone else may have already refreshed the cache while we were
+        # fetching (network I/O happens outside the lock, so this window is
+        # real). If so, defer to their result instead of overwriting it with
+        # our possibly-slightly-older one.
+        if c and (now - c["ts"]) < _REGISTRY_TTL:
+            return list(c["models"]), c["reachable"]
         globals()["_REGISTRY_CACHE"] = {
             "ts": now, "models": models, "reachable": reachable}
     return list(models), reachable
@@ -5449,12 +5600,12 @@ def _merge_registry(ollama_models, catalog):
         provider = c.get("provider") or "other"
         if not name or provider == "ollama":
             continue
-        key = (name, provider)
+        key = (name, provider, c.get("host") or "local")
         if key in seen:
             continue
         seen.add(key)
         out.append({
-            "name": name, "provider": provider, "host": "local",
+            "name": name, "provider": provider, "host": c.get("host") or "local",
             "size_bytes": None, "size_gb": None, "family": None,
             "param_size": None, "quant": None, "modified": None,
             "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),
@@ -5541,18 +5692,18 @@ def sync_mlflow():
 
 _CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
-def _docker_log_stream(name, tail, follow):
+def _docker_log_stream(name, tail, follow, timeout=20):
     """Yield Server-Sent Events of a container's logs over the Docker socket.
     Demuxes Docker's 8-byte stream framing (skipped for TTY containers); for
     follow=1 it keeps the connection open and emits a heartbeat every ~20s so a
-    closed browser EventSource is noticed and the socket torn down cleanly."""
-    c = http.client.HTTPConnection("localhost", timeout=None)
-    c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.sock.connect(DOCKER_SOCK)
-    if follow:
-        c.sock.settimeout(20)
-    path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
-            f"&tail={tail}&follow={'1' if follow else '0'}")
+    closed browser EventSource is noticed and the socket torn down cleanly.
+    Speaks HTTP/1.0 straight over the socket: a 1.0 response is streamed raw
+    (no chunked transfer-encoding), so a quiet-log heartbeat timeout simply
+    recv()s again. The previous http.client version could not resume its chunked
+    decoder after a timeout — the stdlib marks the socket file timed-out and
+    every later read raises "cannot read from timed out object" — so the stream
+    died with a traceback whenever a followed container went quiet."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     text = ""
     def lines_from(s):
         nonlocal text
@@ -5563,39 +5714,59 @@ def _docker_log_stream(name, tail, follow):
             out.append(line)
         return out
     try:
-        c.request("GET", path)
-        r = c.getresponse()
-        if r.status != 200:
-            yield f"event: srverror\ndata: {r.status} {r.reason}\n\n"
+        sock.connect(DOCKER_SOCK)
+        if follow:
+            sock.settimeout(timeout)
+        path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
+                f"&tail={tail}&follow={'1' if follow else '0'}")
+        sock.sendall(f"GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode())
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 65536:
+            data = sock.recv(4096)
+            if not data:
+                break
+            head += data
+        head, _, chunk = head.partition(b"\r\n\r\n")
+        st = head.split(b"\r\n", 1)[0].split(None, 2)   # e.g. b'HTTP/1.0 404 No such container'
+        code = int(st[1]) if len(st) > 1 and st[1].isdigit() else 0
+        if code != 200:
+            reason = st[2].decode("utf-8", "replace") if len(st) > 2 else "bad response from docker"
+            yield f"event: srverror\ndata: {code} {reason}\n\n"
             return
         framed, buf = None, b""
         while True:
+            if chunk:
+                if framed is None:
+                    framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
+                if framed:
+                    buf += chunk
+                    while len(buf) >= 8:
+                        size = int.from_bytes(buf[4:8], "big")
+                        if len(buf) < 8 + size:
+                            break
+                        payload, buf = buf[8:8 + size], buf[8 + size:]
+                        for line in lines_from(payload.decode("utf-8", "replace")):
+                            yield f"data: {line}\n\n"
+                else:
+                    for line in lines_from(chunk.decode("utf-8", "replace")):
+                        yield f"data: {line}\n\n"
             try:
-                chunk = r.read(4096)
+                chunk = sock.recv(4096)
             except socket.timeout:
+                chunk = b""
                 yield ": keep-alive\n\n"          # heartbeat → Flask sees a gone client
                 continue
             if not chunk:
                 break
-            if framed is None:
-                framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
-            if framed:
-                buf += chunk
-                while len(buf) >= 8:
-                    size = int.from_bytes(buf[4:8], "big")
-                    if len(buf) < 8 + size:
-                        break
-                    payload, buf = buf[8:8 + size], buf[8 + size:]
-                    for line in lines_from(payload.decode("utf-8", "replace")):
-                        yield f"data: {line}\n\n"
-            else:
-                for line in lines_from(chunk.decode("utf-8", "replace")):
-                    yield f"data: {line}\n\n"
         if text:
             yield f"data: {text}\n\n"
         yield "event: end\ndata: done\n\n"
+    except OSError as e:
+        # Docker socket unreachable / connection reset mid-stream: tell the log
+        # drawer instead of tracebacking through werkzeug into our own logs.
+        yield f"event: srverror\ndata: {e}\n\n"
     finally:
-        try: c.close()
+        try: sock.close()
         except Exception: pass
 
 

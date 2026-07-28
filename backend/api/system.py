@@ -318,6 +318,10 @@ def metrics():
     # ── Host ─────────────────────────────────────────────────────────────────
     host = _app.LATEST.get("host") or {}
     _app._G["host_cpu"].set(host.get("cpu", 0))
+    if _app.LATEST.get("cpu_power") is not None:
+        _app._G["host_cpu_power"].set(_app.LATEST["cpu_power"])
+    if _app.LATEST.get("dram_power") is not None:
+        _app._G["host_dram_power"].set(_app.LATEST["dram_power"])
     ram_total = host.get("ram_total") or 1
     ram_used  = host.get("ram_used", 0)
     _app._G["host_mem_used"].set(round(100 * ram_used / ram_total, 1))
