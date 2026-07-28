@@ -3124,6 +3124,37 @@ def delete_host(name):
         rowcount = _hosts_repo.delete(name, conn=DB)
     return rowcount > 0
 
+def rename_host(old, new):
+    """Rename a registered host. The hosts row moves as-is (SSH target, tags,
+    poll calibration, last check), the in-memory poll cache is re-keyed so the
+    UI doesn't fall back to "no data yet" for a poll interval, and experiment /
+    benchmark history recorded under the old name follows so per-host filters
+    don't silently split. Returns (host_dict, error_or_None)."""
+    from backend.db.repos import hosts as _hosts_repo
+    new = (new or "").strip()
+    if not _HOST_NAME_RE.match(new):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if new.lower() == "local":
+        return None, "'local' is reserved for the hub itself."
+    if new == old:
+        return None, "Nothing to update."
+    with LOCK:
+        try:
+            rowcount = _hosts_repo.rename(old, new, conn=DB)
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{new}' already exists."
+        if rowcount == 0:
+            return None, f"No host named '{old}'."
+        DB.execute("UPDATE runs SET host=? WHERE host=?", (new, old))
+        DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
+        DB.commit()
+    with HOST_DATA_LOCK:
+        if old in HOST_DATA:
+            HOST_DATA[new] = HOST_DATA.pop(old)
+    with LOCK:
+        row = _hosts_repo.get(new, conn=DB)
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
