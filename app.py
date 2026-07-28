@@ -4869,72 +4869,135 @@ def amd_gpus(drm_root=None):
         })
     return gpus
 
-def _fdinfo_kib(v):
-    """DRM fdinfo memory value ('123 KiB', '4 MiB') → KiB. amdgpu prints KiB, but
-    parse the unit defensively rather than assuming."""
-    p = v.split()
+_DRM_UNITS = {"": 1, "KiB": 1024, "MiB": 1048576, "GiB": 1073741824, "TiB": 1099511627776}
+_DRM_MAJOR = 226        # /dev/dri/* — char-major-226, Documentation/admin-guide/devices.txt
+
+def _fdinfo_bytes(val):
+    """DRM fdinfo memory value ('326612 KiB', '4 MiB') → bytes. 0 when the field is
+    absent or malformed.
+
+    A bare number is BYTES, not KiB: the kernel's fdinfo formatter only scales up
+    while the value divides evenly by 1024, so anything unaligned prints raw — which
+    is also why a zero shows up as a plain '0' and never '0 KiB'. An unrecognised
+    unit yields 0 rather than a figure that could be off by a factor of 1024."""
+    parts = (val or "").split()
     try:
-        n = float(p[0])
-    except (ValueError, IndexError):
-        return 0.0
-    return n * {"KiB": 1.0, "MiB": 1024.0, "GiB": 1048576.0}.get(p[1] if len(p) > 1 else "KiB", 1.0)
+        n = int(parts[0])
+    except (IndexError, ValueError):
+        return 0
+    return n * _DRM_UNITS.get(parts[1] if len(parts) > 1 else "", 0)
+
+def _fdinfo_region_bytes(f, region):
+    """Bytes one DRM client holds privately in <region> ('vram' or 'gtt').
+
+    drm-resident-* is the standardised key; kernels predating that standardisation
+    (6.1–6.14, including the 6.6 and 6.12 LTS lines) publish the same figure as
+    drm-memory-*, and drm-total-* is its printed alias — so both are fallbacks.
+    Without them attribution silently reports nothing on those kernels.
+
+    Selection is by key PRESENCE, not truthiness: drm-resident-* can legitimately
+    say 0 (an evicted allocation) while drm-total-* stays nonzero, and falling
+    through on the zero would attribute non-resident memory as current residency.
+
+    drm-shared-* is subtracted: a buffer shared between two clients (a dma-buf
+    between an app and a compositor, say) is counted in the residency of BOTH, and
+    their client-ids differ so dedup can't catch it. Crediting it whole to each
+    would let per-service totals exceed the card's capacity; the shared remainder
+    stays in the chart's system/other bucket instead of being counted twice."""
+    resident = 0
+    for prefix in ("drm-resident-", "drm-memory-", "drm-total-"):
+        val = f.get(prefix + region)
+        if val is not None:
+            resident = _fdinfo_bytes(val)
+            break
+    return max(0, resident - _fdinfo_bytes(f.get("drm-shared-" + region)))
+
+def _drm_fd_rdev(proc_root, pid, fd):
+    """The fd's device number, or None when the stat isn't possible.
+
+    Identity is the device number, not the path: a container may map the render node
+    anywhere (--device=/dev/dri/renderD128:/dev/gpu0), and a path test would drop it
+    along with all of that container's attribution. None means "read fdinfo anyway"
+    — a process in another user namespace (rootless podman) denies the stat while
+    still allowing fdinfo, and that container is often the one holding all the
+    VRAM."""
+    try:
+        st = os.stat(os.path.join(proc_root, pid, "fd", fd))
+    except OSError:
+        return None
+    return st.st_rdev                              # 0 for anything but a device
 
 def amd_fdinfo_procs(proc_root="/proc"):
     """Per-PID AMD GPU memory from DRM fdinfo — the amdgpu counterpart of
     `nvidia-smi --query-compute-apps`, which AMD has no equivalent of without ROCm
     tools (and this project's AMD back-end is deliberately sysfs-only, issue #1).
-    Any process holding the GPU has /proc/<pid>/fd/N → /dev/dri/* and a matching
-    fdinfo file with `drm-driver: amdgpu` + `drm-memory-vram/gtt` lines (kernel
-    5.19+; older kernels lack the drm-memory-* keys and yield {}). Returns
-    {pid: {pdev: {"vram": MB, "gtt": MB}}} — split per PCI device (pdev may be
-    None on kernels that omit drm-pdev) so the caller can apply the APU-vs-
-    discrete GTT policy per card, not host-wide. A dup'd/inherited fd shares its
-    DRM client (same drm-client-id) with the original — counting both would
-    double the client's buffers — so clients are counted once per
-    (pdev, client-id). Reads the hub's own /proc: the hub runs in the host PID
-    namespace, so host pids and their fds are visible (same access
-    service_for_pid relies on)."""
+    Any process holding the GPU has /proc/<pid>/fd/N → a char-major-226 device and
+    a matching fdinfo file with `drm-driver: amdgpu` plus per-region residency keys
+    (drm-resident-*, or drm-memory-*/drm-total-* on older kernels; pre-5.19 kernels
+    have none and yield {}). Returns {pid: {pdev: {"vram": MB, "gtt": MB}}} — split
+    per PCI device (pdev may be None on kernels that omit drm-pdev) so the caller
+    can apply the APU-vs-discrete GTT policy per card, not host-wide.
+
+    Clients are counted once per (device, client-id) GLOBALLY, not per pid: dup()'d
+    fds, threads and forked children all republish the same DRM client, and a
+    supervisor keeping an inherited fd open would otherwise double the worker's
+    buffers across two services. Pids scan lowest-first so such a client is always
+    credited to the same process — with readdir order the owner would flip between
+    samples and the per-service history would sawtooth. Client-ids are recycled, so
+    in the rare case where one is freed and reissued mid-scan we drop the second
+    sighting — one sample's worth of memory, self-correcting on the next.
+
+    Reads the hub's own /proc: the hub runs in the host PID namespace, so host pids
+    and their fds are visible (same access service_for_pid relies on)."""
     out = {}
     try:
         pids = [p for p in os.listdir(proc_root) if p.isdigit()]
     except OSError:
         return {}
-    for pid in pids:
+    seen = set()       # (device, client-id) already counted, across ALL pids
+    for pid in sorted(pids, key=int):
         fddir = os.path.join(proc_root, pid, "fd")
         try:
             fds = os.listdir(fddir)
         except OSError:
             continue   # process vanished, or fd table not readable
-        seen = set()   # (pdev, client-id) already counted for this pid
-        devs = {}      # pdev -> [vram KiB, gtt KiB]
+        devs = {}      # pdev -> [vram bytes, gtt bytes]
         for fd in fds:
+            rdev = _drm_fd_rdev(proc_root, pid, fd)
+            if rdev is not None and os.major(rdev) != _DRM_MAJOR:
+                continue                       # cheap reject; None = read fdinfo anyway
             try:
-                if not os.readlink(os.path.join(fddir, fd)).startswith("/dev/dri/"):
-                    continue
                 with open(os.path.join(proc_root, pid, "fdinfo", fd)) as f:
-                    txt = f.read(8192)
+                    txt = f.read(8192)     # the drm-* block sits well inside this
             except OSError:
                 continue
-            drv = client = pdev = None
-            fv = fg = 0.0
-            for line in txt.splitlines():
-                k, _, val = line.partition(":")
-                val = val.strip()
-                if   k == "drm-driver":    drv = val
-                elif k == "drm-client-id": client = val
-                elif k == "drm-pdev":      pdev = val
-                # legacy + current key names for the same totals; equal when both present
-                elif k in ("drm-memory-vram", "drm-total-vram"): fv = _fdinfo_kib(val)
-                elif k in ("drm-memory-gtt",  "drm-total-gtt"):  fg = _fdinfo_kib(val)
-            if drv != "amdgpu" or client is None or (pdev, client) in seen:
+            if "drm-driver" not in txt:
                 continue
-            seen.add((pdev, client))
-            if fv or fg:
-                d = devs.setdefault(pdev, [0.0, 0.0])
-                d[0] += fv
-                d[1] += fg
+            fields = {}
+            for line in txt.splitlines():
+                k, sep, val = line.partition(":")
+                if sep and k.startswith("drm-"):
+                    fields[k.strip()] = val.strip()
+            client = fields.get("drm-client-id")
+            pdev = fields.get("drm-pdev")
+            # Dedup device identity: pdev when the kernel names it; else the fd's
+            # device number (client-ids are per-device counters, so two pdev-less
+            # cards can carry the same id — collapsing them would drop one); else
+            # the pid, which narrows dedup to upstream's per-pid semantics rather
+            # than ever dropping a client.
+            dev_id = pdev if pdev is not None else (rdev if rdev is not None else pid)
+            if (fields.get("drm-driver") != "amdgpu" or client is None
+                    or (dev_id, client) in seen):
+                continue
+            seen.add((dev_id, client))
+            vb = _fdinfo_region_bytes(fields, "vram")
+            gb = _fdinfo_region_bytes(fields, "gtt")
+            if vb or gb:
+                d = devs.setdefault(pdev, [0, 0])
+                d[0] += vb
+                d[1] += gb
         if devs:
-            out[int(pid)] = {pdev: {"vram": v / 1024.0, "gtt": g / 1024.0}
+            out[int(pid)] = {pdev: {"vram": v / 1048576.0, "gtt": g / 1048576.0}
                              for pdev, (v, g) in devs.items()}
     return out
 
