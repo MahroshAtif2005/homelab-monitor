@@ -162,7 +162,7 @@ def sample_once():
         power     = sum(g["power"] for g in gpus)
         util      = round(sum(g["util"] for g in gpus) / len(gpus))
         temp      = max(g["temp"] for g in gpus)
-        # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
+        # NVIDIA enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
         # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
@@ -178,7 +178,11 @@ def sample_once():
                     except ValueError:
                         pass
         else:
-            gpu_extra = {}
+            # The AMD cards arrive already enriched (amd_gpus reads clocks/perf
+            # level/cap in its per-card pass), so the aggregate 'GPU right now'
+            # chips work the same as on NVIDIA. On a hybrid box the NVIDIA branch
+            # above keeps the aggregate — one representative dict, as before.
+            gpu_extra = _app._gpu_extra(amd_cards) if amd_cards else {}
         # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
         # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
         # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
