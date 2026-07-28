@@ -57,6 +57,19 @@ class TestNvidiaProcs(unittest.TestCase):
         self.assertEqual([p["pid"] for p in procs], [77, 1234])
         self.assertEqual(procs[1], {"pid": 1234, "name": "ollama", "mem": 20480})
 
+    def test_process_spanning_cards_is_pooled_once(self):
+        # nvidia-smi emits one row per (process, GPU): a llama-server sharded
+        # across 3 cards must show once with its VRAM summed, not three times.
+        out = ("895276, /usr/bin/llama-server, 22672\n"
+               "895276, /usr/bin/llama-server, 21640\n"
+               "895276, /usr/bin/llama-server, 21568\n"
+               "7421, /usr/bin/python, 588\n")
+        with mock.patch("probe.subprocess.run", return_value=_smi_result(out)):
+            procs = probe._nvidia_procs()
+        self.assertEqual(len(procs), 2)
+        self.assertEqual(procs[0], {"pid": 895276, "name": "llama-server",
+                                    "mem": 22672 + 21640 + 21568})
+
     def test_comma_in_process_path_survives(self):
         # process_name is a free path — a comma inside it must not shift fields.
         out = "50, /srv/my,dir/llama-server, 4096\n"

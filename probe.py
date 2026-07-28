@@ -419,7 +419,7 @@ def _nvidia_procs():
         )
         if r.returncode != 0:
             return []
-        procs = []
+        agg = {}
         for line in r.stdout.decode("utf-8", "replace").splitlines():
             if not line.strip():
                 continue
@@ -427,9 +427,12 @@ def _nvidia_procs():
             if len(parts) < 3:
                 continue
             name = ",".join(parts[1:-1]).replace("\\", "/").rsplit("/", 1)[-1]
-            procs.append({"pid":  _smi_int(parts[0]),
-                          "name": name[:64] or "?",
-                          "mem":  _smi_int(parts[-1])})
+            pid = _smi_int(parts[0])
+            # nvidia-smi emits one row per (process, GPU) — a process spanning
+            # several cards appears once per card, so pool its VRAM per pid.
+            key = (pid, name[:64] or "?")
+            agg[key] = agg.get(key, 0) + _smi_int(parts[-1])
+        procs = [{"pid": k[0], "name": k[1], "mem": v} for k, v in agg.items()]
         procs.sort(key=lambda p: -p["mem"])
         return procs[:20]
     except Exception:
