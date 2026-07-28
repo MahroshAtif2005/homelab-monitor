@@ -32,6 +32,11 @@ def api_hosts_one(name):
     new_name = body.get("name").strip() if isinstance(body.get("name"), str) else None
     ssh_target = body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None
     tags = body.get("tags").strip() if isinstance(body.get("tags"), str) else None
+    # Validate the target up front: rename and target-update are two mutations,
+    # and a combined request must not commit the rename only to 400 on the
+    # target — a non-ok PATCH has to mean "nothing changed".
+    if ssh_target is not None and _app._parse_ssh_target(ssh_target) is None:
+        return jsonify({"ok": False, "error": "SSH target must look like user@host or user@host:port."}), 400
     host = None
     if new_name and new_name != name:
         host, err = _app.rename_host(name, new_name)

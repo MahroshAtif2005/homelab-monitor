@@ -114,6 +114,16 @@ class TestRenamePatchApi(unittest.TestCase):
         r = self.client.patch("/api/hosts/vadr", json={})
         self.assertEqual(r.status_code, 400)
 
+    def test_patch_bad_target_does_not_commit_rename(self):
+        # A combined {name, ssh_target} request with an invalid target must be
+        # a no-op — not a committed rename plus a 400.
+        _add_host("vadr")
+        r = self.client.patch("/api/hosts/vadr", json={"name": "vader", "ssh_target": "not a target"})
+        self.assertEqual(r.status_code, 400)
+        names = [h["name"] for h in app.list_hosts()]
+        self.assertIn("vadr", names)
+        self.assertNotIn("vader", names)
+
 
 if __name__ == "__main__":
     unittest.main()
