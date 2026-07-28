@@ -53,7 +53,7 @@ And the rest of the lab, the way it always was:
 - **Containers, honestly** — health plus **RAM and VRAM in separate columns** (real resident RAM, not page cache), and click one to tail its logs in a side drawer.
 - **systemd services** — local or remote, your own units highlighted, failures first.
 - **WizTree-style disk treemaps**, **network I/O with per-container top talkers**, and a **mini-htop** for who's eating CPU and RAM.
-- **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs.
+- **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs. The GPU tab works per host too: a remote multi-GPU rig shows **every card's VRAM, utilisation, power and temperature**, and the processes holding the memory.
 - **Uptime monitoring, in the box** — watch any **HTTP endpoint or TCP port** (your services, a NAS, a remote site) straight from the container: heartbeat strip, 24h/7d uptime %, latency, and **smart per-check alerts** — anti-flap confirm, recovery with downtime, and an optional slow-response warning. No extra uptime service to self-host — it's already in the box.
 - **Push alerts** — **Discord**, **ntfy.sh** and **Telegram**, edge-triggered so they don't spam.
 
