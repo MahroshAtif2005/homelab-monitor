@@ -719,7 +719,7 @@ def _count_physical_cores(cpuinfo):
     return len(pairs)
 
 
-def read_hw():
+def read_hw(gpu_agg=None):
     hw = {}
     ci = _read_text("/proc/cpuinfo") or ""
     mname = arm = vendor = None
@@ -774,7 +774,10 @@ def read_hw():
                                   "/sys/firmware/devicetree/base/model") or ""
     if machine:
         hw["machine"] = machine
-    g = read_gpu().get("gpu")
+    # main() passes the aggregate it already read (possibly {} on a GPU-less
+    # host) so nvidia-smi isn't shelled out to twice per probe cycle; only a
+    # standalone read_hw() call falls back to reading the GPU itself.
+    g = gpu_agg if gpu_agg is not None else read_gpu().get("gpu")
     if g and g.get("name"):
         hw["gpu_name"] = g["name"]
         if g.get("mem_total"):
@@ -1446,6 +1449,7 @@ def read_ollama_models():
 
 
 def main():
+    gpu_block = read_gpu()
     data = {
         "host": {
             **read_cpu(),
@@ -1454,10 +1458,10 @@ def main():
             **read_loadavg(),
             **read_uptime(),
             **read_temp(),
-            **read_gpu(),
+            **gpu_block,
             **read_systemd(),
             **read_os(),
-            **read_hw(),
+            **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
             **read_net(),
             **read_sec(),
             "disks": read_disks(),
