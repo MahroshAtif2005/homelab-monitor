@@ -68,17 +68,39 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["temp"], 54.3)
         self.assertEqual(g["power"], 42.0)
 
-    def test_probe_representative_matches(self):
+    def test_probe_card_matches(self):
         _amd_card(self.drm, 0, total=16 * 1024**3, used=2 * 1024**3, busy=10,
                   temp_mc=40000, name="AMD Instinct MI210")
-        out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertIn("gpu", out)
-        self.assertEqual(out["gpu"]["count"], 1)
-        self.assertEqual(out["gpu"]["name"], "AMD Instinct MI210")
-        self.assertEqual(out["gpu"]["mem_total"], 16384)
-        self.assertEqual(out["gpu"]["mem_used"], 2048)
-        self.assertEqual(out["gpu"]["util"], 10)
-        self.assertEqual(out["gpu"]["temp"], 40)
+        cards = probe._amd_gpu_sysfs(drm_root=self.drm)
+        self.assertEqual(len(cards), 1)
+        g = cards[0]
+        self.assertEqual(g["name"], "AMD Instinct MI210")
+        self.assertEqual(g["mem_total"], 16384)
+        self.assertEqual(g["mem_used"], 2048)
+        self.assertEqual(g["util"], 10)
+        self.assertEqual(g["temp"], 40)
+        self.assertEqual(g["vendor"], "amd")
+
+    def test_probe_read_gpu_aggregates_all_cards(self):
+        # Two cards: the legacy `gpu` aggregate must pool them (VRAM summed, util
+        # averaged, temp = hottest) instead of reporting only card 0 — a 3×3090
+        # rig must not read as a single 24 GB card. `gpus` carries the per-card
+        # list with hub-collector field names.
+        _amd_card(self.drm, 0, total=16 * 1024**3, used=2 * 1024**3, busy=10,
+                  temp_mc=40000, name="AMD Instinct MI210")
+        _amd_card(self.drm, 1, total=16 * 1024**3, used=6 * 1024**3, busy=30,
+                  temp_mc=60000, name="AMD Instinct MI210")
+        real = probe._amd_gpu_sysfs(drm_root=self.drm)
+        with mock.patch("probe._nvidia_cards", return_value=[]), \
+             mock.patch("probe._amd_gpu_sysfs", return_value=real):
+            out = probe.read_gpu()
+        g = out["gpu"]
+        self.assertEqual(g["count"], 2)
+        self.assertEqual(g["mem_total"], 32768)
+        self.assertEqual(g["mem_used"], 8192)
+        self.assertEqual(g["util"], 20)
+        self.assertEqual(g["temp"], 60)
+        self.assertEqual([c["idx"] for c in out["gpus"]], [0, 1])
 
     def test_apu_reports_gtt_not_vram_carveout(self):
         # Ryzen AI Max / Strix Halo: 512 MiB dedicated VRAM carve-out, 124 GiB GTT pool
@@ -91,8 +113,8 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 124 * 1024)   # 124 GiB, not 512 MiB
         self.assertEqual(g["mem_used"], 18)            # GTT usage, not the 148 MiB carve-out
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 18)
+        self.assertEqual(out[0]["mem_total"], 124 * 1024)
+        self.assertEqual(out[0]["mem_used"], 18)
 
     def test_apu_missing_gtt_used_degrades_to_zero(self):
         # amdgpu exposes gtt_total but (rarely) not gtt_used → used must fall back to 0,
@@ -103,8 +125,8 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 124 * 1024)
         self.assertEqual(g["mem_used"], 0)
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 124 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 0)
+        self.assertEqual(out[0]["mem_total"], 124 * 1024)
+        self.assertEqual(out[0]["mem_used"], 0)
 
     def test_discrete_card_with_gtt_still_reports_vram(self):
         # Discrete cards also expose a GTT pool, but with a large dedicated VRAM they must
@@ -115,14 +137,14 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(g["mem_total"], 24 * 1024)    # VRAM, not GTT
         self.assertEqual(g["mem_used"], 8 * 1024)
         out = probe._amd_gpu_sysfs(drm_root=self.drm)
-        self.assertEqual(out["gpu"]["mem_total"], 24 * 1024)
-        self.assertEqual(out["gpu"]["mem_used"], 8 * 1024)
+        self.assertEqual(out[0]["mem_total"], 24 * 1024)
+        self.assertEqual(out[0]["mem_used"], 8 * 1024)
 
     def test_non_amd_vendor_is_skipped(self):
         # An NVIDIA card (0x10de) in the same tree must be ignored by the AMD reader.
         _amd_card(self.drm, 0, total=8 * 1024**3, used=0, busy=0, vendor="0x10de")
         self.assertEqual(app.amd_gpus(drm_root=self.drm), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), [])
 
     def test_missing_optional_fields_degrade_to_zero(self):
         # No hwmon (temp/power) and no product_name → still a valid card, zeros + fallback name.
@@ -136,12 +158,12 @@ class TestAmdSysfs(unittest.TestCase):
 
     def test_no_gpu_returns_empty(self):
         self.assertEqual(app.amd_gpus(drm_root=self.drm), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=self.drm), [])
 
     def test_unreadable_root_is_safe(self):
         missing = os.path.join(self.tmp, "does-not-exist")
         self.assertEqual(app.amd_gpus(drm_root=missing), [])
-        self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), {})
+        self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), [])
 
 
 class TestVendorAwareDiagnostics(unittest.TestCase):

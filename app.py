@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.26.0"
+VERSION      = "0.27.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -279,6 +279,27 @@ CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
+-- Per-host time-series (multi-host slice): one raw row per successful host poll
+-- plus an hourly rollup keyed (ts, host) — the same raw/1h split the hub uses
+-- for its own samples. Raw rows are retention-purged; the 1h rollup is kept
+-- (like samples_1h) and is what the Costs integration reads.
+CREATE TABLE IF NOT EXISTS host_samples(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_host_ts ON host_samples(host, ts);
+CREATE TABLE IF NOT EXISTS host_samples_1h(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  cnt INTEGER DEFAULT 1,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_1h_host_ts ON host_samples_1h(host, ts);
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
@@ -3124,6 +3145,39 @@ def delete_host(name):
         rowcount = _hosts_repo.delete(name, conn=DB)
     return rowcount > 0
 
+def rename_host(old, new):
+    """Rename a registered host. The hosts row moves as-is (SSH target, tags,
+    poll calibration, last check), the in-memory poll cache is re-keyed so the
+    UI doesn't fall back to "no data yet" for a poll interval, and experiment /
+    benchmark history recorded under the old name follows so per-host filters
+    don't silently split. Returns (host_dict, error_or_None)."""
+    from backend.db.repos import hosts as _hosts_repo
+    new = (new or "").strip()
+    if not _HOST_NAME_RE.match(new):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if new.lower() == "local":
+        return None, "'local' is reserved for the hub itself."
+    if new == old:
+        return None, "Nothing to update."
+    with LOCK:
+        try:
+            rowcount = _hosts_repo.rename(old, new, conn=DB)
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{new}' already exists."
+        if rowcount == 0:
+            return None, f"No host named '{old}'."
+        DB.execute("UPDATE runs SET host=? WHERE host=?", (new, old))
+        DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
+        from backend.db.repos import host_samples as _hs_repo
+        _hs_repo.rename_host(old, new, conn=DB)
+        DB.commit()
+    with HOST_DATA_LOCK:
+        if old in HOST_DATA:
+            HOST_DATA[new] = HOST_DATA.pop(old)
+    with LOCK:
+        row = _hosts_repo.get(new, conn=DB)
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
@@ -3476,8 +3530,32 @@ def _poll_one_host(h):
                 entry["error_at"] = int(time.time())
                 entry["fails"]    = int(entry.get("fails", 0)) + 1
             HOST_DATA[h["name"]] = entry
+        if data:
+            _record_host_sample(h["name"], data.get("host") or {})
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
+
+def _record_host_sample(name, hostd):
+    """Persist one poll's vitals into host_samples(+_1h) — the storage that the
+    per-host Costs view (and future per-host history charts) integrate over.
+    Absent sensors stay NULL (no GPU ≠ zero watts). Runs on the poller's worker
+    threads, so the write takes LOCK on its own — never nest under
+    HOST_DATA_LOCK. A storage failure must not break the poll itself."""
+    from backend.db.repos import host_samples as _hs_repo
+    gpu = hostd.get("gpu") or {}
+    try:
+        with LOCK:
+            _hs_repo.record(
+                DB, int(time.time()), name,
+                cpu=hostd.get("cpu"), ram_used=hostd.get("ram_used"),
+                ram_total=hostd.get("ram_total"), load1=hostd.get("load1"),
+                ctemp=hostd.get("ctemp"),
+                gpu_util=gpu.get("util"), gpu_mem_used=gpu.get("mem_used"),
+                gpu_mem_total=gpu.get("mem_total"), gpu_power=gpu.get("power"),
+                cpu_power=hostd.get("cpu_power"), dram_power=hostd.get("dram_power"))
+            DB.commit()
+    except Exception as e:
+        print(f"host sample store error ({name}):", e, flush=True)
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import host_poller
@@ -5626,20 +5704,30 @@ def _merge_registry(ollama_models, catalog):
     (name/provider/loaded/vram — no on-disk size, most catalogue APIs don't expose
     one). Entries missing a model name are skipped."""
     out = [dict(m, provider="ollama", host="local") for m in ollama_models]
-    seen = {(m["name"], m["provider"]) for m in out}
+    seen = {(m["name"], m["provider"], "local") for m in out}
+    hub = socket.gethostname()
     for c in catalog or []:
         name = c.get("model")
         provider = c.get("provider") or "other"
-        if not name or provider == "ollama":
+        chost = c.get("host") or "local"
+        # The hub's OWN ollama is covered by the richer disk registry above —
+        # drop only those duplicates. A REMOTE host's ollama models arrive
+        # through this catalog and MUST pass through: dropping every
+        # provider=='ollama' entry (as this did originally) silently blinded
+        # the fleet registry to exactly the hosts #236 set out to cover.
+        if not name or (provider == "ollama" and chost in ("local", hub)):
             continue
-        key = (name, provider, c.get("host") or "local")
+        key = (name, provider, chost)
         if key in seen:
             continue
         seen.add(key)
+        size = c.get("size_bytes")
         out.append({
-            "name": name, "provider": provider, "host": c.get("host") or "local",
-            "size_bytes": None, "size_gb": None, "family": None,
-            "param_size": None, "quant": None, "modified": None,
+            "name": name, "provider": provider, "host": chost,
+            "size_bytes": size,
+            "size_gb": round(size / 1073741824, 2) if size else None,
+            "family": c.get("family"), "param_size": c.get("param_size"),
+            "quant": c.get("quant"), "modified": c.get("modified"),
             "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),
         })
     return out

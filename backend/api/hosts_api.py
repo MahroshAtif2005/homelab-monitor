@@ -29,13 +29,26 @@ def api_hosts_one(name):
         ok = _app.delete_host(name)
         return jsonify({"ok": ok}), (200 if ok else 404)
     body = request.get_json(silent=True) or {}
-    host, err = _app.update_host(
-        name,
-        ssh_target=(body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None),
-        tags=(body.get("tags").strip() if isinstance(body.get("tags"), str) else None),
-    )
-    if err:
-        return jsonify({"ok": False, "error": err}), 400 if "look like" in err or "Nothing" in err else 404
+    new_name = body.get("name").strip() if isinstance(body.get("name"), str) else None
+    ssh_target = body.get("ssh_target").strip() if isinstance(body.get("ssh_target"), str) else None
+    tags = body.get("tags").strip() if isinstance(body.get("tags"), str) else None
+    # Validate the target up front: rename and target-update are two mutations,
+    # and a combined request must not commit the rename only to 400 on the
+    # target — a non-ok PATCH has to mean "nothing changed".
+    if ssh_target is not None and _app._parse_ssh_target(ssh_target) is None:
+        return jsonify({"ok": False, "error": "SSH target must look like user@host or user@host:port."}), 400
+    host = None
+    if new_name and new_name != name:
+        host, err = _app.rename_host(name, new_name)
+        if err:
+            return jsonify({"ok": False, "error": err}), 404 if err.startswith("No host") else 400
+        name = host["name"]
+    if ssh_target is not None or tags is not None:
+        host, err = _app.update_host(name, ssh_target=ssh_target, tags=tags)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400 if "look like" in err or "Nothing" in err else 404
+    if host is None:
+        return jsonify({"ok": False, "error": "Nothing to update."}), 400
     return jsonify({"ok": True, "host": host})
 
 
