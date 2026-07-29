@@ -7387,8 +7387,8 @@ function describeMissingCapability(tabId){
     }
     if(dk && dk.status === 'ok'){
       return {ic:'🛠️',
-        title:`Per-host Containers view is on the way`,
-        detail:`${CURRENT_HOST} has Docker (server ${esc(dk.detail||'')}), but the per-host container table lands in the next slice. Meanwhile, switch to <b>Local</b> to see the hub's containers.`};
+        title:`Waiting for ${CURRENT_HOST}'s container inventory`,
+        detail:`${CURRENT_HOST} has Docker (server ${esc(dk.detail||'')}). Linux hosts ship their container list on the next poll (~10s); Windows hosts don't ship one yet — that probe slice is still to come.`};
     }
     return {ic:'⏳',
       title:`Docker info not yet probed for ${CURRENT_HOST}`,
@@ -7466,6 +7466,59 @@ function renderRemoteGpu(sec, rg){
   applyIcons(box);
 }
 
+// ── Per-host Containers (remote hosts) ───────────────────────────────────────
+// Newer probes ship the host's `docker ps` (+ one stats pass for RAM/CPU%) as
+// host.docker, so the Containers tab shows a real read-only inventory for a
+// remote. Same FLEET-driven pattern as the per-host GPU view. Logs and
+// start/stop controls stay hub-only — the probe is read-only by design.
+function remoteContainersData(){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === CURRENT_HOST);
+  const dk = h && h.host && h.host.docker;
+  if(!dk || !dk.available || !Array.isArray(dk.containers)) return null;
+  return {containers: dk.containers, summary: dk.summary||{}, at: h.at, online: h.online};
+}
+function _rctBadge(c){
+  const st = (c.state||''), tx = (c.status||'');
+  if(st==='running') return /unhealthy/i.test(tx) ? ['crit', I18N.t('rct.unhealthy','UNHEALTHY')]
+                                                  : ['ok', I18N.t('rct.running','RUNNING')];
+  if(st==='restarting') return ['warn', I18N.t('rct.restarting','RESTARTING')];
+  if(st==='exited') return /Exited \(0\)/.test(tx) ? ['info', I18N.t('rct.stopped','STOPPED')]
+                                                   : ['warn', I18N.t('rct.exited','EXITED')];
+  return ['info', esc(st.toUpperCase()||'?')];
+}
+function renderRemoteContainers(sec, rc){
+  let box = sec.querySelector('.remote-ct');
+  if(!box){
+    box = document.createElement('div');
+    box.className = 'remote-ct';
+    sec.insertBefore(box, sec.firstChild);
+  }
+  const s = rc.summary;
+  const kpis = [
+    {v: s.running!=null ? `${s.running} / ${s.total}` : String(rc.containers.length), l:I18N.t('rct.kpi_running','Running / total')},
+    {v: String(s.problems||0), l:I18N.t('rct.kpi_problems','Problems'), s:(s.problems? I18N.t('rct.kpi_problems_s','unhealthy · restarting · non-zero exits'):'')},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const rows = rc.containers.map(c=>{
+    const [lvl,label] = _rctBadge(c);
+    const ports = esc((c.ports||'').split(',').map(p=>p.trim()).filter(p=>!p.startsWith(':::')).join(', '));
+    return `<tr class="${lvl}"><td><span class="sdot" style="background:${SC[lvl]||SC.info}"></span>${esc(c.name)}</td>
+      <td><span class="badge ${lvl}">${label}</span></td>
+      <td class="muted">${esc(c.image)}</td>
+      <td class="muted">${ports}</td>
+      <td>${c.mem_bytes!=null ? fmtBytes(c.mem_bytes) : '—'}</td>
+      <td>${c.cpu_pct!=null ? c.cpu_pct.toFixed(1)+'%' : '—'}</td>
+      <td class="muted">${esc(c.status||'')}</td></tr>`;
+  }).join('') || `<tr><td class="muted">${I18N.t('rct.none','No containers on this host.')}</td></tr>`;
+  const stale = rc.online ? '' : ` · <span style="color:var(--warn)">${I18N.t('rgpu.stale','host offline — showing last snapshot')}</span>`;
+  box.innerHTML =
+    `<div class="card"><h2>📦 ${I18N.tf('rct.title','Containers on {host}',{host:esc(CURRENT_HOST)})}</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+      <table style="margin-top:12px"><thead><tr><th>${I18N.t('col.container','Container')}</th><th>${I18N.t('col.state','State')}</th><th>${I18N.t('col.image','Image')}</th><th>${I18N.t('col.ports','Ports')}</th><th>${I18N.t('col.ram','RAM')}</th><th>${I18N.t('col.cpu','CPU')}</th><th>${I18N.t('col.status','Status')}</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="cap">${I18N.tf('rct.cap','Read-only inventory from the host\'s docker CLI · updated {t}',{t:relTime(rc.at)})}${stale} · ${I18N.t('rct.cap2','Logs and start/stop controls are hub-only for now.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
 function renderLocalOnlyNotice(tabId){
   if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
@@ -7480,8 +7533,16 @@ function renderLocalOnlyNotice(tabId){
       return;
     }
   }
-  const panel = sec.querySelector('.remote-gpu');
-  if(panel) panel.remove();
+  if(tabId === 'containers'){
+    const rc = remoteContainersData();
+    if(rc){
+      const old = sec.querySelector('.scope-notice');
+      if(old) old.remove();
+      renderRemoteContainers(sec, rc);
+      return;
+    }
+  }
+  sec.querySelectorAll('.remote-gpu, .remote-ct').forEach(el => el.remove());
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');
@@ -7497,8 +7558,7 @@ function clearLocalOnlyNotice(tabId){
   if(!sec) return;
   const n = sec.querySelector('.scope-notice');
   if(n) n.remove();
-  const p = sec.querySelector('.remote-gpu');
-  if(p) p.remove();
+  sec.querySelectorAll('.remote-gpu, .remote-ct').forEach(el => el.remove());
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
 }
 // Re-apply notices on host switch — necessary so that when the user
@@ -7977,7 +8037,7 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
-  if(TAB==='gpu' && CURRENT_HOST!=='local') renderLocalOnlyNotice('gpu');
+  if((TAB==='gpu'||TAB==='containers') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{
