@@ -279,6 +279,27 @@ CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
+-- Per-host time-series (multi-host slice): one raw row per successful host poll
+-- plus an hourly rollup keyed (ts, host) — the same raw/1h split the hub uses
+-- for its own samples. Raw rows are retention-purged; the 1h rollup is kept
+-- (like samples_1h) and is what the Costs integration reads.
+CREATE TABLE IF NOT EXISTS host_samples(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_host_ts ON host_samples(host, ts);
+CREATE TABLE IF NOT EXISTS host_samples_1h(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  cnt INTEGER DEFAULT 1,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_1h_host_ts ON host_samples_1h(host, ts);
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
@@ -3147,6 +3168,8 @@ def rename_host(old, new):
             return None, f"No host named '{old}'."
         DB.execute("UPDATE runs SET host=? WHERE host=?", (new, old))
         DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
+        from backend.db.repos import host_samples as _hs_repo
+        _hs_repo.rename_host(old, new, conn=DB)
         DB.commit()
     with HOST_DATA_LOCK:
         if old in HOST_DATA:
@@ -3507,8 +3530,32 @@ def _poll_one_host(h):
                 entry["error_at"] = int(time.time())
                 entry["fails"]    = int(entry.get("fails", 0)) + 1
             HOST_DATA[h["name"]] = entry
+        if data:
+            _record_host_sample(h["name"], data.get("host") or {})
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
+
+def _record_host_sample(name, hostd):
+    """Persist one poll's vitals into host_samples(+_1h) — the storage that the
+    per-host Costs view (and future per-host history charts) integrate over.
+    Absent sensors stay NULL (no GPU ≠ zero watts). Runs on the poller's worker
+    threads, so the write takes LOCK on its own — never nest under
+    HOST_DATA_LOCK. A storage failure must not break the poll itself."""
+    from backend.db.repos import host_samples as _hs_repo
+    gpu = hostd.get("gpu") or {}
+    try:
+        with LOCK:
+            _hs_repo.record(
+                DB, int(time.time()), name,
+                cpu=hostd.get("cpu"), ram_used=hostd.get("ram_used"),
+                ram_total=hostd.get("ram_total"), load1=hostd.get("load1"),
+                ctemp=hostd.get("ctemp"),
+                gpu_util=gpu.get("util"), gpu_mem_used=gpu.get("mem_used"),
+                gpu_mem_total=gpu.get("mem_total"), gpu_power=gpu.get("power"),
+                cpu_power=hostd.get("cpu_power"), dram_power=hostd.get("dram_power"))
+            DB.commit()
+    except Exception as e:
+        print(f"host sample store error ({name}):", e, flush=True)
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import host_poller

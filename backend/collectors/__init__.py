@@ -349,7 +349,7 @@ def sample_once():
                     _app.DB.executemany("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
                                    "VALUES(?,?,?,?,?)", _pio_rows)
         if _retention is not None:
-            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc", "host_samples"):
                 _app.DB.executemany(f"DELETE FROM {t} WHERE ts<?", [(ts - _retention,)])
             _app.DB.executemany("DELETE FROM disk_io_samples WHERE ts<?", [(ts - _app._DISK_IO_RETENTION,)])
             _app.DB.executemany("DELETE FROM proc_io_samples WHERE ts<?", [(ts - _app._PROC_IO_RETENTION,)])
