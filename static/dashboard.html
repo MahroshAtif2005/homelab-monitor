@@ -7612,7 +7612,7 @@ async function maybeRenderRemoteModels(sec){
       <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
   }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
   box.innerHTML =
-    `<div class="card"><h2>🤖 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
+    `<div class="card"><h2>🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
       <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
       <table style="margin-top:12px"><tbody>${rows}</tbody></table>
       <p class="cap">${I18N.t('rmod.cap','Read from the host\'s ollama (resident set + live VRAM). Other AI servers on remotes and the per-model VRAM timeline are a later slice.')}</p>
