@@ -105,6 +105,52 @@ def api_cost():
     })
 
 
+def _host_machine(_app, ctx, host, since, now, kwh_per):
+    """One remote host's machine dict over [since, now]: energy per component,
+    tariff-aware cost windows, live wattage from the poller snapshot, and which
+    sources are actually measured. No bucketed series — the single-host route
+    adds those when it needs a chart. Caller must NOT hold LOCK."""
+    from backend.db.repos import host_samples as hs_repo
+    comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
+    have = {"gpu": False, "cpu": False, "dram": False}
+    cost_range = 0.0
+    with _app.LOCK:
+        for ts, p, cp, dp, cnt_ in hs_repo.full_since(host, since, conn=_app.DB):
+            price = _app._price_at(ctx, ts)
+            n = cnt_ or 1
+            if p is not None:  have["gpu"] = True
+            if cp is not None: have["cpu"] = True
+            if dp is not None: have["dram"] = True
+            comp_kwh["gpu"] += (p or 0) * n * kwh_per
+            comp_kwh["cpu"] += (cp or 0) * n * kwh_per
+            comp_kwh["dram"] += (dp or 0) * n * kwh_per
+            cost_range += ((p or 0) + (cp or 0) + (dp or 0)) * n * kwh_per * price
+        def win_cost(start):
+            tot = 0.0
+            for ts, w, cnt_ in hs_repo.total_w_since(host, start, conn=_app.DB):
+                tot += (w or 0) * (cnt_ or 1) * kwh_per * _app._price_at(ctx, ts)
+            return round(tot, 2)
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
+    # Live wattage from the poller's latest snapshot (same source the GPU tab uses).
+    with _app.HOST_DATA_LOCK:
+        entry = _app.HOST_DATA.get(host) or {}
+    hostd = ((entry.get("data") or {}).get("host") or {})
+    now_gpu = round((hostd.get("gpu") or {}).get("power") or 0) if hostd.get("gpu") else None
+    now_cpu = round(hostd.get("cpu_power")) if hostd.get("cpu_power") is not None else None
+    now_dram = round(hostd.get("dram_power")) if hostd.get("dram_power") is not None else None
+    measured = [k for k in ("gpu", "cpu", "dram") if have[k]]
+    machine = {"name": host,
+               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram,
+                         "total": (now_gpu or 0) + (now_cpu or 0) + (now_dram or 0)},
+               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items() if have[k]},
+               "cost": cost_win, "cost_range": round(cost_range, 2),
+               "measured": measured, "estimated": []}
+    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"].values()), 3)
+    return machine
+
+
 def _api_costs_host(_app, host):
     """Per-host flavour of /api/costs — same response shape, integrated over
     host_samples_1h (written by the host poller) instead of the hub's rollups.
@@ -122,47 +168,14 @@ def _api_costs_host(_app, host):
         since = (hs_repo.min_ts_1h(host, conn=_app.DB) or now) if span is None else now - span
         bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
         comp = hs_repo.comp_bucketed(host, since, bk, conn=_app.DB)
-        comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
-        cost_range = 0.0
-        for ts, p, cp, dp, cnt_ in hs_repo.full_since(host, since, conn=_app.DB):
-            price = _app._price_at(ctx, ts)
-            n = cnt_ or 1
-            comp_kwh["gpu"] += (p or 0) * n * kwh_per
-            comp_kwh["cpu"] += (cp or 0) * n * kwh_per
-            comp_kwh["dram"] += (dp or 0) * n * kwh_per
-            cost_range += ((p or 0) + (cp or 0) + (dp or 0)) * n * kwh_per * price
-        def win_cost(start):
-            tot = 0.0
-            for ts, w, cnt_ in hs_repo.total_w_since(host, start, conn=_app.DB):
-                tot += (w or 0) * (cnt_ or 1) * kwh_per * _app._price_at(ctx, ts)
-            return round(tot, 2)
-        lt = time.localtime(now)
-        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
-        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
-    have_gpu = any(r[1] is not None for r in comp)
-    have_cpu = any(r[2] is not None for r in comp)
-    have_dram = any(r[3] is not None for r in comp)
+    machine = _host_machine(_app, ctx, host, since, now, kwh_per)
+    have_gpu, have_cpu, have_dram = ("gpu" in machine["measured"], "cpu" in machine["measured"],
+                                    "dram" in machine["measured"])
     labels = [int(r[0]) for r in comp]
     series = {"labels": labels}
     if have_gpu:  series["gpu"]  = [round(r[1] or 0) for r in comp]
     if have_cpu:  series["cpu"]  = [round(r[2] or 0) for r in comp]
     if have_dram: series["dram"] = [round(r[3] or 0) for r in comp]
-    # Live wattage from the poller's latest snapshot (same source the GPU tab uses).
-    with _app.HOST_DATA_LOCK:
-        entry = _app.HOST_DATA.get(host) or {}
-    hostd = ((entry.get("data") or {}).get("host") or {})
-    now_gpu = round((hostd.get("gpu") or {}).get("power") or 0) if hostd.get("gpu") else None
-    now_cpu = round(hostd.get("cpu_power")) if hostd.get("cpu_power") is not None else None
-    now_dram = round(hostd.get("dram_power")) if hostd.get("dram_power") is not None else None
-    now_total = (now_gpu or 0) + (now_cpu or 0) + (now_dram or 0)
-    measured = ([ "gpu"] if have_gpu else []) + (["cpu"] if have_cpu else []) + (["dram"] if have_dram else [])
-    machine = {"name": host,
-               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram, "total": now_total},
-               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items()
-                              if (k == "gpu" and have_gpu) or (k == "cpu" and have_cpu) or (k == "dram" and have_dram)},
-               "cost": cost_win, "cost_range": round(cost_range, 2),
-               "measured": measured, "estimated": []}
-    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"].values()), 3)
     return jsonify({
         "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": ctx["currency"],
         "host": host, "rapl_available": have_cpu,
@@ -180,9 +193,12 @@ def api_costs():
     'other' baseline) and a ranked per-process/service/model breakdown — all over a
     selectable range and tariff-aware. /api/cost (GPU-only) is left untouched.
     With ?host=<name> the same shape is served for a registered remote,
-    integrated over its own host_samples history."""
+    integrated over its own host_samples history. With ?host=all the hub's
+    machines list additionally carries one entry per registered host that has
+    measurable power — the fleet burn view; components/breakdown stay the
+    hub's own."""
     host = (request.args.get("host") or "").strip()
-    if host and host != "local":
+    if host and host not in ("local", "all"):
         return _api_costs_host(_app, host)
     ctx = _app._cost_ctx()
     cur = ctx["currency"]
@@ -255,12 +271,24 @@ def api_costs():
                "cost": cost_win, "cost_range": round(cost_range, 2),
                "measured": measured, "estimated": (["other"] if idle_w else [])}
     machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"][k] for k in machine["energy_kwh"] if k != "total"), 3)
+    machines = [machine]
+    if host == "all":
+        # Fleet mode: one machine per registered host with measurable power,
+        # each integrated over its own host_samples history. Hosts with no
+        # watt source are skipped — the fleet total only sums real numbers.
+        for h in _app.list_hosts():
+            try:
+                hm = _host_machine(_app, ctx, h["name"], since, now, kwh_per)
+                if hm["measured"]:
+                    machines.append(hm)
+            except Exception as e:
+                print(f"fleet cost skip ({h.get('name')}):", e, flush=True)
     return jsonify({
         "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": cur,
         "rapl_available": have_cpu,
         "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
                    "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
-        "machines": [machine], "components": series, "breakdown": breakdown[:40],
+        "machines": machines, "components": series, "breakdown": breakdown[:40],
     })
 
 
@@ -295,9 +323,14 @@ def api_cost_heatmap():
     sum_w = [[0.0] * 24 for _ in range(7)]
     cnt   = [[0]   * 24 for _ in range(7)]
     span_min = span_max = None
+    host = (request.args.get("host") or "").strip()
     try:
         with _app.LOCK:
-            rows = costs_repo.samples_1h_heatmap(since, conn=_app.DB)
+            if host and host != "local":
+                from backend.db.repos import host_samples as hs_repo
+                rows = hs_repo.heatmap(host, since, conn=_app.DB)
+            else:
+                rows = costs_repo.samples_1h_heatmap(since, conn=_app.DB)
         # aggregate OUTSIDE the lock — pure Python, no _app.DB calls below
         for ts, w, row_cnt in rows:
             lt = time.localtime(ts)

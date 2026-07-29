@@ -38,9 +38,6 @@
       "rgpu.procs_title",
       "rgpu.procs_cap",
       "rct.title",
-      "rct.kpi_running",
-      "rct.kpi_problems",
-      "rct.kpi_problems_s",
       "rct.running",
       "rct.unhealthy",
       "rct.restarting",
@@ -55,7 +52,7 @@
       "diag.lbl.nvidia",
       "diag.lbl.dbus"
     ],
-    "coverage": 0.928
+    "coverage": 0.9322
   },
   "nav.group.monitoring": "监控",
   "nav.group.ai": "AI",
@@ -629,9 +626,6 @@
   "rgpu.procs_title": "Processes on the GPU",
   "rgpu.procs_cap": "VRAM per compute process, read on the host. Service attribution and history charts need per-host storage — a later slice.",
   "rct.title": "Containers on {host}",
-  "rct.kpi_running": "Running / total",
-  "rct.kpi_problems": "Problems",
-  "rct.kpi_problems_s": "unhealthy · restarting · non-zero exits",
   "rct.running": "RUNNING",
   "rct.unhealthy": "UNHEALTHY",
   "rct.restarting": "RESTARTING",

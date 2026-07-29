@@ -533,12 +533,26 @@ def _stats_mem_bytes(v):
         return None
 
 
-def read_docker():
+def _pid_container_id(pid):
+    """The 64-hex docker container id a pid runs in, from /proc/<pid>/cgroup —
+    the same signal the hub's service_for_pid uses. None for host processes."""
+    try:
+        with open("/proc/%d/cgroup" % int(pid)) as f:
+            m = re.search(r"[0-9a-f]{64}", f.read())
+        return m.group(0) if m else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_docker(gpu_procs=None):
     """Docker inventory for the per-host Containers tab: `docker ps -a` for the
-    list plus one bounded `docker stats` pass for the running containers' RAM
-    and CPU%. {} when docker is absent or the SSH user can't reach the socket —
-    the Hosts-tab capability check explains which of the two it is. Read-only
-    by design: the probe never starts, stops or inspects beyond `ps`/`stats`."""
+    list, one bounded `docker stats` pass for the running containers' RAM and
+    CPU%, a `docker ps -s` pass for writable-layer disk size, and — when the
+    GPU reader found compute processes — per-container VRAM attribution via
+    each pid's cgroup, mirroring what the hub does locally. {} when docker is
+    absent or the SSH user can't reach the socket — the Hosts-tab capability
+    check explains which of the two it is. Read-only by design: the probe never
+    starts, stops or inspects beyond `ps`/`stats`."""
     try:
         r = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"],
                            capture_output=True, timeout=5)
@@ -554,12 +568,42 @@ def read_docker():
                 continue
             state = (d.get("State") or "").lower()
             conts.append({
+                "id":     (d.get("ID") or "")[:64],
                 "name":   (d.get("Names") or "?").split(",")[0],
                 "image":  d.get("Image") or "",
                 "state":  state,
                 "status": d.get("Status") or "",
                 "ports":  d.get("Ports") or "",
+                "uptime": (d.get("RunningFor") or "").replace(" ago", "") if state == "running" else "",
             })
+        # Writable-layer disk per container ("2.5MB (virtual 1.2GB)" → rw part).
+        # Sizes make the daemon walk layers, so this pass is separate and its
+        # failure only costs the Disk column.
+        try:
+            r3 = subprocess.run(["docker", "ps", "-a", "-s", "--no-trunc",
+                                 "--format", "{{.ID}}\t{{.Size}}"],
+                                capture_output=True, timeout=8)
+            if r3.returncode == 0:
+                sizes = {}
+                for line in r3.stdout.decode("utf-8", "replace").splitlines():
+                    cid, _, sz = line.partition("\t")
+                    b = _stats_mem_bytes(sz)
+                    if b is not None:
+                        sizes[cid.strip()[:64]] = b
+                for c in conts:
+                    if c["id"] in sizes:
+                        c["disk_bytes"] = sizes[c["id"]]
+        except Exception:
+            pass
+        # VRAM per container: the GPU reader's compute pids, mapped through
+        # /proc/<pid>/cgroup to a container id. Host processes simply don't match.
+        if gpu_procs:
+            by_id = {c["id"]: c for c in conts if c["id"]}
+            for p in gpu_procs:
+                cid = _pid_container_id(p.get("pid") or 0)
+                c = by_id.get(cid)
+                if c is not None:
+                    c["vram_mb"] = c.get("vram_mb", 0) + (p.get("mem") or 0)
         running = sum(1 for c in conts if c["state"] == "running")
         if running:
             # One stats pass for RAM/CPU%. `docker stats` blocks ~1.5s to sample;
@@ -1541,7 +1585,7 @@ def main():
             **read_uptime(),
             **read_temp(),
             **gpu_block,
-            **read_docker(),
+            **read_docker(gpu_procs=gpu_block.get("gpu_procs")),
             **read_systemd(),
             **read_os(),
             **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
@@ -1552,7 +1596,7 @@ def main():
         },
         "model_catalog": read_ollama_models(),
         "at": int(time.time()),
-        "probe_version": "0.10",
+        "probe_version": "0.11",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

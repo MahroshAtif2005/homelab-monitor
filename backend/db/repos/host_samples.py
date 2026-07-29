@@ -75,6 +75,16 @@ def total_w_since(host: str, ts: int, conn=None) -> list:
     ).fetchall()
 
 
+def heatmap(host: str, ts: int, conn=None) -> list:
+    """(ts, total_w, cnt) since ts for the busy-hours heatmap, ordered."""
+    c = conn or connection()
+    return c.execute(
+        "SELECT ts, COALESCE(gpu_power,0)+COALESCE(cpu_power,0)+COALESCE(dram_power,0) w, cnt "
+        "FROM host_samples_1h WHERE host=? AND ts>=? ORDER BY ts",
+        (host, ts)
+    ).fetchall()
+
+
 def rename_host(old: str, new: str, conn=None):
     """Follow a host rename so its power history doesn't split."""
     c = conn or connection()
