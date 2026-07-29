@@ -82,9 +82,9 @@
   },
   "update": {
     "available": false,
-    "current": "0.27.0",
+    "current": "0.27.1",
     "self_update_enabled": true
   },
   "updated": 1735689600,
-  "version": "0.27.0"
+  "version": "0.27.1"
 }
