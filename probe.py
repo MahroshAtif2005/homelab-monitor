@@ -519,6 +519,132 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
     return cards
 
 
+_MEM_UNITS = {"b": 1, "kb": 1000, "kib": 1024, "mb": 1000**2, "mib": 1024**2,
+              "gb": 1000**3, "gib": 1024**3, "tb": 1000**4, "tib": 1024**4}
+
+def _stats_mem_bytes(v):
+    """'1.552GiB / 62.72GiB' (docker stats MemUsage) → used bytes, or None."""
+    m = re.match(r"\s*([\d.]+)\s*([KMGT]i?B|B)", (v or ""), re.I)
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * _MEM_UNITS[m.group(2).lower()])
+    except (ValueError, KeyError):
+        return None
+
+
+def _pid_container_id(pid):
+    """The 64-hex docker container id a pid runs in, from /proc/<pid>/cgroup —
+    the same signal the hub's service_for_pid uses. None for host processes."""
+    try:
+        with open("/proc/%d/cgroup" % int(pid)) as f:
+            m = re.search(r"[0-9a-f]{64}", f.read())
+        return m.group(0) if m else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_docker(gpu_procs=None):
+    """Docker inventory for the per-host Containers tab: `docker ps -a` for the
+    list, one bounded `docker stats` pass for the running containers' RAM and
+    CPU%, a `docker ps -s` pass for writable-layer disk size, and — when the
+    GPU reader found compute processes — per-container VRAM attribution via
+    each pid's cgroup, mirroring what the hub does locally. {} when docker is
+    absent or the SSH user can't reach the socket — the Hosts-tab capability
+    check explains which of the two it is. Read-only by design: the probe never
+    starts, stops or inspects beyond `ps`/`stats`."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"],
+                           capture_output=True, timeout=5)
+        if r.returncode != 0:
+            return {}
+        conts = []
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            state = (d.get("State") or "").lower()
+            conts.append({
+                "id":     (d.get("ID") or "")[:64],
+                "name":   (d.get("Names") or "?").split(",")[0],
+                "image":  d.get("Image") or "",
+                "state":  state,
+                "status": d.get("Status") or "",
+                "ports":  d.get("Ports") or "",
+                "uptime": (d.get("RunningFor") or "").replace(" ago", "") if state == "running" else "",
+            })
+        # Writable-layer disk per container ("2.5MB (virtual 1.2GB)" → rw part).
+        # Sizes make the daemon walk layers, so this pass is separate and its
+        # failure only costs the Disk column.
+        try:
+            r3 = subprocess.run(["docker", "ps", "-a", "-s", "--no-trunc",
+                                 "--format", "{{.ID}}\t{{.Size}}"],
+                                capture_output=True, timeout=8)
+            if r3.returncode == 0:
+                sizes = {}
+                for line in r3.stdout.decode("utf-8", "replace").splitlines():
+                    cid, _, sz = line.partition("\t")
+                    b = _stats_mem_bytes(sz)
+                    if b is not None:
+                        sizes[cid.strip()[:64]] = b
+                for c in conts:
+                    if c["id"] in sizes:
+                        c["disk_bytes"] = sizes[c["id"]]
+        except Exception:
+            pass
+        # VRAM per container: the GPU reader's compute pids, mapped through
+        # /proc/<pid>/cgroup to a container id. Host processes simply don't match.
+        if gpu_procs:
+            by_id = {c["id"]: c for c in conts if c["id"]}
+            for p in gpu_procs:
+                cid = _pid_container_id(p.get("pid") or 0)
+                c = by_id.get(cid)
+                if c is not None:
+                    c["vram_mb"] = c.get("vram_mb", 0) + (p.get("mem") or 0)
+        running = sum(1 for c in conts if c["state"] == "running")
+        if running:
+            # One stats pass for RAM/CPU%. `docker stats` blocks ~1.5s to sample;
+            # a wedged daemon must not sink the whole probe, so degrade silently.
+            try:
+                r2 = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}"],
+                                    capture_output=True, timeout=8)
+                if r2.returncode == 0:
+                    stats = {}
+                    for line in r2.stdout.decode("utf-8", "replace").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            s = json.loads(line)
+                        except ValueError:
+                            continue
+                        stats[s.get("Name")] = s
+                    for c in conts:
+                        s = stats.get(c["name"])
+                        if not s:
+                            continue
+                        mb = _stats_mem_bytes(s.get("MemUsage"))
+                        if mb is not None:
+                            c["mem_bytes"] = mb
+                        try:
+                            c["cpu_pct"] = float((s.get("CPUPerc") or "").rstrip("%"))
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        problems = sum(1 for c in conts
+                       if "unhealthy" in c["status"].lower()
+                       or c["state"] == "restarting"
+                       or (c["state"] == "exited" and not re.search(r"Exited \(0\)", c["status"])))
+        return {"docker": {"available": True, "containers": conts,
+                           "summary": {"total": len(conts), "running": running,
+                                       "problems": problems}}}
+    except Exception:
+        return {}
+
+
 def read_gpu():
     """All of a host's GPUs for the hub. `gpus` is the per-card list (NVIDIA via
     nvidia-smi, AMD via the amdgpu sysfs interface — no ROCm needed; a hybrid
@@ -1420,31 +1546,41 @@ def read_ollama_models():
             return None
 
     hostname = socket.gethostname()
-    out = []
+    # Resident set first (/api/ps): name -> live VRAM MB.
+    loaded = {}
     ps = _http_json("/api/ps")
     for m in (ps or {}).get("models", []) if isinstance(ps, dict) else []:
         name = m.get("name")
         if not name:
             continue
         vram = m.get("size_vram") or 0
-        out.append({
-            "host": hostname, "service": "ollama", "provider": "ollama",
-            "model": name, "loaded": True,
-            "vram_mb": round(vram / 1048576) if vram else None,
-        })
-    if out:
-        return out
-    # Nothing loaded right now -- fall back to the on-disk catalogue so the
-    # server still shows up as Idle rather than vanishing entirely.
+        loaded[name] = round(vram / 1048576) if vram else None
+    # Full on-disk catalogue (/api/tags) with registry detail, cross-referenced
+    # with the resident set — previously a loaded model SUPPRESSED the
+    # catalogue (ps-then-tags fallback), so a busy host's registry went thin
+    # exactly when it was interesting.
+    out = []
     tags = _http_json("/api/tags")
     for m in (tags or {}).get("models", []) if isinstance(tags, dict) else []:
         name = m.get("name")
         if not name:
             continue
+        det = m.get("details") or {}
         out.append({
             "host": hostname, "service": "ollama", "provider": "ollama",
-            "model": name, "loaded": False, "vram_mb": None,
+            "model": name, "loaded": name in loaded, "vram_mb": loaded.get(name),
+            "size_bytes": m.get("size"), "family": det.get("family"),
+            "param_size": det.get("parameter_size"),
+            "quant": det.get("quantization_level"),
+            "modified": m.get("modified_at"),
         })
+    # A model can be resident without appearing on disk (deleted while loaded,
+    # pulled through another path) — keep it visible rather than vanishing.
+    known = {m["model"] for m in out}
+    for name, vram in loaded.items():
+        if name not in known:
+            out.append({"host": hostname, "service": "ollama", "provider": "ollama",
+                        "model": name, "loaded": True, "vram_mb": vram})
     return out
 
 
@@ -1459,6 +1595,7 @@ def main():
             **read_uptime(),
             **read_temp(),
             **gpu_block,
+            **read_docker(gpu_procs=gpu_block.get("gpu_procs")),
             **read_systemd(),
             **read_os(),
             **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
@@ -1469,7 +1606,7 @@ def main():
         },
         "model_catalog": read_ollama_models(),
         "at": int(time.time()),
-        "probe_version": "0.9",
+        "probe_version": "0.12",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

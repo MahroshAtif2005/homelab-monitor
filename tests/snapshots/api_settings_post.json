@@ -35,5 +35,5 @@
     "telegram_token_set": false,
     "webhook_url_set": false
   },
-  "version": "0.27.0"
+  "version": "0.27.1"
 }
