@@ -5641,20 +5641,30 @@ def _merge_registry(ollama_models, catalog):
     (name/provider/loaded/vram — no on-disk size, most catalogue APIs don't expose
     one). Entries missing a model name are skipped."""
     out = [dict(m, provider="ollama", host="local") for m in ollama_models]
-    seen = {(m["name"], m["provider"]) for m in out}
+    seen = {(m["name"], m["provider"], "local") for m in out}
+    hub = socket.gethostname()
     for c in catalog or []:
         name = c.get("model")
         provider = c.get("provider") or "other"
-        if not name or provider == "ollama":
+        chost = c.get("host") or "local"
+        # The hub's OWN ollama is covered by the richer disk registry above —
+        # drop only those duplicates. A REMOTE host's ollama models arrive
+        # through this catalog and MUST pass through: dropping every
+        # provider=='ollama' entry (as this did originally) silently blinded
+        # the fleet registry to exactly the hosts #236 set out to cover.
+        if not name or (provider == "ollama" and chost in ("local", hub)):
             continue
-        key = (name, provider, c.get("host") or "local")
+        key = (name, provider, chost)
         if key in seen:
             continue
         seen.add(key)
+        size = c.get("size_bytes")
         out.append({
-            "name": name, "provider": provider, "host": c.get("host") or "local",
-            "size_bytes": None, "size_gb": None, "family": None,
-            "param_size": None, "quant": None, "modified": None,
+            "name": name, "provider": provider, "host": chost,
+            "size_bytes": size,
+            "size_gb": round(size / 1073741824, 2) if size else None,
+            "family": c.get("family"), "param_size": c.get("param_size"),
+            "quant": c.get("quant"), "modified": c.get("modified"),
             "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),
         })
     return out

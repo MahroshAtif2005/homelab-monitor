@@ -7350,11 +7350,18 @@ function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
   if(tabId === 'gpu' || tabId === 'models'){
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
-    // NVIDIA with a working nvidia-smi → the full per-host view is the next slice.
+    // Working nvidia-smi but no per-host data (yet): for GPU that means an
+    // older probe still polling; for Models it means the host reported no AI
+    // models — the probe reads ollama on the host itself.
     if(nv && nv.status === 'ok'){
+      if(tabId === 'models'){
+        return {ic:'🤖',
+          title:`No AI models reported on ${CURRENT_HOST} yet`,
+          detail:`The probe reads the host's own ollama (127.0.0.1:11434) each poll — if ollama runs there, its models appear within seconds. Other AI servers (vLLM, llama.cpp, …) on remote hosts land in a later probe slice.`};
+      }
       return {ic:'🛠️',
-        title:`Per-host ${tabId.toUpperCase()} view is on the way`,
-        detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')}, but per-host VRAM and process attribution lands in the next slice. For now, switch to <b>Local</b> to see the hub's ${tabId.toUpperCase()} view.`};
+        title:`Waiting for ${CURRENT_HOST}'s per-GPU data`,
+        detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')} — a probe that ships the per-card list reports on the next poll (~10s).`};
     }
     // The probe may have captured a GPU even when nvidia-smi isn't available:
     // an AMD / Intel card via the Windows probe, or an NVIDIA card whose
@@ -7561,6 +7568,56 @@ function renderRemoteContainers(sec, rc){
   applyIcons(box);
 }
 
+// ── Per-host AI Models (remote hosts) ────────────────────────────────────────
+// The registry (/api/models) is fleet-aware: each remote's probe ships its
+// ollama catalogue cross-referenced with what's resident right now. This
+// panel shows the host's LOADED models with live VRAM, and keeps the
+// Installed-models registry card visible below (it's grouped by host). Other
+// AI servers on remotes (vLLM, llama.cpp…) are a later probe slice.
+let RMODELS_AT=0, RMODELS_HOST=null;
+async function maybeRenderRemoteModels(sec){
+  const host = CURRENT_HOST;
+  if(Date.now()-RMODELS_AT<15000 && RMODELS_HOST===host) return;
+  RMODELS_AT=Date.now(); RMODELS_HOST=host;
+  let j; try{ j=await(await fetch('/api/models')).json(); }catch(e){ return; }
+  if(host!==CURRENT_HOST || TAB!=='models') return;      // switched mid-fetch
+  const mine=(j.models||[]).filter(m=>m.host===host);
+  const old=sec.querySelector('.remote-models');
+  if(!mine.length){
+    if(old){ old.remove(); renderLocalOnlyNotice('models'); }
+    return;
+  }
+  const n=sec.querySelector('.scope-notice'); if(n) n.remove();
+  let box=old;
+  if(!box){ box=document.createElement('div'); box.className='remote-models'; sec.insertBefore(box, sec.firstChild); }
+  const reg=document.getElementById('registry-card');
+  if(reg) reg.style.display='';
+  const loadedM=mine.filter(m=>m.loaded);
+  const g=hostGpu(host)||{};
+  const cap=g.mem_total||0;
+  const committed=loadedM.reduce((a,m)=>a+(m.vram_mb||0),0);
+  const kpis=[
+    {v:String(loadedM.length), l:I18N.t('rmod.loaded','Loaded now'), s:I18N.tf('rmod.of_installed','of {n} installed',{n:mine.length})},
+    {v:fmtMB(committed), l:I18N.t('rmod.vram_committed','VRAM committed'),
+     s:cap?I18N.tf('gpu.pct_full','{n}% full',{n:Math.round(committed/cap*100)})+' · '+fmtMB(cap):''},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
+  const rows = loadedM.map(m=>{
+    const pct=cap?Math.round((m.vram_mb||0)/cap*100):0;
+    const det=[m.param_size, m.quant].filter(Boolean).join(' · ');
+    return `<tr><td><span class="dot" style="background:${colorFor(m.name)}"></span>${copyable(m.name)}${det?` <span class="muted">${esc(det)}</span>`:''}</td>
+      <td>${m.vram_mb!=null?fmtMB(m.vram_mb):'—'}</td>
+      <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
+  }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
+  box.innerHTML =
+    `<div class="card"><h2>🤖 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+      <table style="margin-top:12px"><tbody>${rows}</tbody></table>
+      <p class="cap">${I18N.t('rmod.cap','Read from the host\'s ollama (resident set + live VRAM). Other AI servers on remotes and the per-model VRAM timeline are a later slice.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
 function renderLocalOnlyNotice(tabId){
   if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
@@ -7584,7 +7641,11 @@ function renderLocalOnlyNotice(tabId){
       return;
     }
   }
-  sec.querySelectorAll('.remote-gpu, .remote-ct').forEach(el => el.remove());
+  if(tabId === 'models'){
+    maybeRenderRemoteModels(sec);                       // async — paints when data lands
+    if(sec.querySelector('.remote-models')) return;     // panel already up: keep it
+  }
+  sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');
@@ -7600,7 +7661,7 @@ function clearLocalOnlyNotice(tabId){
   if(!sec) return;
   const n = sec.querySelector('.scope-notice');
   if(n) n.remove();
-  sec.querySelectorAll('.remote-gpu, .remote-ct').forEach(el => el.remove());
+  sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
 }
 // Re-apply notices on host switch — necessary so that when the user
@@ -8079,7 +8140,7 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
-  if((TAB==='gpu'||TAB==='containers') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
+  if((TAB==='gpu'||TAB==='containers'||TAB==='models') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{

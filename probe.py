@@ -1546,31 +1546,41 @@ def read_ollama_models():
             return None
 
     hostname = socket.gethostname()
-    out = []
+    # Resident set first (/api/ps): name -> live VRAM MB.
+    loaded = {}
     ps = _http_json("/api/ps")
     for m in (ps or {}).get("models", []) if isinstance(ps, dict) else []:
         name = m.get("name")
         if not name:
             continue
         vram = m.get("size_vram") or 0
-        out.append({
-            "host": hostname, "service": "ollama", "provider": "ollama",
-            "model": name, "loaded": True,
-            "vram_mb": round(vram / 1048576) if vram else None,
-        })
-    if out:
-        return out
-    # Nothing loaded right now -- fall back to the on-disk catalogue so the
-    # server still shows up as Idle rather than vanishing entirely.
+        loaded[name] = round(vram / 1048576) if vram else None
+    # Full on-disk catalogue (/api/tags) with registry detail, cross-referenced
+    # with the resident set — previously a loaded model SUPPRESSED the
+    # catalogue (ps-then-tags fallback), so a busy host's registry went thin
+    # exactly when it was interesting.
+    out = []
     tags = _http_json("/api/tags")
     for m in (tags or {}).get("models", []) if isinstance(tags, dict) else []:
         name = m.get("name")
         if not name:
             continue
+        det = m.get("details") or {}
         out.append({
             "host": hostname, "service": "ollama", "provider": "ollama",
-            "model": name, "loaded": False, "vram_mb": None,
+            "model": name, "loaded": name in loaded, "vram_mb": loaded.get(name),
+            "size_bytes": m.get("size"), "family": det.get("family"),
+            "param_size": det.get("parameter_size"),
+            "quant": det.get("quantization_level"),
+            "modified": m.get("modified_at"),
         })
+    # A model can be resident without appearing on disk (deleted while loaded,
+    # pulled through another path) — keep it visible rather than vanishing.
+    known = {m["model"] for m in out}
+    for name, vram in loaded.items():
+        if name not in known:
+            out.append({"host": hostname, "service": "ollama", "provider": "ollama",
+                        "model": name, "loaded": True, "vram_mb": vram})
     return out
 
 
@@ -1596,7 +1606,7 @@ def main():
         },
         "model_catalog": read_ollama_models(),
         "at": int(time.time()),
-        "probe_version": "0.11",
+        "probe_version": "0.12",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
