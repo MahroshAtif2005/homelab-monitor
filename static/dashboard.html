@@ -6437,8 +6437,13 @@ function mcPaintBurn($, cost, machine, measured, cur, g, host){
     // hub-only view — same wattage source, same math.
     const machines = (cost.machines||[]).length ? cost.machines : [machine];
     const remotes = machines.slice(1);
-    const hubW = metering==='gpu' ? (nowW.gpu||0) : (nowW.cpu||0);
-    const remW = remotes.reduce((a,m)=>a+((m.now_w&&m.now_w.total)||0),0);
+    // Apples-to-apples: in fleet mode every box contributes the sum of its
+    // MEASURED components (gpu+cpu+dram — never the idle estimate); hub-only
+    // keeps the original single-component figure so the lone-box number
+    // doesn't shift under anyone.
+    const mSum = m => ((m.now_w&&m.now_w.gpu)||0)+((m.now_w&&m.now_w.cpu)||0)+((m.now_w&&m.now_w.dram)||0);
+    const hubW = remotes.length ? mSum(machine) : (metering==='gpu' ? (nowW.gpu||0) : (nowW.cpu||0));
+    const remW = remotes.reduce((a,m)=>a+mSum(m),0);
     const watt = hubW + remW;
     const price = (cost.tariff && cost.tariff.price_day) || 0;
     const rate = price>0 ? watt/1000*price : 0;
