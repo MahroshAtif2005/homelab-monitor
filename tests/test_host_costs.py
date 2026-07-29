@@ -52,9 +52,12 @@ class TestHostSamplesRepo(unittest.TestCase):
             row = app.DB.execute(
                 "SELECT gpu_power, cpu_power, cnt FROM host_samples_1h WHERE host='t1'"
             ).fetchone()
-        # NULL polls must not drag the mean toward zero; a never-reported
-        # sensor stays NULL so the API can distinguish "absent" from "0 W".
-        self.assertAlmostEqual(row[0], 100.0)
+        # Energy math reads avg*cnt, so a tick where the sensor didn't report
+        # must count as 0 in the mean for the reconstructed sum to be honest:
+        # (NULL, 100) over 2 ticks → avg 50, avg*cnt = 100 W-ticks. A sensor
+        # that NEVER reports stays NULL, so "absent" is still distinct from
+        # "0 W" — that's what `measured` keys off.
+        self.assertAlmostEqual(row[0], 50.0)
         self.assertIsNone(row[1])
         self.assertEqual(row[2], 2)
 
