@@ -7592,6 +7592,8 @@ async function maybeRenderRemoteModels(sec){
   if(!box){ box=document.createElement('div'); box.className='remote-models'; sec.insertBefore(box, sec.firstChild); }
   const reg=document.getElementById('registry-card');
   if(reg) reg.style.display='';
+  const mb=document.getElementById('modelsbody');
+  if(mb) mb.style.display='none';
   const loadedM=mine.filter(m=>m.loaded);
   const g=hostGpu(host)||{};
   const cap=g.mem_total||0;
@@ -7643,7 +7645,15 @@ function renderLocalOnlyNotice(tabId){
   }
   if(tabId === 'models'){
     maybeRenderRemoteModels(sec);                       // async — paints when data lands
-    if(sec.querySelector('.remote-models')) return;     // panel already up: keep it
+    // The hub-local models body never applies to a remote host; the
+    // fleet-aware registry card below the panel always does.
+    const mb=document.getElementById('modelsbody');
+    if(mb) mb.style.display='none';
+    if(sec.querySelector('.remote-models')){            // panel already up: keep it,
+      const reg=document.getElementById('registry-card');
+      if(reg) reg.style.display='';                     // and undo this call's hide-all on the registry
+      return;
+    }
   }
   sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   let notice = sec.querySelector('.scope-notice');
@@ -7663,6 +7673,8 @@ function clearLocalOnlyNotice(tabId){
   if(n) n.remove();
   sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
+  const mb=document.getElementById('modelsbody');
+  if(mb && tabId==='models') mb.style.display='';
 }
 // Re-apply notices on host switch — necessary so that when the user
 // switches from Local→remote while currently *on* a local-only tab, the
