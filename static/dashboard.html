@@ -3455,7 +3455,7 @@ async function renderCost(){
 }
 
 // ── Costs page: per-machine → per-component → per-process, with drilldown ──────
-let COSTS_SORT={key:'energy_kwh',dir:-1}, COSTS_DATA=null, COSTS_AT=0;
+let COSTS_SORT={key:'energy_kwh',dir:-1}, COSTS_DATA=null, COSTS_AT=0, COSTS_HOST=null;
 // ── Busy-hours heatmap: 7×24 day-of-week × hour grid coloured by cost-rate ─────
 // Reads /api/cost/heatmap (own window, default 30d). Colour scales by cost/hour when
 // a tariff is set, else by avg W. Always a <table> so screen readers / no-CSS get
@@ -3472,12 +3472,15 @@ function heatColor(t){            // t in [0,1] -> blend --heat-lo → --heat-mi
 }
 async function renderHeatmap(force){
   const card=document.getElementById('heatmap-card'); if(!card) return;
-  if(CURRENT_HOST!=='local'){ card.hidden=true; return; }
-  if(!force && Date.now()-HEAT_AT<20000 && card.dataset.loaded) return;
+  // Per-host too: the same 7×24 grid computed from the host's own poll history.
+  const hmHost = CURRENT_HOST!=='local' ? CURRENT_HOST : null;
+  if(!force && Date.now()-HEAT_AT<20000 && card.dataset.loaded===(hmHost||'local')) return;
   HEAT_AT=Date.now();
-  let j; try{ j=await(await fetch('/api/cost/heatmap?days=30')).json(); }catch(e){ card.hidden=true; return; }
+  let j; try{ j=await(await fetch('/api/cost/heatmap?days=30'
+    +(hmHost?'&host='+encodeURIComponent(hmHost):''))).json(); }catch(e){ card.hidden=true; return; }
+  if((hmHost||'local')!==(CURRENT_HOST!=='local'?CURRENT_HOST:'local')) return;   // switched mid-fetch
   if(!j||!j.ok){ card.hidden=true; return; }
-  card.hidden=false; card.dataset.loaded='1';
+  card.hidden=false; card.dataset.loaded=hmHost||'local';
   const collecting=document.getElementById('heat-collecting'), body=document.getElementById('heat-body');
   const modeEl=document.getElementById('heat-mode-chip');
   const byCost=!!j.enabled, cur=j.currency||'$';
@@ -3530,12 +3533,16 @@ async function renderHeatmap(force){
 
 async function renderCosts(force){
   const card=document.getElementById('costs-card'); if(!card) return;
-  if(CURRENT_HOST!=='local'){ renderLocalOnlyNotice('costs'); return; }
-  clearLocalOnlyNotice('costs');
-  renderHeatmap(force);   // busy-hours heatmap renders even with no tariff (power-only)
-  if(!force && Date.now()-COSTS_AT < 20000) return;   // throttle live refresh
-  COSTS_AT=Date.now();
-  let j; try{ j=await(await fetch('/api/costs?range='+encodeURIComponent(R))).json(); }catch(e){ card.hidden=true; return; }
+  // Per-host mode: the same /api/costs shape served for a registered remote,
+  // integrated over that host's own poll history (host_samples). Heatmap,
+  // per-entity breakdown and drilldown stay hub-only for now.
+  const remote = CURRENT_HOST!=='local' ? CURRENT_HOST : null;
+  renderHeatmap(force);   // busy-hours heatmap renders even with no tariff (power-only) — per-host too
+  if(!force && Date.now()-COSTS_AT < 20000 && COSTS_HOST===CURRENT_HOST) return;   // throttle live refresh
+  COSTS_AT=Date.now(); COSTS_HOST=CURRENT_HOST;
+  let j; try{ j=await(await fetch('/api/costs?range='+encodeURIComponent(R)
+    +(remote?'&host='+encodeURIComponent(remote):''))).json(); }catch(e){ card.hidden=true; return; }
+  if((remote||'local')!==CURRENT_HOST) return;   // host switched while fetching
   card.hidden=false;
   const dis=document.getElementById('costs-disabled'), body=document.getElementById('costs-body');
   const bcard=document.getElementById('costs-breakdown-card');
@@ -3546,10 +3553,27 @@ async function renderCosts(force){
     return;
   }
   dis.hidden=true; body.hidden=false; COSTS_DATA=j;
+  if(remote) document.getElementById('costs-drill').hidden=true;
   const cur=j.currency||'$', money=v=>cur+(+v||0).toFixed(2);
   const m=(j.machines||[])[0]||{}, nowW=m.now_w||{};
+  // A remote whose probe ships no power source at all (no NVIDIA power, RAPL
+  // unreadable over SSH) has nothing to price — say so instead of a 0.00 wall.
+  if(remote && !(m.measured||[]).length){
+    document.getElementById('costs-kpis').innerHTML='';
+    body.hidden=true;
+    let n=card.querySelector('.rcost-none');
+    if(!n){ n=document.createElement('div'); n.className='ins info rcost-none'; card.appendChild(n); }
+    n.innerHTML=`<div class="ic">ℹ️</div><div><div class="t">${I18N.tf('cost.rnone_t','No measurable power on {host} yet',{host:esc(remote)})}</div>`+
+      `<div class="d">${I18N.t('cost.rnone_d','Costs need a measured watt source: NVIDIA GPU power (nvidia-smi) or CPU/DRAM via RAPL — which usually needs root to read over SSH. This host reports neither, so there is nothing honest to price.')}</div></div>`;
+    if(bcard) bcard.hidden=true;
+    return;
+  }
+  const stale=card.querySelector('.rcost-none'); if(stale) stale.remove();
   const sub=document.getElementById('costs-sub');
-  if(sub) sub.textContent = j.rapl_available ? I18N.t('cost.sub_rapl','· GPU + CPU package measured') : I18N.t('cost.sub_norapl','· GPU measured · CPU power unavailable (RAPL)');
+  if(sub) sub.textContent = remote
+    ? I18N.tf('cost.sub_host','· {host}: {parts} measured · no per-process breakdown on remotes yet',
+        {host:remote, parts:(m.measured||[]).map(x=>x.toUpperCase()).join(' + ')})
+    : (j.rapl_available ? I18N.t('cost.sub_rapl','· GPU + CPU package measured') : I18N.t('cost.sub_norapl','· GPU measured · CPU power unavailable (RAPL)'));
   document.getElementById('costs-kpis').innerHTML=[
     {v:(nowW.total||0)+' W', l:I18N.t('cost.total_now','Total draw now'), s:[nowW.gpu!=null?'gpu '+nowW.gpu+'W':'', nowW.cpu!=null?'cpu '+nowW.cpu+'W':''].filter(Boolean).join(' · ')},
     {v:money(m.cost&&m.cost.today), l:I18N.t('cost.today','Cost today'), s:(m.cost_range!=null?I18N.tf('cost.this_range','{v} this range',{v:money(m.cost_range)}):'')},
@@ -5496,7 +5520,7 @@ async function deleteHost(name){
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
 const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','costs','containers']);  // tabs not yet probed per-host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','containers']);  // tabs not yet probed per-host (costs went per-host)
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -5584,6 +5608,7 @@ function refreshCurrentTab(){
   if(TAB === 'network')   { renderNetwork(); return; }
   if(TAB === 'security')  { renderSecurity(); return; }
   if(TAB === 'services')  { renderServicesTab(); return; }
+  if(TAB === 'costs')     { renderCosts(true); return; }
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 
@@ -5911,7 +5936,7 @@ let MC_CHART_SIG='';
 async function refreshMcCost(){
   if(Date.now()-MC_COST_AT < 30000 && MC_COST!==null) return;
   MC_COST_AT=Date.now();
-  try{ MC_COST = await (await fetch('/api/costs?range=7d')).json(); }catch(e){ MC_COST=null; }
+  try{ MC_COST = await (await fetch('/api/costs?range=7d&host=all')).json(); }catch(e){ MC_COST=null; }
 }
 function mcCountUp(el, target, dur, dec){
   if(!el) return; target = (+target)||0; dec = dec==null?2:dec;
@@ -6405,23 +6430,46 @@ function mcPaintBurn($, cost, machine, measured, cur, g, host){
     $('mc-burn-proj').innerHTML=I18N.tf('mc.est_proj','from <span class="mono">~{w} W</span> TDP estimate',{w:watt});
     $('mc-u1').textContent=$('mc-u2').textContent=$('mc-u3').textContent=cur+' est';
   } else {
-    const watt = metering==='gpu' ? (nowW.gpu||0) : (nowW.cpu||0);
+    // Fleet-aware: /api/costs?host=all returns one machine per box with
+    // measurable power (hub first). The hero figure is the whole fleet's
+    // burn; the projection line splits hub vs remotes so the number stays
+    // explainable. With no measurable remotes this reduces to the old
+    // hub-only view — same wattage source, same math.
+    const machines = (cost.machines||[]).length ? cost.machines : [machine];
+    const remotes = machines.slice(1);
+    // Apples-to-apples: in fleet mode every box contributes the sum of its
+    // MEASURED components (gpu+cpu+dram — never the idle estimate); hub-only
+    // keeps the original single-component figure so the lone-box number
+    // doesn't shift under anyone.
+    const mSum = m => ((m.now_w&&m.now_w.gpu)||0)+((m.now_w&&m.now_w.cpu)||0)+((m.now_w&&m.now_w.dram)||0);
+    const hubW = remotes.length ? mSum(machine) : (metering==='gpu' ? (nowW.gpu||0) : (nowW.cpu||0));
+    const remW = remotes.reduce((a,m)=>a+mSum(m),0);
+    const watt = hubW + remW;
     const price = (cost.tariff && cost.tariff.price_day) || 0;
     const rate = price>0 ? watt/1000*price : 0;
     $('mc-burn-title').textContent=I18N.t('mc.burn','Burn Rate');
     $('mc-burn-src').textContent = (metering==='gpu' ? I18N.t('mc.gpu_metered','GPU energy · metered') : I18N.t('mc.cpu_rapl','CPU package · RAPL')) + (tariffNote?' · '+tariffNote:'');
+    const scope=$('mc-burn-scope');
+    if(scope){ scope.textContent = remotes.length ? I18N.tf('mc.scope_fleet','fleet · {n} boxes',{n:machines.length}) : I18N.t('mc.scope_hub','hub');
+               scope.title = remotes.length ? I18N.t('mc.scope_fleet_t','Every box with measurable power, priced from its own poll history') : I18N.t('mc.scope_hub_t','Power metering runs on the hub'); }
     $('mc-burn-lbl').textContent=I18N.t('mc.spending_now','Spending right now');
     num.classList.remove('mc-muted');
     mcCountUp(num, rate, 1400, 3);
     $('mc-burn-unit').textContent=cur+'/h';
     const proj=(rate*24*30.4).toFixed(2);
-    $('mc-burn-proj').innerHTML=I18N.tf('mc.proj','at this rate ≈ <b>{v} {cur}</b> / month · <span class="mono">{w} W</span>',{v:proj,cur,w:watt});
+    $('mc-burn-proj').innerHTML = remotes.length
+      ? I18N.tf('mc.proj_fleet','at this rate ≈ <b>{v} {cur}</b> / month · <span class="mono">{hw} W</span> hub + <span class="mono">{rw} W</span> fleet',{v:proj,cur,hw:hubW,rw:remW})
+      : I18N.tf('mc.proj','at this rate ≈ <b>{v} {cur}</b> / month · <span class="mono">{w} W</span>',{v:proj,cur,w:watt});
     $('mc-u1').textContent=$('mc-u2').textContent=$('mc-u3').textContent=cur;
   }
   const dec = metering==='none' ? 2 : 2;
-  mcCountUp($('mc-c-today'), c.today||0, 1100, dec);
-  mcCountUp($('mc-c-d7'),    c.d7||0,    1100, dec);
-  mcCountUp($('mc-c-d30'),   c.d30||0,   1100, dec);
+  // Cost windows: summed across every machine in the response (fleet), which
+  // is just the hub when nothing else is measurable.
+  const wins = (cost.machines||[machine]).reduce((a,m)=>{const mc=m.cost||{};
+    a.today+=mc.today||0; a.d7+=mc.d7||0; a.d30+=mc.d30||0; return a;}, {today:0,d7:0,d30:0});
+  mcCountUp($('mc-c-today'), (cost.machines||[]).length>1 ? wins.today : (c.today||0), 1100, dec);
+  mcCountUp($('mc-c-d7'),    (cost.machines||[]).length>1 ? wins.d7    : (c.d7||0),    1100, dec);
+  mcCountUp($('mc-c-d30'),   (cost.machines||[]).length>1 ? wins.d30   : (c.d30||0),   1100, dec);
 }
 function mcPaintLeaderboard($, cost, machine, measured, cur){
   const lead=$('mc-lead');
@@ -7302,11 +7350,18 @@ function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
   if(tabId === 'gpu' || tabId === 'models'){
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
-    // NVIDIA with a working nvidia-smi → the full per-host view is the next slice.
+    // Working nvidia-smi but no per-host data (yet): for GPU that means an
+    // older probe still polling; for Models it means the host reported no AI
+    // models — the probe reads ollama on the host itself.
     if(nv && nv.status === 'ok'){
+      if(tabId === 'models'){
+        return {ic:'🤖',
+          title:`No AI models reported on ${CURRENT_HOST} yet`,
+          detail:`The probe reads the host's own ollama (127.0.0.1:11434) each poll — if ollama runs there, its models appear within seconds. Other AI servers (vLLM, llama.cpp, …) on remote hosts land in a later probe slice.`};
+      }
       return {ic:'🛠️',
-        title:`Per-host ${tabId.toUpperCase()} view is on the way`,
-        detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')}, but per-host VRAM and process attribution lands in the next slice. For now, switch to <b>Local</b> to see the hub's ${tabId.toUpperCase()} view.`};
+        title:`Waiting for ${CURRENT_HOST}'s per-GPU data`,
+        detail:`${CURRENT_HOST} has ${esc(nv.detail || 'a GPU')} — a probe that ships the per-card list reports on the next poll (~10s).`};
     }
     // The probe may have captured a GPU even when nvidia-smi isn't available:
     // an AMD / Intel card via the Windows probe, or an NVIDIA card whose
@@ -7363,8 +7418,8 @@ function describeMissingCapability(tabId){
     }
     if(dk && dk.status === 'ok'){
       return {ic:'🛠️',
-        title:`Per-host Containers view is on the way`,
-        detail:`${CURRENT_HOST} has Docker (server ${esc(dk.detail||'')}), but the per-host container table lands in the next slice. Meanwhile, switch to <b>Local</b> to see the hub's containers.`};
+        title:`Waiting for ${CURRENT_HOST}'s container inventory`,
+        detail:`${CURRENT_HOST} has Docker (server ${esc(dk.detail||'')}). Linux hosts ship their container list on the next poll (~10s); Windows hosts don't ship one yet — that probe slice is still to come.`};
     }
     return {ic:'⏳',
       title:`Docker info not yet probed for ${CURRENT_HOST}`,
@@ -7442,6 +7497,129 @@ function renderRemoteGpu(sec, rg){
   applyIcons(box);
 }
 
+// ── Per-host Containers (remote hosts) ───────────────────────────────────────
+// Newer probes ship the host's `docker ps` (+ one stats pass for RAM/CPU%) as
+// host.docker, so the Containers tab shows a real read-only inventory for a
+// remote. Same FLEET-driven pattern as the per-host GPU view. Logs and
+// start/stop controls stay hub-only — the probe is read-only by design.
+function remoteContainersData(){
+  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === CURRENT_HOST);
+  const dk = h && h.host && h.host.docker;
+  if(!dk || !dk.available || !Array.isArray(dk.containers)) return null;
+  return {containers: dk.containers, summary: dk.summary||{}, at: h.at, online: h.online};
+}
+function _rctBadge(c){
+  const st = (c.state||''), tx = (c.status||'');
+  if(st==='running') return /unhealthy/i.test(tx) ? ['crit', I18N.t('rct.unhealthy','UNHEALTHY')]
+                                                  : ['ok', I18N.t('rct.running','RUNNING')];
+  if(st==='restarting') return ['warn', I18N.t('rct.restarting','RESTARTING')];
+  if(st==='exited') return /Exited \(0\)/.test(tx) ? ['info', I18N.t('rct.stopped','STOPPED')]
+                                                   : ['warn', I18N.t('rct.exited','EXITED')];
+  return ['info', esc(st.toUpperCase()||'?')];
+}
+function renderRemoteContainers(sec, rc){
+  let box = sec.querySelector('.remote-ct');
+  if(!box){
+    box = document.createElement('div');
+    box.className = 'remote-ct';
+    sec.insertBefore(box, sec.firstChild);
+  }
+  const s = rc.summary;
+  const total = s.total!=null?s.total:rc.containers.length;
+  const kpis = [
+    {v:total, l:I18N.t('kpi.containers','Containers')},
+    {v:s.running||0, l:I18N.t('kpi.running','Running')},
+    {v:s.problems||0, l:I18N.t('kpi.need_attention','Need attention')},
+    {v:total-(s.running||0), l:I18N.t('kpi.stopped','Stopped')},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join('');
+  let tRam=0, tVram=0, tDisk=0, anyVram=false, anyDisk=false;
+  const rows = rc.containers.map(c=>{
+    const [lvl,label] = _rctBadge(c);
+    const ports = esc((c.ports||'').split(',').map(p=>p.trim()).filter(p=>!p.startsWith(':::')).join(', '));
+    tRam += c.mem_bytes||0;
+    const vb = c.vram_mb!=null ? c.vram_mb*1048576 : null;
+    if(vb!=null){ tVram+=vb; anyVram=true; }
+    if(c.disk_bytes!=null){ tDisk+=c.disk_bytes; anyDisk=true; }
+    return `<tr class="ctrow"><td><span class="sdot" style="background:${SC[lvl]||SC.info}"></span>${svcLogo(c.name,c.image)}${copyable(c.name)}</td>
+      <td><span class="badge ${lvl}">${label}</span></td>
+      <td data-col="image" class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.image)}">${esc(c.image)}</td>
+      <td class="muted">${ports}</td>
+      <td class="muted">${c.uptime?esc(c.uptime):'—'}</td>
+      <td class="muted">${c.mem_bytes!=null ? fmtBytes(c.mem_bytes) : '—'}</td>
+      <td class="muted">${vb!=null ? fmtBytes(vb) : '—'}</td>
+      <td data-col="disk" class="muted">${c.disk_bytes!=null ? fmtBytes(c.disk_bytes) : '—'}</td>
+      <td class="muted">${c.cpu_pct!=null ? c.cpu_pct.toFixed(1)+'%' : '—'}</td>
+      <td class="muted">${esc(c.status||'')}</td></tr>`;
+  }).join('') || `<tr><td colspan="10" class="muted">${I18N.t('rct.none','No containers on this host.')}</td></tr>`;
+  const totals = rc.containers.length ? `<tr class="cttot">
+      <td><b>${I18N.t('ct.total','Total')}</b> <span class="muted">${I18N.tf('ct.running','{n} running',{n:s.running||0})}</span></td>
+      <td></td><td data-col="image"></td><td></td><td></td>
+      <td><b>${fmtBytes(tRam)}</b></td>
+      <td><b>${anyVram?fmtBytes(tVram):'—'}</b></td>
+      <td data-col="disk"><b>${anyDisk?fmtBytes(tDisk):'—'}</b></td>
+      <td></td><td></td></tr>` : '';
+  const stale = rc.online ? '' : ` · <span style="color:var(--warn)">${I18N.t('rgpu.stale','host offline — showing last snapshot')}</span>`;
+  box.innerHTML =
+    `<div class="card"><h2>📦 ${I18N.tf('rct.title','Containers on {host}',{host:esc(CURRENT_HOST)})}</h2>
+      <div class="grid">${kpis}</div>
+      <table style="margin-top:12px"><thead><tr><th>${I18N.t('col.container','Container')}</th><th>${I18N.t('col.state','State')}</th><th data-col="image">${I18N.t('col.image','Image')}</th><th>${I18N.t('col.ports','Ports')}</th><th>${I18N.t('col.uptime','Uptime')}</th><th>${I18N.t('col.ram','RAM')}</th><th>${I18N.t('col.vram','VRAM')}</th><th data-col="disk">${I18N.t('col.disk','Disk')}</th><th>${I18N.t('col.cpu','CPU')}</th><th>${I18N.t('col.status','Status')}</th></tr></thead><tbody>${rows}${totals}</tbody></table>
+      <p class="cap">${I18N.tf('rct.cap','Read-only inventory from the host\'s docker CLI · updated {t}',{t:relTime(rc.at)})}${stale} · ${I18N.t('rct.cap2','Logs and start/stop controls are hub-only for now.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
+// ── Per-host AI Models (remote hosts) ────────────────────────────────────────
+// The registry (/api/models) is fleet-aware: each remote's probe ships its
+// ollama catalogue cross-referenced with what's resident right now. This
+// panel shows the host's LOADED models with live VRAM, and keeps the
+// Installed-models registry card visible below (it's grouped by host). Other
+// AI servers on remotes (vLLM, llama.cpp…) are a later probe slice.
+let RMODELS_AT=0, RMODELS_HOST=null;
+async function maybeRenderRemoteModels(sec){
+  const host = CURRENT_HOST;
+  if(Date.now()-RMODELS_AT<15000 && RMODELS_HOST===host) return;
+  RMODELS_AT=Date.now(); RMODELS_HOST=host;
+  let j; try{ j=await(await fetch('/api/models')).json(); }catch(e){ return; }
+  if(host!==CURRENT_HOST || TAB!=='models') return;      // switched mid-fetch
+  const mine=(j.models||[]).filter(m=>m.host===host);
+  const old=sec.querySelector('.remote-models');
+  if(!mine.length){
+    if(old){ old.remove(); renderLocalOnlyNotice('models'); }
+    return;
+  }
+  const n=sec.querySelector('.scope-notice'); if(n) n.remove();
+  let box=old;
+  if(!box){ box=document.createElement('div'); box.className='remote-models'; sec.insertBefore(box, sec.firstChild); }
+  const reg=document.getElementById('registry-card');
+  if(reg) reg.style.display='';
+  const mb=document.getElementById('modelsbody');
+  if(mb) mb.style.display='none';
+  const loadedM=mine.filter(m=>m.loaded);
+  const g=hostGpu(host)||{};
+  const cap=g.mem_total||0;
+  const committed=loadedM.reduce((a,m)=>a+(m.vram_mb||0),0);
+  const kpis=[
+    {v:String(loadedM.length), l:I18N.t('rmod.loaded','Loaded now'), s:I18N.tf('rmod.of_installed','of {n} installed',{n:mine.length})},
+    {v:fmtMB(committed), l:I18N.t('rmod.vram_committed','VRAM committed'),
+     s:cap?I18N.tf('gpu.pct_full','{n}% full',{n:Math.round(committed/cap*100)})+' · '+fmtMB(cap):''},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
+  const rows = loadedM.map(m=>{
+    const pct=cap?Math.round((m.vram_mb||0)/cap*100):0;
+    const det=[m.param_size, m.quant].filter(Boolean).join(' · ');
+    return `<tr><td><span class="dot" style="background:${colorFor(m.name)}"></span>${copyable(m.name)}${det?` <span class="muted">${esc(det)}</span>`:''}</td>
+      <td>${m.vram_mb!=null?fmtMB(m.vram_mb):'—'}</td>
+      <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
+  }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
+  box.innerHTML =
+    `<div class="card"><h2>🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+      <table style="margin-top:12px"><tbody>${rows}</tbody></table>
+      <p class="cap">${I18N.t('rmod.cap','Read from the host\'s ollama (resident set + live VRAM). Other AI servers on remotes and the per-model VRAM timeline are a later slice.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
 function renderLocalOnlyNotice(tabId){
   if(CURRENT_HOST === 'local') return;
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
@@ -7456,8 +7634,28 @@ function renderLocalOnlyNotice(tabId){
       return;
     }
   }
-  const panel = sec.querySelector('.remote-gpu');
-  if(panel) panel.remove();
+  if(tabId === 'containers'){
+    const rc = remoteContainersData();
+    if(rc){
+      const old = sec.querySelector('.scope-notice');
+      if(old) old.remove();
+      renderRemoteContainers(sec, rc);
+      return;
+    }
+  }
+  if(tabId === 'models'){
+    maybeRenderRemoteModels(sec);                       // async — paints when data lands
+    // The hub-local models body never applies to a remote host; the
+    // fleet-aware registry card below the panel always does.
+    const mb=document.getElementById('modelsbody');
+    if(mb) mb.style.display='none';
+    if(sec.querySelector('.remote-models')){            // panel already up: keep it,
+      const reg=document.getElementById('registry-card');
+      if(reg) reg.style.display='';                     // and undo this call's hide-all on the registry
+      return;
+    }
+  }
+  sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');
@@ -7473,9 +7671,10 @@ function clearLocalOnlyNotice(tabId){
   if(!sec) return;
   const n = sec.querySelector('.scope-notice');
   if(n) n.remove();
-  const p = sec.querySelector('.remote-gpu');
-  if(p) p.remove();
+  sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='');
+  const mb=document.getElementById('modelsbody');
+  if(mb && tabId==='models') mb.style.display='';
 }
 // Re-apply notices on host switch — necessary so that when the user
 // switches from Local→remote while currently *on* a local-only tab, the
@@ -7953,7 +8152,7 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
-  if(TAB==='gpu' && CURRENT_HOST!=='local') renderLocalOnlyNotice('gpu');
+  if((TAB==='gpu'||TAB==='containers'||TAB==='models') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{
