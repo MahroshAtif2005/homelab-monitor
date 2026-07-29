@@ -1,4 +1,5 @@
 # MCP server runtime deps. The pure-stdlib homelab_client.py needs nothing here;
 # only server.py imports the SDK. `mcp` pulls in starlette/uvicorn used by the
 # optional streamable-http transport. Requires Python 3.10+ (the image is 3.12).
-mcp>=1.9.0
+# <2: mcp 2.0.0 removed the legacy mcp.server.fastmcp module server.py imports.
+mcp>=1.9.0,<2
