@@ -105,13 +105,85 @@ def api_cost():
     })
 
 
+def _api_costs_host(_app, host):
+    """Per-host flavour of /api/costs — same response shape, integrated over
+    host_samples_1h (written by the host poller) instead of the hub's rollups.
+    What's measurable on a remote is whatever its probe ships: GPU power via
+    nvidia-smi, CPU/DRAM via RAPL when the SSH user can read the counters. No
+    per-entity breakdown yet — that needs remote per-process attribution, so
+    `breakdown` is [] and the UI says so instead of guessing."""
+    from backend.db.repos import host_samples as hs_repo
+    ctx = _app._cost_ctx()
+    rng = request.args.get("range", "7d")
+    span = _app.RANGES.get(rng, 604800)
+    now = int(time.time())
+    kwh_per = _app.INTERVAL / 3_600_000.0
+    with _app.LOCK:
+        since = (hs_repo.min_ts_1h(host, conn=_app.DB) or now) if span is None else now - span
+        bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
+        comp = hs_repo.comp_bucketed(host, since, bk, conn=_app.DB)
+        comp_kwh = {"gpu": 0.0, "cpu": 0.0, "dram": 0.0}
+        cost_range = 0.0
+        for ts, p, cp, dp, cnt_ in hs_repo.full_since(host, since, conn=_app.DB):
+            price = _app._price_at(ctx, ts)
+            n = cnt_ or 1
+            comp_kwh["gpu"] += (p or 0) * n * kwh_per
+            comp_kwh["cpu"] += (cp or 0) * n * kwh_per
+            comp_kwh["dram"] += (dp or 0) * n * kwh_per
+            cost_range += ((p or 0) + (cp or 0) + (dp or 0)) * n * kwh_per * price
+        def win_cost(start):
+            tot = 0.0
+            for ts, w, cnt_ in hs_repo.total_w_since(host, start, conn=_app.DB):
+                tot += (w or 0) * (cnt_ or 1) * kwh_per * _app._price_at(ctx, ts)
+            return round(tot, 2)
+        lt = time.localtime(now)
+        midnight = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        cost_win = {"today": win_cost(midnight), "d7": win_cost(now - 604800), "d30": win_cost(now - 2592000)}
+    have_gpu = any(r[1] is not None for r in comp)
+    have_cpu = any(r[2] is not None for r in comp)
+    have_dram = any(r[3] is not None for r in comp)
+    labels = [int(r[0]) for r in comp]
+    series = {"labels": labels}
+    if have_gpu:  series["gpu"]  = [round(r[1] or 0) for r in comp]
+    if have_cpu:  series["cpu"]  = [round(r[2] or 0) for r in comp]
+    if have_dram: series["dram"] = [round(r[3] or 0) for r in comp]
+    # Live wattage from the poller's latest snapshot (same source the GPU tab uses).
+    with _app.HOST_DATA_LOCK:
+        entry = _app.HOST_DATA.get(host) or {}
+    hostd = ((entry.get("data") or {}).get("host") or {})
+    now_gpu = round((hostd.get("gpu") or {}).get("power") or 0) if hostd.get("gpu") else None
+    now_cpu = round(hostd.get("cpu_power")) if hostd.get("cpu_power") is not None else None
+    now_dram = round(hostd.get("dram_power")) if hostd.get("dram_power") is not None else None
+    now_total = (now_gpu or 0) + (now_cpu or 0) + (now_dram or 0)
+    measured = ([ "gpu"] if have_gpu else []) + (["cpu"] if have_cpu else []) + (["dram"] if have_dram else [])
+    machine = {"name": host,
+               "now_w": {"gpu": now_gpu, "cpu": now_cpu, "dram": now_dram, "total": now_total},
+               "energy_kwh": {k: round(v, 3) for k, v in comp_kwh.items()
+                              if (k == "gpu" and have_gpu) or (k == "cpu" and have_cpu) or (k == "dram" and have_dram)},
+               "cost": cost_win, "cost_range": round(cost_range, 2),
+               "measured": measured, "estimated": []}
+    machine["energy_kwh"]["total"] = round(sum(machine["energy_kwh"].values()), 3)
+    return jsonify({
+        "enabled": ctx["day"] > 0, "range": rng, "bucket_sec": bk, "currency": ctx["currency"],
+        "host": host, "rapl_available": have_cpu,
+        "tariff": {"mode": ctx["mode"], "price_day": ctx["day"], "price_night": ctx["night"],
+                   "night_start": ctx["night_start"], "night_end": ctx["night_end"]},
+        "machines": [machine], "components": series, "breakdown": [],
+    })
+
+
 @bp.route("/api/costs")
 def api_costs():
     import app as _app
     """Richer power+cost view for the Costs page: per-machine totals, a stacked
     component breakdown (GPU measured, CPU/DRAM measured via RAPL, optional operator
     'other' baseline) and a ranked per-process/service/model breakdown — all over a
-    selectable range and tariff-aware. /api/cost (GPU-only) is left untouched."""
+    selectable range and tariff-aware. /api/cost (GPU-only) is left untouched.
+    With ?host=<name> the same shape is served for a registered remote,
+    integrated over its own host_samples history."""
+    host = (request.args.get("host") or "").strip()
+    if host and host != "local":
+        return _api_costs_host(_app, host)
     ctx = _app._cost_ctx()
     cur = ctx["currency"]
     rng = request.args.get("range", "7d")

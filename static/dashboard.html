@@ -3455,7 +3455,7 @@ async function renderCost(){
 }
 
 // ── Costs page: per-machine → per-component → per-process, with drilldown ──────
-let COSTS_SORT={key:'energy_kwh',dir:-1}, COSTS_DATA=null, COSTS_AT=0;
+let COSTS_SORT={key:'energy_kwh',dir:-1}, COSTS_DATA=null, COSTS_AT=0, COSTS_HOST=null;
 // ── Busy-hours heatmap: 7×24 day-of-week × hour grid coloured by cost-rate ─────
 // Reads /api/cost/heatmap (own window, default 30d). Colour scales by cost/hour when
 // a tariff is set, else by avg W. Always a <table> so screen readers / no-CSS get
@@ -3530,12 +3530,18 @@ async function renderHeatmap(force){
 
 async function renderCosts(force){
   const card=document.getElementById('costs-card'); if(!card) return;
-  if(CURRENT_HOST!=='local'){ renderLocalOnlyNotice('costs'); return; }
-  clearLocalOnlyNotice('costs');
-  renderHeatmap(force);   // busy-hours heatmap renders even with no tariff (power-only)
-  if(!force && Date.now()-COSTS_AT < 20000) return;   // throttle live refresh
-  COSTS_AT=Date.now();
-  let j; try{ j=await(await fetch('/api/costs?range='+encodeURIComponent(R))).json(); }catch(e){ card.hidden=true; return; }
+  // Per-host mode: the same /api/costs shape served for a registered remote,
+  // integrated over that host's own poll history (host_samples). Heatmap,
+  // per-entity breakdown and drilldown stay hub-only for now.
+  const remote = CURRENT_HOST!=='local' ? CURRENT_HOST : null;
+  const hm=document.getElementById('heatmap-card');
+  if(hm) hm.hidden = !!remote;
+  if(!remote) renderHeatmap(force);   // busy-hours heatmap renders even with no tariff (power-only)
+  if(!force && Date.now()-COSTS_AT < 20000 && COSTS_HOST===CURRENT_HOST) return;   // throttle live refresh
+  COSTS_AT=Date.now(); COSTS_HOST=CURRENT_HOST;
+  let j; try{ j=await(await fetch('/api/costs?range='+encodeURIComponent(R)
+    +(remote?'&host='+encodeURIComponent(remote):''))).json(); }catch(e){ card.hidden=true; return; }
+  if((remote||'local')!==CURRENT_HOST) return;   // host switched while fetching
   card.hidden=false;
   const dis=document.getElementById('costs-disabled'), body=document.getElementById('costs-body');
   const bcard=document.getElementById('costs-breakdown-card');
@@ -3546,10 +3552,27 @@ async function renderCosts(force){
     return;
   }
   dis.hidden=true; body.hidden=false; COSTS_DATA=j;
+  if(remote) document.getElementById('costs-drill').hidden=true;
   const cur=j.currency||'$', money=v=>cur+(+v||0).toFixed(2);
   const m=(j.machines||[])[0]||{}, nowW=m.now_w||{};
+  // A remote whose probe ships no power source at all (no NVIDIA power, RAPL
+  // unreadable over SSH) has nothing to price — say so instead of a 0.00 wall.
+  if(remote && !(m.measured||[]).length){
+    document.getElementById('costs-kpis').innerHTML='';
+    body.hidden=true;
+    let n=card.querySelector('.rcost-none');
+    if(!n){ n=document.createElement('div'); n.className='ins info rcost-none'; card.appendChild(n); }
+    n.innerHTML=`<div class="ic">ℹ️</div><div><div class="t">${I18N.tf('cost.rnone_t','No measurable power on {host} yet',{host:esc(remote)})}</div>`+
+      `<div class="d">${I18N.t('cost.rnone_d','Costs need a measured watt source: NVIDIA GPU power (nvidia-smi) or CPU/DRAM via RAPL — which usually needs root to read over SSH. This host reports neither, so there is nothing honest to price.')}</div></div>`;
+    if(bcard) bcard.hidden=true;
+    return;
+  }
+  const stale=card.querySelector('.rcost-none'); if(stale) stale.remove();
   const sub=document.getElementById('costs-sub');
-  if(sub) sub.textContent = j.rapl_available ? I18N.t('cost.sub_rapl','· GPU + CPU package measured') : I18N.t('cost.sub_norapl','· GPU measured · CPU power unavailable (RAPL)');
+  if(sub) sub.textContent = remote
+    ? I18N.tf('cost.sub_host','· {host}: {parts} measured · no per-process breakdown on remotes yet',
+        {host:remote, parts:(m.measured||[]).map(x=>x.toUpperCase()).join(' + ')})
+    : (j.rapl_available ? I18N.t('cost.sub_rapl','· GPU + CPU package measured') : I18N.t('cost.sub_norapl','· GPU measured · CPU power unavailable (RAPL)'));
   document.getElementById('costs-kpis').innerHTML=[
     {v:(nowW.total||0)+' W', l:I18N.t('cost.total_now','Total draw now'), s:[nowW.gpu!=null?'gpu '+nowW.gpu+'W':'', nowW.cpu!=null?'cpu '+nowW.cpu+'W':''].filter(Boolean).join(' · ')},
     {v:money(m.cost&&m.cost.today), l:I18N.t('cost.today','Cost today'), s:(m.cost_range!=null?I18N.tf('cost.this_range','{v} this range',{v:money(m.cost_range)}):'')},
@@ -5496,7 +5519,7 @@ async function deleteHost(name){
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
 const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','costs','containers']);  // tabs not yet probed per-host
+const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','containers']);  // tabs not yet probed per-host (costs went per-host)
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -5584,6 +5607,7 @@ function refreshCurrentTab(){
   if(TAB === 'network')   { renderNetwork(); return; }
   if(TAB === 'security')  { renderSecurity(); return; }
   if(TAB === 'services')  { renderServicesTab(); return; }
+  if(TAB === 'costs')     { renderCosts(true); return; }
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 

@@ -199,14 +199,16 @@ def get_installed_models() -> dict:
 
 @mcp.tool()
 @_track
-def get_costs(range: str = "7d") -> dict:
-    """Power-cost summary for the hub (Costs tab): what the machine drew and what it
-    cost over `range`, with the live `tariff`, the `machine` totals (now/energy/cost
-    for today, 7d, 30d and the range) and a ranked `breakdown` of which processes,
-    containers, services and models cost the most. Answers "what did my homelab cost,
-    and what's the biggest line item?".
+def get_costs(range: str = "7d", host: str = "") -> dict:
+    """Power-cost summary (Costs tab): what the machine drew and what it cost over
+    `range`, with the live `tariff`, the `machine` totals (now/energy/cost for
+    today, 7d, 30d and the range) and a ranked `breakdown` of which processes,
+    containers, services and models cost the most. Pass `host` (a registered
+    host's name from list_hosts) to price a remote machine from its own poll
+    history — remotes have no per-process `breakdown` yet. Answers "what did my
+    homelab cost, and what's the biggest line item?".
     """
-    return hc.get_costs(range)
+    return hc.get_costs(range, host)
 
 
 @mcp.tool()
