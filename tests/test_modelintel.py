@@ -82,16 +82,65 @@ class TestOllamaMeta(unittest.TestCase):
         self.assertEqual(m1, m2)
 
     def test_collect_only_fetches_loaded(self):
-        app._OLLAMA_META.clear()
+        app._OLLAMA_META.clear(); app._OLLAMA_TAGS.clear()
         ai = [{"name": "ollama", "image": "ollama/ollama", "ip": "1.2.3.4"}]
-        models = [("ollama", "loaded-model", 1234), ("ollama", "idle-model", None)]
+        models = [("ollama", "loaded-model", 1234, 0, None), ("ollama", "idle-model", None, None, None)]
         resp = {"details": {"parameter_size": "7B", "quantization_level": "Q8_0"},
                 "model_info": {}, "capabilities": []}
+        tags = {"models": [{"name": "loaded-model", "size": 1000 * 1048576}]}
         with patch("app._http_post_json", return_value=resp) as pj:
-            out = app.collect_model_meta(ai, models)
+            with patch("app._http_json", return_value=tags):
+                out = app.collect_model_meta(ai, models)
         self.assertIn("loaded-model", out)
         self.assertNotIn("idle-model", out)                     # idle catalogue not paid for
         self.assertEqual(pj.call_count, 1)
+        self.assertEqual(out["loaded-model"]["weights_mb"], 1000)
+
+
+class TestOllamaWeights(unittest.TestCase):
+    def setUp(self):
+        app._OLLAMA_META.clear(); app._OLLAMA_TAGS.clear()
+
+    def test_weights_from_tags_cached_per_ip(self):
+        tags = {"models": [{"name": "a:8b", "size": 5000 * 1048576},
+                           {"name": "b:30b", "size": 18000 * 1048576}]}
+        with patch("app._http_json", return_value=tags) as hj:
+            self.assertEqual(app._ollama_weights_mb("1.2.3.4", "a:8b"), 5000)
+            self.assertEqual(app._ollama_weights_mb("1.2.3.4", "b:30b"), 18000)
+        self.assertEqual(hj.call_count, 1)                      # one /api/tags for both
+
+    def test_unknown_model_does_not_hammer_tags(self):
+        tags = {"models": [{"name": "a:8b", "size": 5000 * 1048576}]}
+        with patch("app._http_json", return_value=tags) as hj:
+            self.assertIsNone(app._ollama_weights_mb("1.2.3.4", "ghost"))
+            self.assertIsNone(app._ollama_weights_mb("1.2.3.4", "ghost"))
+        self.assertEqual(hj.call_count, 1)                      # refetch floor respected
+
+    def test_fetch_failure_keeps_previous_sizes(self):
+        tags = {"models": [{"name": "a:8b", "size": 5000 * 1048576}]}
+        with patch("app._http_json", return_value=tags):
+            self.assertEqual(app._ollama_weights_mb("1.2.3.4", "a:8b"), 5000)
+        app._OLLAMA_TAGS["1.2.3.4"]["at"] = 0                   # force staleness
+        with patch("app._http_json", side_effect=OSError("down")):
+            self.assertEqual(app._ollama_weights_mb("1.2.3.4", "a:8b"), 5000)
+
+    def test_collect_meta_heals_missing_weights_later(self):
+        # /api/show ok but /api/tags down on first sample → weights absent; a later
+        # sample with tags back up fills weights into the cached meta entry.
+        ai = [{"name": "ollama", "image": "ollama/ollama", "ip": "1.2.3.4"}]
+        models = [("ollama", "m:8b", 1234, 0, 4096)]
+        resp = {"details": {"parameter_size": "8B", "quantization_level": "Q4_K_M"},
+                "model_info": {}, "capabilities": []}
+        with patch("app._http_post_json", return_value=resp):
+            with patch("app._http_json", side_effect=OSError("down")):
+                out1 = app.collect_model_meta(ai, models)
+        self.assertNotIn("weights_mb", out1["m:8b"])
+        app._OLLAMA_TAGS["1.2.3.4"]["at"] = 0                   # allow the refetch
+        tags = {"models": [{"name": "m:8b", "size": 5000 * 1048576}]}
+        with patch("app._http_json", return_value=tags):
+            out2 = app.collect_model_meta(ai, models)
+        self.assertEqual(out2["m:8b"]["weights_mb"], 5000)
+        self.assertEqual(app._OLLAMA_META["m:8b"]["weights_mb"], 5000)   # cache healed too
 
 
 if __name__ == "__main__":

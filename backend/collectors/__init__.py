@@ -162,23 +162,33 @@ def sample_once():
         power     = sum(g["power"] for g in gpus)
         util      = round(sum(g["util"] for g in gpus) / len(gpus))
         temp      = max(g["temp"] for g in gpus)
-        # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
+        # NVIDIA enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
         # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
-            gpu_extra = _app._gpu_extra(nv_gpus)
-            for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                if line.strip():
-                    pid, mem = (p.strip() for p in line.split(","))
-                    svc = _app.service_for_pid(pid, nm)
-                    procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                    try:
-                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                    except ValueError:
-                        pass
-        else:
-            gpu_extra = {}
+            try:
+                # Best-effort on its own: a timeout or malformed row in this extra
+                # query must cost this sample's NVIDIA attribution, not the GPU
+                # chips below it nor the AMD fdinfo attribution that follows.
+                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+                    if line.strip():
+                        pid, mem = (p.strip() for p in line.split(","))
+                        svc = _app.service_for_pid(pid, nm)
+                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
+                        try:
+                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
+        # NVIDIA cards were enriched just above, AMD ones arrive already enriched
+        # (amd_gpus reads clocks/perf level/cap in its per-card pass). The pooled
+        # sums must span vendors — an NVIDIA-only aggregate on a hybrid box
+        # compares total draw (both vendors) against the NVIDIA cap alone, and the
+        # power chip reads >100% whenever the AMD card draws anything.
+        gpu_extra = _app._gpu_extra(gpus)
         # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
         # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
         # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
@@ -206,23 +216,30 @@ def sample_once():
     ai = [c for c in conts if _match_probe(c)]
     models = []
     model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
+    ai_servers = []      # {name, ip, provider} — for the /api/ai/now throttled live re-probe
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
             found_lists = list(ex.map(probe_models, ai))
         provider_of = {c["name"]: _match_probe_key(c) for c in ai}
+        ai_servers = [{"name": c["name"], "ip": c.get("ip") or "127.0.0.1",
+                       "provider": provider_of.get(c["name"])} for c in ai]
         for ct, found in zip(ai, found_lists):
             svc = ct["name"]
             provider = provider_of.get(svc)
             smem = procs.get(svc)                         # MB this server holds on the GPU now
-            api_vram = any(v is not None for _, v in found)
-            for mdl, vram in found:
+            api_vram = any(v is not None for _, v, _, _ in found)
+            for mdl, vram, ram, ctx in found:
                 if vram is not None:                      # server reported its own VRAM (Ollama)
                     vram_val = round(vram)
+                    ram_val = round(ram) if ram else 0    # spill into system RAM (0 = fully on GPU)
                 elif not api_vram and len(found) == 1 and smem:
                     vram_val = round(smem)                # single model ↔ all the server's VRAM
+                    ram_val = None                        # attributed from nvidia-smi — spill unknown
                 else:
                     vram_val = None                        # server up but idle / can't attribute
-                models.append((svc, mdl, vram_val))
+                    ram_val = None
+                models.append((svc, mdl, vram_val, ram_val,
+                               ctx if vram_val is not None else None))
                 model_catalog.append({
                     "host": socket.gethostname(),
                     "service": svc,
@@ -230,6 +247,7 @@ def sample_once():
                     "model": mdl,
                     "loaded": vram_val is not None,
                     "vram_mb": vram_val,
+                    "ram_mb": ram_val,
                 })
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
@@ -304,8 +322,8 @@ def sample_once():
         pp_rows = _app._attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
-        _app.DB.executemany("INSERT INTO models VALUES(?,?,?,?)",
-                            [(ts, svc, mdl, vram) for svc, mdl, vram in models if vram is not None])
+        _app.DB.executemany("INSERT INTO models(ts,service,model,vram,ram) VALUES(?,?,?,?,?)",
+                            [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram, _ctx in models if vram is not None])
         _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
                             [(ts, caller, server, n) for (caller, server), n in edges.items()])
         # Per-GPU history only when there's more than one card (single-GPU rigs are
@@ -371,11 +389,15 @@ def sample_once():
             _app.sync_mlflow()
         except Exception as e:
             print("mlflow sync error:", e, flush=True)
+    # Private (not in LATEST → never serialized to clients): where the recognised
+    # AI servers live, so the /api/ai/now fast path can re-probe ollama on demand.
+    _app.AI_SERVERS = ai_servers
     _app.LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
                   procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
-                  models=[{"service": s, "model": m, "vram": v} for s, m, v in models],
+                  models=[{"service": s, "model": m, "vram": v, "ram": r, "ctx_now": c}
+                          for s, m, v, r, c in models],
                   model_catalog=model_catalog,
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),

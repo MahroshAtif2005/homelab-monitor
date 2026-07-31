@@ -664,6 +664,9 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .rb.on{box-shadow:none}
 /* AI Models — expandable rows + per-model VRAM timeline */
 .mtbl td{vertical-align:middle}
+/* RAM-spill fragments (Now split, spilled-run counts) + per-model Used-by pills */
+.spillv{color:var(--warn-ink,var(--warn));font-weight:600;font-size:12px;white-space:nowrap}
+.usedby .pill{display:inline-block;margin:1px 3px 1px 0}
 .mrow{cursor:pointer}
 .mrow .exp{display:inline-block;width:12px;color:var(--mut);transition:transform .15s;font-size:10px}
 .mrow.open .exp{transform:rotate(90deg)}
@@ -686,6 +689,11 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .vbars{min-width:120px}
 .vbar{height:6px;border-radius:3px;background:var(--free);overflow:hidden;margin:2px 0}
 .vbar i{display:block;height:100%}
+/* Weights-vs-context residency split under the Now cell (AI Models tab) */
+.vsplit{display:flex;height:5px;border-radius:3px;background:var(--free);overflow:hidden;margin-top:4px;max-width:140px}
+.vsplit i{display:block;height:100%;background:var(--info)}
+.vsplit i.k{background:var(--warn);opacity:.85}
+.vsplit-cap{font-size:10.5px;color:var(--mut);margin-top:2px;white-space:nowrap}
 /* density */
 .dense .content{padding:11px 16px}
 .dense th,.dense td{padding:5px 9px}
@@ -1683,6 +1691,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 <!-- ───────── GPU ───────── -->
 <section data-tab="gpu" hidden>
   <div id="gpu-throttle" class="ins crit" style="display:none;margin-bottom:14px"></div>
+  <div id="gpu-spill" class="ins warning" style="display:none;margin-bottom:14px"></div>
   <div class="cols">
     <div class="card"><h2 data-i18n="gpu.now_title">🎮 GPU right now</h2>
       <div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
@@ -1767,7 +1776,7 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
     <p class="cap" data-i18n="registry.cap">Every model this host's recognised AI servers report — ollama's on-disk inventory (size, params, quant) plus what every other server (vLLM, llama.cpp, …) is currently serving, grouped by provider. A <b>Loaded</b> badge marks models resident in VRAM this moment. Read-only.</p>
   </div>
   <div id="modelsbody"></div>
-  <p class="cap" data-i18n-html="models.section_cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
+  <p class="cap" data-i18n-html="models.section_cap">One panel per model <b>server</b>: its VRAM timeline (shared by the models it hosts) plus each model's own peak &amp; average. <b>Runs</b> counts contiguous load sessions over the selected range and how many <b>spilled into system RAM</b> (didn't fully fit VRAM — the Now column shows the live VRAM + RAM split). <b>Used by</b> names the apps whose connections to the server overlapped the model's residency — approximate when several models share one server. A server is shown even while <b>Idle</b> (model unloaded / between requests), so nothing vanishes when VRAM is released. Recognised: Ollama, vLLM, SGLang, llama.cpp, LocalAI, HF TGI/TEI, LoRAX, mistral.rs, Aphrodite, koboldcpp, tabbyAPI, text-generation-webui, LM Studio, xinference, OpenLLM, LiteLLM, GPUStack, Cortex/Jan, Ramalama, Nexa, Triton, Infinity, faster-whisper/Speaches, Whisper ASR webservice/WhisperX, Wyoming (HA voice), OpenedAI-Speech, Stable Diffusion (A1111/Forge/SD.Next), InvokeAI, ComfyUI.</p>
 </section>
 
 <!-- ───────── Experiments / Runs ───────── -->
@@ -2895,6 +2904,7 @@ const SIC={
   trendDown:'<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>',
   scale:'<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10M12 3v18M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
   copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  ram:'<path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M8 11V9M16 11V9M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>',
 };
 function sic(name){ const d=SIC[name]; return d ? `<svg class="sic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>` : ''; }
 const RUN_SRC_COLOR={jupyter:'#a371f7',colab:'#f59e0b',kaggle:'#4dabf7',mlflow:'#3fb950',api:'#8b949e',cli:'#6b7280'};
@@ -3257,6 +3267,7 @@ function renderData(){
     {v:Math.round(n.util)+'%',l:I18N.t('gpu.util_kpi','GPU util'),s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
   ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
   renderGpuDetail(n.gpu_extra||{}, n.power);
+  renderGpuSpill(n);
   renderPerGpu(n.gpus);
   const bar=document.getElementById('vrambar'); bar.innerHTML='';
   n.procs.forEach(p=>{const s=document.createElement('div');s.style.width=(p.mem/tot*100)+'%';s.style.background=colorFor(p.service);s.title=p.service+': '+fmtMB(p.mem);bar.appendChild(s);});
@@ -3334,9 +3345,43 @@ function renderGpuDetail(x, powerNow){
     chips.push({v:`${Math.round(powerNow||0)} / ${Math.round(x.power_limit)} W`, l:I18N.tf('gpu.chip_power','Power · {n}% of cap',{n:head}),
                 c: head>=98?'bad':head>=90?'warn':'', t:I18N.t('gpu.chip_power_t','Draw vs the card power limit. Pinned at ~100% = power-capped.')});
   }
-  if(x.pstate) chips.push({v:x.pstate, l:I18N.t('gpu.chip_pstate','Perf state'), t:I18N.t('gpu.chip_pstate_t','P0 = max performance; higher P-numbers = lower clocks.')});
+  if(x.pstate){
+    // NVIDIA reports numeric P-states (P0, P2, …); AMD reports the amdgpu power
+    // policy (auto/low/high/manual) in the same field. Same chip, right tooltip.
+    const amdLevel = !/^P\d+$/i.test(x.pstate);
+    chips.push({v:x.pstate,
+                l:amdLevel?I18N.t('gpu.chip_perflevel','Perf level'):I18N.t('gpu.chip_pstate','Perf state'),
+                t:amdLevel?I18N.t('gpu.chip_perflevel_t','The amdgpu performance policy: auto lets the driver pick clocks, low/high pin them, manual means user-forced levels.')
+                          :I18N.t('gpu.chip_pstate_t','P0 = max performance; higher P-numbers = lower clocks.')});
+  }
   if(x.temp_mem>0) chips.push({v:Math.round(x.temp_mem)+'°C', l:I18N.t('gpu.chip_memtemp','Mem temp'), c:x.temp_mem>=95?'bad':x.temp_mem>=85?'warn':''});
   box.innerHTML = chips.map(c=>`<div class="gpu-chip ${c.c||''}"${c.t?` title="${esc(c.t)}"`:''}><div class="v">${esc(c.v)}</div><div class="l">${esc(c.l)}</div></div>`).join('');
+}
+
+// RAM-spill banner on the GPU tab: a loaded model whose weights don't fully fit
+// VRAM (ollama size vs size_vram) runs the overflow through the CPU. Shows the
+// live GPU + RAM split per spilling model, plus how many of the range's load
+// sessions ("runs", from model_summary) spilled vs ran fully on GPU.
+function renderGpuSpill(n){
+  const el=document.getElementById('gpu-spill'); if(!el) return;
+  const live=(n.models||[]).filter(m=>(m.ram||0)>0);
+  const hist=(D.model_summary||[]).filter(m=>(m.runs_spilled||0)>0);
+  if(!live.length && !hist.length){ el.style.display='none'; return; }
+  const sum=hist.map(m=>I18N.tf('gpu.spill_runs','{model}: {s} of {n} runs spilled (worst {mb} in RAM)',
+    {model:esc(m.model),s:m.runs_spilled,n:m.runs,mb:fmtMB(m.peak_ram)})).join(' · ');
+  let t, d;
+  if(live.length){
+    t=I18N.t('gpu.spill_title','Model spilling into system RAM right now');
+    d=live.map(m=>I18N.tf('gpu.spill_live','<b>{model}</b> — {vram} VRAM + {ram} RAM ({tot} total)',
+        {model:esc(m.model),vram:fmtMB(m.vram),ram:fmtMB(m.ram),tot:fmtMB((m.vram||0)+(m.ram||0))})).join(' · ')
+      +' — '+I18N.t('gpu.spill_hint','offloaded layers run on the CPU, so generation slows down.');
+  } else {
+    t=I18N.t('gpu.spill_past_title','Some model runs spilled into system RAM in this range');
+    d='';
+  }
+  el.style.display='flex';
+  el.innerHTML=`<div class="ic" style="color:var(--warn)">${sic('ram')}</div><div><div class="t">${t}</div>`
+    +`<div class="d">${d}${d&&sum?'<br>':''}${sum}</div></div>`;
 }
 
 // everything in the "GPU right now" panel, which pools across cards.
@@ -3737,13 +3782,15 @@ function renderModels(){
   const tot=D.mem_total;
   const live=D.now.models||[], sums=D.model_summary||[];
   const svcSum={}; (D.summary||[]).forEach(s=>svcSum[s.service]=s);
-  const curOf={}; live.forEach(m=>{curOf[m.model+'|'+m.service]=m.vram;});
+  const curOf={}, ramOf={}, ctxOf={}; live.forEach(m=>{const k=m.model+'|'+m.service; curOf[k]=m.vram; ramOf[k]=m.ram; ctxOf[k]=m.ctx_now;});
   // Group models under their server. Per-model peak/avg ARE distinct (model_summary);
   // the VRAM time-series + %-resident exist only per server, so the timeline is drawn
   // ONCE per server card instead of repeated identically under every model.
   const bySvc={};
-  sums.forEach(m=>{(bySvc[m.service]=bySvc[m.service]||[]).push({model:m.model,peak:m.peak,avg:m.avg,vram:curOf[m.model+'|'+m.service]});});
-  live.forEach(m=>{const arr=bySvc[m.service]=bySvc[m.service]||[]; if(!arr.some(x=>x.model===m.model)) arr.push({model:m.model,peak:null,avg:null,vram:m.vram});});
+  sums.forEach(m=>{(bySvc[m.service]=bySvc[m.service]||[]).push({model:m.model,peak:m.peak,avg:m.avg,
+    vram:curOf[m.model+'|'+m.service],ram:ramOf[m.model+'|'+m.service],ctxNow:ctxOf[m.model+'|'+m.service],
+    runs:m.runs||0,spilled:m.runs_spilled||0,peakRam:m.peak_ram||0,usedBy:m.used_by||[]});});
+  live.forEach(m=>{const arr=bySvc[m.service]=bySvc[m.service]||[]; if(!arr.some(x=>x.model===m.model)) arr.push({model:m.model,peak:null,avg:null,vram:m.vram,ram:m.ram,ctxNow:m.ctx_now,runs:0,spilled:0,peakRam:0,usedBy:[]});});
   const host=document.getElementById('modelsbody'); if(!host) return;
   const services=Object.keys(bySvc);
   if(!services.length){ host.innerHTML='<div class="card"><div class="muted">'+I18N.t('models.empty','No recognised AI model server is running. Start one (Ollama, vLLM, faster-whisper, Stable Diffusion, …) and it will appear here.')+'</div></div>'; return; }
@@ -3753,11 +3800,37 @@ function renderModels(){
     const models=bySvc[svc].slice().sort((a,b)=>(b.peak||0)-(a.peak||0));
     const rows=models.map(m=>{
       const pW=m.peak!=null?Math.max(2,m.peak/maxV*100):0, aW=m.avg!=null?Math.max(2,m.avg/maxV*100):0;
-      return `<tr><td><span class="dot" style="background:${c}"></span>${copyable(m.model)}${modelMetaChips(m.model)}</td>
-        <td>${m.vram!=null?'<span class="badge ok">'+I18N.t('models.loaded','Loaded')+'</span>':'<span class="badge info">'+I18N.t('models.idle','Idle')+'</span>'}</td>
-        <td>${m.vram!=null?fmtMB(m.vram):'—'}</td>
+      const spillingNow=m.vram!=null&&(m.ram||0)>0;
+      const status=m.vram==null?'<span class="badge info">'+I18N.t('models.idle','Idle')+'</span>'
+        :spillingNow?`<span class="badge warn" title="${I18N.t('models.spill_t','Part of the model does not fit VRAM and sits in system RAM — those layers run on the CPU.')}">${I18N.t('models.loaded_spill','Loaded · RAM spill')}</span>`
+        :'<span class="badge ok">'+I18N.t('models.loaded','Loaded')+'</span>';
+      const now=m.vram==null?'—'
+        :spillingNow?`<span title="${I18N.tf('models.now_split_t','{tot} total resident: {vram} in VRAM + {ram} spilled into system RAM',{tot:fmtMB(m.vram+m.ram),vram:fmtMB(m.vram),ram:fmtMB(m.ram)})}">${fmtMB(m.vram)} <span class="spillv">+ ${fmtMB(m.ram)} RAM</span></span>`
+        :fmtMB(m.vram);
+      // Weights-vs-context split of the residency: weights ≈ the on-disk model
+      // file (D.now.model_meta.weights_mb); the rest is context/KV + buffers —
+      // the part that grows with num_ctx and pushes a model into RAM spill.
+      const meta=((D.now&&D.now.model_meta)||{})[m.model]||{};
+      const _tot=m.vram!=null?(m.vram||0)+(m.ram||0):0;
+      const _w=m.vram!=null&&meta.weights_mb?Math.min(meta.weights_mb,_tot):null;
+      const _kv=_w!=null?Math.max(0,_tot-_w):null;
+      const split=(_w!=null&&_tot>0)
+        ?`<div class="vsplit" title="${I18N.tf('models.wsplit_t','{tot} resident = {w} model weights + {k} context/KV & buffers. Weights are the model file itself; the context/KV part grows with the context window — when weights + context no longer fit free VRAM, the overflow spills into system RAM.',{tot:fmtMB(_tot),w:fmtMB(_w),k:fmtMB(_kv)})}"><i style="width:${(_w/_tot*100).toFixed(1)}%"></i><i class="k" style="width:${(_kv/_tot*100).toFixed(1)}%"></i></div>`
+         +`<div class="vsplit-cap">${I18N.tf('models.wsplit_cap','weights {w} · ctx {k}',{w:fmtMB(_w),k:fmtMB(_kv)})}</div>`
+        :'';
+      const runs=!m.runs?'—'
+        :`<span title="${I18N.tf('models.runs_t','Load sessions in this range: {g} fully on GPU, {s} spilled into system RAM (worst spill {mb})',{g:m.runs-m.spilled,s:m.spilled,mb:fmtMB(m.peakRam)})}">${m.runs}${m.spilled?` <span class="spillv">· ${I18N.tf('models.n_spilled','{n} spilled',{n:m.spilled})}</span>`:''}</span>`;
+      const ubTot=(m.usedBy||[]).reduce((s,x)=>s+(x.seconds||0),0)||1;
+      const usedBy=(m.usedBy||[]).length?m.usedBy.slice(0,3).map(x=>
+        `<span class="pill" style="text-transform:none" title="${I18N.tf('models.used_by_t','~{min}m of connection time to this server while the model was loaded (approximate when models share the server)',{min:Math.round((x.seconds||0)/60)})}">${esc(x.caller)} <b>${Math.round((x.seconds||0)/ubTot*100)}%</b></span>`).join(' ')
+        :'<span class="muted">—</span>';
+      return `<tr><td><span class="dot" style="background:${c}"></span>${copyable(m.model)}${modelMetaChips(m.model,m.ctxNow)}</td>
+        <td>${status}</td>
+        <td>${now}${split}</td>
         <td>${m.peak!=null?fmtMB(m.peak):'—'}</td>
         <td>${m.avg!=null?fmtMB(m.avg):'—'}</td>
+        <td>${runs}</td>
+        <td class="usedby">${usedBy}</td>
         <td class="vbars"><div class="vbar" title="peak ${m.peak!=null?fmtMB(m.peak):'—'}"><i style="width:${pW}%;background:${c}"></i></div>
           <div class="vbar" title="avg ${m.avg!=null?fmtMB(m.avg):'—'}"><i style="width:${aW}%;background:${c};opacity:.5"></i></div></td></tr>`;
     }).join('');
@@ -3768,7 +3841,7 @@ function renderModels(){
       ${servingFor(svc)}
       ${modelSpark(svc,tot)}
       ${callersFor(svc)}
-      <table style="margin-top:12px"><thead><tr><th>${I18N.t('col.model','Model')}</th><th>${I18N.t('col.status','Status')}</th><th>${I18N.t('col.now','Now')}</th><th>${I18N.t('col.peak','Peak')}</th><th>${I18N.t('col.avg','Avg')}</th><th>${I18N.t('col.peak_avg','Peak·Avg')}</th></tr></thead><tbody>${rows}</tbody></table>
+      <table style="margin-top:12px"><thead><tr><th>${I18N.t('col.model','Model')}</th><th>${I18N.t('col.status','Status')}</th><th>${I18N.t('col.now','Now')}</th><th>${I18N.t('col.peak','Peak')}</th><th>${I18N.t('col.avg','Avg')}</th><th>${I18N.t('col.runs','Runs')}</th><th>${I18N.t('col.used_by','Used by')}</th><th>${I18N.t('col.peak_avg','Peak·Avg')}</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }).join('');
 }
@@ -3776,12 +3849,15 @@ function renderModels(){
 // length, capabilities. From D.now.model_meta, keyed by model name. Cheap polish
 // that makes the panel feel authoritative — hidden when metadata isn't available.
 function fmtCtx(n){ n=+n||0; return n>=1000 ? (n%1000?(n/1000).toFixed(1):n/1000)+'K' : (n||''); }
-function modelMetaChips(model){
-  const m=((D.now&&D.now.model_meta)||{})[model]; if(!m) return '';
-  const out=[];
+function modelMetaChips(model,ctxNow){
+  let m=((D.now&&D.now.model_meta)||{})[model]; if(!m&&!ctxNow) return '';
+  const out=[]; m=m||{};
   if(m.param_size) out.push(`<span class="mchip" title="${I18N.t('models.meta_params','Parameters')}">${esc(m.param_size)}</span>`);
   if(m.quant)      out.push(`<span class="mchip" title="${I18N.t('models.meta_quant','Quantization')}">${esc(m.quant)}</span>`);
-  if(m.ctx)        out.push(`<span class="mchip" title="${I18N.t('models.meta_ctx','Context length')}">${esc(fmtCtx(m.ctx))} ${I18N.t('models.ctx','ctx')}</span>`);
+  // Runtime context (what THIS load runs with — sizes the KV cache) beats the
+  // model's max ctx when known; fall back to the max from /api/show otherwise.
+  if(ctxNow)       out.push(`<span class="mchip" title="${I18N.tf('models.meta_ctx_now','Context window this load is running with (num_ctx) — the KV cache is sized by it{max}',{max:m.ctx?'. '+I18N.tf('models.meta_ctx_max','Model max: {v}',{v:fmtCtx(m.ctx)}):''})}">@ ${esc(fmtCtx(ctxNow))} ${I18N.t('models.ctx','ctx')}</span>`);
+  else if(m.ctx)   out.push(`<span class="mchip" title="${I18N.t('models.meta_ctx','Context length')}">${esc(fmtCtx(m.ctx))} ${I18N.t('models.ctx','ctx')}</span>`);
   (m.caps||[]).forEach(c=>{ if(c==='vision'||c==='tools'||c==='embedding')
     out.push(`<span class="mchip cap" title="${I18N.t('models.meta_cap','Capability')}">${c==='vision'?I18N.t('models.cap_vision','👁 vision'):c==='tools'?I18N.t('models.cap_tools','🛠 tools'):I18N.t('models.cap_embed','🔢 embed')}</span>`); });
   return out.length ? ' '+out.join('') : '';
@@ -8154,6 +8230,27 @@ setInterval(()=>{
   if(TAB==='diskio')   renderDiskIo();
   if((TAB==='gpu'||TAB==='containers'||TAB==='models') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
+// AI-tab fast poll: while the AI Models tab is visible, ride the light
+// /api/ai/now (no DB; server-side throttled re-probe of ollama) every 5s so
+// load/unload/spill/ctx react in seconds instead of the ~25s worst case of
+// sampler(10s) + global poll(15s). Local host only — remote hosts keep the
+// regular cadence. Failures are silent: the 15s /api/data poll still rules.
+let AI_NOW_BUSY=false;
+setInterval(async()=>{
+  if(TAB!=='models' || CURRENT_HOST!=='local' || AI_NOW_BUSY || !D || !document.getElementById('auto').checked) return;
+  AI_NOW_BUSY=true;
+  try{
+    const j=await(await fetch('/api/ai/now')).json();
+    if(j&&Array.isArray(j.models)){
+      D.now.models=j.models;
+      if(j.model_meta) D.now.model_meta=j.model_meta;
+      if(j.serving)    D.now.serving=j.serving;
+      if(j.callers)    D.now.callers=j.callers;
+      renderModels();
+    }
+  }catch(e){}
+  AI_NOW_BUSY=false;
+},5000);
 // Treemaps lay out in pixels, so re-render them on resize (debounced).
 let _tmRz; window.addEventListener('resize',()=>{ clearTimeout(_tmRz); _tmRz=setTimeout(()=>{
   if(TAB==='host') renderRamTree();

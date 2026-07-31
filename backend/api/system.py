@@ -51,8 +51,23 @@ def api_data():
         summary = sorted(({"service": s, "peak": round(pk), "avg": round(av), "present": round(100 * cnt / ticks)}
                           for s, pk, av, cnt in system_repo.query_proc_summary(since, conn=_app.DB)),
                          key=lambda x: -x["peak"])
-        model_summary = sorted(({"service": s, "model": m, "peak": round(pk or 0), "avg": round(av or 0)}
-                                for s, m, pk, av in system_repo.query_model_summary(since, conn=_app.DB)),
+        # Load sessions ("runs") + RAM-spill split + per-model caller attribution —
+        # all additive fields on the same model_summary rows the tab already draws.
+        _run_gap = max(3 * _app.INTERVAL, 90)
+        runs_by = {(s, m): (n or 0, sp or 0)
+                   for s, m, n, sp, _pr in system_repo.query_model_runs(since, _run_gap, conn=_app.DB)}
+        used_by = {}
+        for s, m, caller, n in system_repo.query_model_callers(since, conn=_app.DB):
+            used_by.setdefault((s, m), []).append(
+                {"caller": caller, "seconds": int((n or 0) * _app.INTERVAL)})
+        for v in used_by.values():
+            v.sort(key=lambda x: -x["seconds"])
+        model_summary = sorted(({"service": s, "model": m, "peak": round(pk or 0), "avg": round(av or 0),
+                                 "peak_ram": round(pram or 0),
+                                 "runs": runs_by.get((s, m), (0, 0))[0],
+                                 "runs_spilled": runs_by.get((s, m), (0, 0))[1],
+                                 "used_by": used_by.get((s, m), [])[:4]}
+                                for s, m, pk, av, pram in system_repo.query_model_summary(since, conn=_app.DB)),
                                key=lambda x: -x["peak"])
         callers = sorted(({"caller": c, "server": s, "seconds": int((tot or 0) * _app.INTERVAL), "samples": n}
                           for c, s, tot, n in system_repo.query_edges_summary(since, conn=_app.DB)),
@@ -68,6 +83,26 @@ def api_data():
         mem_total = _app.LATEST["mem_total"] or 24576
         peak = max(total["mempk"]) if total["mempk"] else 0
         insights = _app.build_insights(total, services, mem_total, oom_evs, _app.LATEST["host"])
+        # A loaded model that spills into system RAM runs its overflow layers on the
+        # CPU — the single biggest silent tokens/sec killer, so surface it live.
+        for m in (_app.LATEST.get("models") or []):
+            if (m.get("ram") or 0) > 0:
+                detail = (f"{round(m['ram'])} MB of {m['service']}'s {m['model']} sits in "
+                          f"system RAM next to {round(m.get('vram') or 0)} MB in VRAM — "
+                          "layers offloaded to the CPU slow generation down.")
+                # When we know the weights size, say WHY it spilled: weights vs the
+                # context/KV share of the residency (ctx_now = the num_ctx loaded).
+                w = ((_app.LATEST.get("model_meta") or {}).get(m["model"]) or {}).get("weights_mb")
+                # NB: not `total` — that name holds this response's time-series dict.
+                resident = (m.get("vram") or 0) + m["ram"]
+                if w and resident > w:
+                    ctx = m.get("ctx_now")
+                    detail += (f" The residency is ~{round(w)} MB weights + ~{round(resident - w)} MB "
+                               f"context/KV & buffers{f' (running at {ctx:,} ctx)' if ctx else ''} — "
+                               "a smaller context window would shrink the KV cache and may fit VRAM.")
+                insights.append({"level": "warning",
+                                 "title": f"{m['model']} is spilling into system RAM",
+                                 "detail": detail})
         diskio_evs = [e for e in evs if e["kind"] == "diskio_spike"]
         if diskio_evs:
             latest_by_dev = {}
@@ -303,7 +338,7 @@ def metrics():
 
     # Clear all multi-label gauges before re-populating so stale series vanish.
     for key in ("gpu_vram_used", "gpu_vram_total", "gpu_util", "gpu_temp", "gpu_power",
-                "host_disk_used", "model_vram", "container_state", "systemd_unit",
+                "host_disk_used", "model_vram", "model_ram", "container_state", "systemd_unit",
                 "models_installed"):
         _app._G[key].clear()
 
@@ -334,6 +369,9 @@ def metrics():
         if vram is not None:
             _app._G["model_vram"].labels(server=entry.get("service", "?"),
                                     model=entry.get("model", "?")).set(vram)
+            if entry.get("ram") is not None:
+                _app._G["model_ram"].labels(server=entry.get("service", "?"),
+                                       model=entry.get("model", "?")).set(entry["ram"])
 
     # ── Installed-models registry, by provider (#219) — no new I/O: counts the
     # already-sampled model_catalog, same source the /api/models endpoint merges.
