@@ -37,6 +37,15 @@ def insert(name: str, ssh_target: str, tags: str, added_at: int, conn=None):
     c.commit()
 
 
+def rename(old: str, new: str, conn=None) -> int:
+    """Rename a host; the row keeps its target, tags, poll state and last check.
+    Raises sqlite3.IntegrityError when `new` is already taken. Returns rowcount."""
+    c = conn or connection()
+    cur = c.execute("UPDATE hosts SET name=? WHERE name=?", (new, old))
+    c.commit()
+    return cur.rowcount
+
+
 def delete(name: str, conn=None) -> int:
     """Delete a host by name. Returns rowcount."""
     c = conn or connection()

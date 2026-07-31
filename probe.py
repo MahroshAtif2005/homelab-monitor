@@ -10,6 +10,7 @@ JSON shape is a deliberate subset of the hub's own /api/health.now block so the
 UI can render local and remote with the same code paths.
 """
 import json, os, re, socket, subprocess, sys, time, glob, errno
+import http.client
 
 # ss listen-row parser, mirrored from app.py so service ports can be attributed
 # on the remote without depending on the iproute2 *Python* bindings.
@@ -370,40 +371,79 @@ def _smi_int(v):
         return 0
 
 
-def _nvidia_gpu():
-    """First NVIDIA GPU's snapshot via nvidia-smi, or {} if no driver / no GPU."""
+def _nvidia_cards():
+    """Every NVIDIA GPU via nvidia-smi as [{idx,name,util,mem_used,mem_total,
+    power,temp}], [] if no driver / no GPU. Same query and field order as the
+    hub's own collector, so per-card shapes match across the fleet."""
     try:
         r = subprocess.run(
             ["nvidia-smi",
-             "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu,name",
+             "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, timeout=3,
         )
         if r.returncode != 0:
-            return {}
-        lines = [l for l in r.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
-        if not lines:
-            return {}
-        parts = [p.strip() for p in lines[0].split(",")]
-        if len(parts) < 5:
-            return {}
-        return {"gpu": {
-            "count":     len(lines),
-            "name":      parts[4],
-            "mem_used":  _smi_int(parts[0]),   # MB
-            "mem_total": _smi_int(parts[1]),   # MB
-            "util":      _smi_int(parts[2]),   # %
-            "temp":      _smi_int(parts[3]),   # °C
-        }}
+            return []
+        cards = []
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 7:
+                continue
+            cards.append({
+                "idx":       _smi_int(parts[0]),
+                "name":      parts[1] or "GPU %s" % parts[0],
+                "util":      _smi_int(parts[2]),   # %
+                "mem_used":  _smi_int(parts[3]),   # MB
+                "mem_total": _smi_int(parts[4]),   # MB
+                "power":     _smi_int(parts[5]),   # W
+                "temp":      _smi_int(parts[6]),   # °C
+                "vendor":    "nvidia",
+            })
+        return cards
     except Exception:
-        return {}
+        return []
+
+
+def _nvidia_procs():
+    """GPU compute processes via nvidia-smi as [{pid,name,mem}] (MB), heaviest
+    first, [] when unavailable. process_name is a full path and may contain
+    commas — pid is the first field and used_memory the last, so the middle is
+    rejoined before taking the basename."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, timeout=3,
+        )
+        if r.returncode != 0:
+            return []
+        agg = {}
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            name = ",".join(parts[1:-1]).replace("\\", "/").rsplit("/", 1)[-1]
+            pid = _smi_int(parts[0])
+            # nvidia-smi emits one row per (process, GPU) — a process spanning
+            # several cards appears once per card, so pool its VRAM per pid.
+            key = (pid, name[:64] or "?")
+            agg[key] = agg.get(key, 0) + _smi_int(parts[-1])
+        procs = [{"pid": k[0], "name": k[1], "mem": v} for k, v in agg.items()]
+        procs.sort(key=lambda p: -p["mem"])
+        return procs[:20]
+    except Exception:
+        return []
 
 
 def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
-    """First AMD GPU's snapshot from the in-kernel amdgpu sysfs interface — present
-    on any host with the open `amdgpu` driver, no ROCm tools required. Same shape
-    as _nvidia_gpu(); {} when no AMD card is present or sysfs is unreadable.
-    `drm_root` is injectable for tests."""
+    """Every AMD GPU from the in-kernel amdgpu sysfs interface — present on any
+    host with the open `amdgpu` driver, no ROCm tools required. Same card shape
+    as _nvidia_cards() (idx is assigned by read_gpu); [] when no AMD card is
+    present or sysfs is unreadable. `drm_root` is injectable for tests."""
     def _int(path):
         try:
             with open(path) as f:
@@ -422,7 +462,7 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
     try:
         entries = sorted(os.listdir(drm_root))
     except OSError:
-        return {}
+        return []
     cards = []
     for nm in entries:
         m = re.fullmatch(r"card(\d+)", nm or "")
@@ -472,25 +512,171 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
             "mem_used":  int(round(used / 1048576.0)) if used is not None else 0,
             "mem_total": int(round(total / 1048576.0)) if total is not None else 0,
             "util":      busy if busy is not None else 0,
+            "power":     0,   # amdgpu sysfs has no cheap universal power counter
             "temp":      temp,
+            "vendor":    "amd",
         })
-    if not cards:
+    return cards
+
+
+_MEM_UNITS = {"b": 1, "kb": 1000, "kib": 1024, "mb": 1000**2, "mib": 1024**2,
+              "gb": 1000**3, "gib": 1024**3, "tb": 1000**4, "tib": 1024**4}
+
+def _stats_mem_bytes(v):
+    """'1.552GiB / 62.72GiB' (docker stats MemUsage) → used bytes, or None."""
+    m = re.match(r"\s*([\d.]+)\s*([KMGT]i?B|B)", (v or ""), re.I)
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * _MEM_UNITS[m.group(2).lower()])
+    except (ValueError, KeyError):
+        return None
+
+
+def _pid_container_id(pid):
+    """The 64-hex docker container id a pid runs in, from /proc/<pid>/cgroup —
+    the same signal the hub's service_for_pid uses. None for host processes."""
+    try:
+        with open("/proc/%d/cgroup" % int(pid)) as f:
+            m = re.search(r"[0-9a-f]{64}", f.read())
+        return m.group(0) if m else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_docker(gpu_procs=None):
+    """Docker inventory for the per-host Containers tab: `docker ps -a` for the
+    list, one bounded `docker stats` pass for the running containers' RAM and
+    CPU%, a `docker ps -s` pass for writable-layer disk size, and — when the
+    GPU reader found compute processes — per-container VRAM attribution via
+    each pid's cgroup, mirroring what the hub does locally. {} when docker is
+    absent or the SSH user can't reach the socket — the Hosts-tab capability
+    check explains which of the two it is. Read-only by design: the probe never
+    starts, stops or inspects beyond `ps`/`stats`."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"],
+                           capture_output=True, timeout=5)
+        if r.returncode != 0:
+            return {}
+        conts = []
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            state = (d.get("State") or "").lower()
+            conts.append({
+                "id":     (d.get("ID") or "")[:64],
+                "name":   (d.get("Names") or "?").split(",")[0],
+                "image":  d.get("Image") or "",
+                "state":  state,
+                "status": d.get("Status") or "",
+                "ports":  d.get("Ports") or "",
+                "uptime": (d.get("RunningFor") or "").replace(" ago", "") if state == "running" else "",
+            })
+        # Writable-layer disk per container ("2.5MB (virtual 1.2GB)" → rw part).
+        # Sizes make the daemon walk layers, so this pass is separate and its
+        # failure only costs the Disk column.
+        try:
+            r3 = subprocess.run(["docker", "ps", "-a", "-s", "--no-trunc",
+                                 "--format", "{{.ID}}\t{{.Size}}"],
+                                capture_output=True, timeout=8)
+            if r3.returncode == 0:
+                sizes = {}
+                for line in r3.stdout.decode("utf-8", "replace").splitlines():
+                    cid, _, sz = line.partition("\t")
+                    b = _stats_mem_bytes(sz)
+                    if b is not None:
+                        sizes[cid.strip()[:64]] = b
+                for c in conts:
+                    if c["id"] in sizes:
+                        c["disk_bytes"] = sizes[c["id"]]
+        except Exception:
+            pass
+        # VRAM per container: the GPU reader's compute pids, mapped through
+        # /proc/<pid>/cgroup to a container id. Host processes simply don't match.
+        if gpu_procs:
+            by_id = {c["id"]: c for c in conts if c["id"]}
+            for p in gpu_procs:
+                cid = _pid_container_id(p.get("pid") or 0)
+                c = by_id.get(cid)
+                if c is not None:
+                    c["vram_mb"] = c.get("vram_mb", 0) + (p.get("mem") or 0)
+        running = sum(1 for c in conts if c["state"] == "running")
+        if running:
+            # One stats pass for RAM/CPU%. `docker stats` blocks ~1.5s to sample;
+            # a wedged daemon must not sink the whole probe, so degrade silently.
+            try:
+                r2 = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}"],
+                                    capture_output=True, timeout=8)
+                if r2.returncode == 0:
+                    stats = {}
+                    for line in r2.stdout.decode("utf-8", "replace").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            s = json.loads(line)
+                        except ValueError:
+                            continue
+                        stats[s.get("Name")] = s
+                    for c in conts:
+                        s = stats.get(c["name"])
+                        if not s:
+                            continue
+                        mb = _stats_mem_bytes(s.get("MemUsage"))
+                        if mb is not None:
+                            c["mem_bytes"] = mb
+                        try:
+                            c["cpu_pct"] = float((s.get("CPUPerc") or "").rstrip("%"))
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        problems = sum(1 for c in conts
+                       if "unhealthy" in c["status"].lower()
+                       or c["state"] == "restarting"
+                       or (c["state"] == "exited" and not re.search(r"Exited \(0\)", c["status"])))
+        return {"docker": {"available": True, "containers": conts,
+                           "summary": {"total": len(conts), "running": running,
+                                       "problems": problems}}}
+    except Exception:
         return {}
-    return {"gpu": dict(cards[0], count=len(cards))}
 
 
 def read_gpu():
-    """First GPU's snapshot for the All-hosts table. NVIDIA via nvidia-smi and AMD
-    via the amdgpu sysfs interface (no ROCm needed). On a hybrid NVIDIA+AMD host we
-    keep the NVIDIA card as the representative but report the true total card count,
-    so the fleet table isn't blind to the AMD card(s). {} on a host with neither —
-    the GPU panel is simply hidden."""
-    nv, amd = _nvidia_gpu(), _amd_gpu_sysfs()
-    if nv and amd:
-        g = dict(nv["gpu"])
-        g["count"] = nv["gpu"].get("count", 1) + amd["gpu"].get("count", 1)
-        return {"gpu": g}
-    return nv or amd
+    """All of a host's GPUs for the hub. `gpus` is the per-card list (NVIDIA via
+    nvidia-smi, AMD via the amdgpu sysfs interface — no ROCm needed; a hybrid
+    box shows both, AMD re-indexed above the NVIDIA range like the hub's own
+    collector). `gpu` keeps the legacy aggregate shape for older hubs, now
+    pooled the same way the hub pools its local cards: VRAM + power summed,
+    util averaged, temp = hottest card. `gpu_procs` is the nvidia-smi
+    compute-apps list. {} on a host with neither vendor — the GPU panel is
+    simply hidden."""
+    nv, amd = _nvidia_cards(), _amd_gpu_sysfs()
+    base = (max(g["idx"] for g in nv) + 1) if nv else 0
+    for i, g in enumerate(amd):
+        g["idx"] = base + i
+    gpus = nv + amd
+    if not gpus:
+        return {}
+    agg = {
+        "count":     len(gpus),
+        "name":      gpus[0]["name"],
+        "vendor":    ("hybrid" if (nv and amd) else gpus[0]["vendor"]),
+        "mem_used":  sum(g["mem_used"] for g in gpus),
+        "mem_total": sum(g["mem_total"] for g in gpus),
+        "util":      int(round(sum(g["util"] for g in gpus) / len(gpus))),
+        "power":     sum(g["power"] for g in gpus),
+        "temp":      max(g["temp"] for g in gpus),
+    }
+    out = {"gpu": agg, "gpus": gpus}
+    if nv:
+        procs = _nvidia_procs()
+        if procs:
+            out["gpu_procs"] = procs
+    return out
 
 
 # ── System / Hardware / Network / Security inventory ──────────────────────────
@@ -659,7 +845,7 @@ def _count_physical_cores(cpuinfo):
     return len(pairs)
 
 
-def read_hw():
+def read_hw(gpu_agg=None):
     hw = {}
     ci = _read_text("/proc/cpuinfo") or ""
     mname = arm = vendor = None
@@ -714,7 +900,10 @@ def read_hw():
                                   "/sys/firmware/devicetree/base/model") or ""
     if machine:
         hw["machine"] = machine
-    g = read_gpu().get("gpu")
+    # main() passes the aggregate it already read (possibly {} on a GPU-less
+    # host) so nvidia-smi isn't shelled out to twice per probe cycle; only a
+    # standalone read_hw() call falls back to reading the GPU itself.
+    g = gpu_agg if gpu_agg is not None else read_gpu().get("gpu")
     if g and g.get("name"):
         hw["gpu_name"] = g["name"]
         if g.get("mem_total"):
@@ -1255,25 +1444,169 @@ def read_sec():
     }}
 
 
+# ── CPU package power via RAPL (Intel/AMD powercap) ──────────────────────────
+# app.py keeps cross-call state to derive watts; the probe runs once per poll
+# over SSH and can't, so it reads the cumulative energy counter twice around a
+# short dwell (same trick read_cpu uses) and derives instantaneous watts.
+# Package-only, MEASURED — not wall power. Degrades to {} when RAPL is absent.
+RAPL_ROOT = os.environ.get("RAPL_ROOT", "/sys/class/powercap")
+
+def _rapl_uj(path):
+    try:
+        with open(os.path.join(path, "energy_uj")) as f:
+            e = int(f.read().strip())
+        with open(os.path.join(path, "max_energy_range_uj")) as f:
+            m = int(f.read().strip())
+        return e, m
+    except (OSError, ValueError):
+        return None
+
+def _rapl_domains():
+    out = {}
+    try:
+        for top in sorted(glob.glob(os.path.join(RAPL_ROOT, "intel-rapl:*"))):
+            if os.path.basename(top).startswith("intel-rapl-mmio"):
+                continue
+            nm = (_read_text(os.path.join(top, "name")) or "").strip()
+            if nm:
+                out[top] = nm
+            for sub in sorted(glob.glob(os.path.join(top, "intel-rapl:*:*"))):
+                snm = (_read_text(os.path.join(sub, "name")) or "").strip()
+                if snm:
+                    out[sub] = snm
+    except Exception:
+        pass
+    return out
+
+def read_power(dwell=0.3):
+    """Instantaneous RAPL watts via two reads dwell seconds apart. Returns
+    {"cpu_power": W, "dram_power": W} (key omitted if that domain is absent),
+    or {} when RAPL is unavailable. Mirrors app.read_rapl_power: psys if present
+    else sum(package-*); dram = sum of dram sub-domains."""
+    domains = _rapl_domains()
+    if not domains:
+        return {}
+    first = {}
+    for path in domains:
+        rd = _rapl_uj(path)
+        if rd is not None:
+            first[path] = (rd[0], rd[1], time.monotonic())
+    if not first:
+        return {}
+    time.sleep(dwell)
+    per = {}
+    for path, name in domains.items():
+        if path not in first:
+            continue
+        rd = _rapl_uj(path)
+        if rd is None:
+            continue
+        e1, mrange = rd
+        e0, _m0, t0 = first[path]
+        dt = time.monotonic() - t0
+        if dt <= 0:
+            continue
+        de = e1 - e0
+        if de < 0:                 # uint counter wraparound
+            de += mrange
+        per[name] = max(0.0, de / 1e6 / dt)
+    if not per:
+        return {}
+    psys = per.get("psys")
+    pkgs = [w for n, w in per.items() if n.startswith("package")]
+    cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
+    drams = [w for n, w in per.items() if n == "dram"]
+    out = {}
+    if cpu_w is not None:
+        out["cpu_power"] = round(cpu_w, 1)
+    if drams:
+        out["dram_power"] = round(sum(drams), 1)
+    return out
+
+
+def read_ollama_models():
+    """Detect ollama on this host (#219 fleet-wide, Ollama slice): loaded models
+    from /api/ps (with live VRAM), falling back to the on-disk catalogue
+    (/api/tags) so models still show up even when none are currently loaded.
+    Read-only, short timeout, stdlib only -- silently returns [] if ollama isn't
+    running here. Shape matches what backend/probes' local model_catalog uses,
+    so the hub can merge local + remote entries with the same code path."""
+    def _http_json(path, timeout=2):
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", 11434, timeout=timeout)
+            try:
+                c.request("GET", path)
+                r = c.getresponse()
+                body = r.read()
+                status = r.status
+            finally:
+                c.close()
+            return json.loads(body) if status < 400 else None
+        except Exception:
+            return None
+
+    hostname = socket.gethostname()
+    # Resident set first (/api/ps): name -> live VRAM MB.
+    loaded = {}
+    ps = _http_json("/api/ps")
+    for m in (ps or {}).get("models", []) if isinstance(ps, dict) else []:
+        name = m.get("name")
+        if not name:
+            continue
+        vram = m.get("size_vram") or 0
+        loaded[name] = round(vram / 1048576) if vram else None
+    # Full on-disk catalogue (/api/tags) with registry detail, cross-referenced
+    # with the resident set — previously a loaded model SUPPRESSED the
+    # catalogue (ps-then-tags fallback), so a busy host's registry went thin
+    # exactly when it was interesting.
+    out = []
+    tags = _http_json("/api/tags")
+    for m in (tags or {}).get("models", []) if isinstance(tags, dict) else []:
+        name = m.get("name")
+        if not name:
+            continue
+        det = m.get("details") or {}
+        out.append({
+            "host": hostname, "service": "ollama", "provider": "ollama",
+            "model": name, "loaded": name in loaded, "vram_mb": loaded.get(name),
+            "size_bytes": m.get("size"), "family": det.get("family"),
+            "param_size": det.get("parameter_size"),
+            "quant": det.get("quantization_level"),
+            "modified": m.get("modified_at"),
+        })
+    # A model can be resident without appearing on disk (deleted while loaded,
+    # pulled through another path) — keep it visible rather than vanishing.
+    known = {m["model"] for m in out}
+    for name, vram in loaded.items():
+        if name not in known:
+            out.append({"host": hostname, "service": "ollama", "provider": "ollama",
+                        "model": name, "loaded": True, "vram_mb": vram})
+    return out
+
+
 def main():
+    gpu_block = read_gpu()
     data = {
         "host": {
             **read_cpu(),
+            **read_power(),
             **read_meminfo(),
             **read_loadavg(),
             **read_uptime(),
             **read_temp(),
-            **read_gpu(),
+            **gpu_block,
+            **read_docker(gpu_procs=gpu_block.get("gpu_procs")),
             **read_systemd(),
             **read_os(),
-            **read_hw(),
+            **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
             **read_net(),
             **read_sec(),
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
+        "model_catalog": read_ollama_models(),
         "at": int(time.time()),
-        "probe_version": "0.7",
+        "probe_version": "0.12",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

@@ -1,6 +1,6 @@
 ---
 title: MCP server — connect Claude, ChatGPT & any AI agent to your homelab
-description: Connect Claude, ChatGPT or any MCP client to your homelab. HomeLab Monitor ships a read-only Model Context Protocol server with 16 tools — one line to connect.
+description: Connect Claude, ChatGPT or any MCP client to your homelab. HomeLab Monitor ships a read-only Model Context Protocol server with 19 tools — one line to connect.
 ---
 
 # MCP server — connect Claude, ChatGPT & any AI agent
@@ -37,11 +37,14 @@ Everything the dashboard shows is reachable through these tools. The usual path 
 | `get_memory(range)` | Per-service & per-process RAM breakdown (the memory treemap) | `/api/data` |
 | `get_gpu(range)` | GPU util / VRAM / power / temp, per-model VRAM, caller attribution | `/api/data` |
 | `get_ai_models(range)` | Which models are loaded, their VRAM, and *who is driving them* | `/api/data` |
+| `get_installed_models()` | Every model available across the fleet's servers, grouped by provider | `/api/models` |
 | `get_history(range)` | Charted time-series (GPU + host) for trends | `/api/data` |
 | `get_costs(range)` | What the machine drew and cost, + a ranked per-process/container/service/model breakdown | `/api/costs` |
 | `get_entity_cost(name, kind, range)` | Cost drill-down for one process/container/service/model | `/api/costs/entity` |
 | `get_experiments(range, status)` | Tracked runs, each priced by the real GPU energy it burned | `/api/runs` |
 | `get_experiment(run_id)` | One run's loss-curve metrics, GPU power/util series and priced energy | `/api/runs/<id>` |
+| `get_benchmarks(range, model)` | Stored model benchmarks — tokens/sec, VRAM fit, recommended context | `/api/bench` |
+| `get_benchmark(run_id)` | One benchmark's full context sweep (tok/s & VRAM at each context size) | `/api/bench/<id>` |
 | `get_events(range)` / `get_alerts(range)` | Recent OOM kills / threshold crossings + insights | `/api/data` |
 | `scan_disk(path, rescan)` | WizTree-style nested folder-size treemap | `/api/disk_scan` |
 

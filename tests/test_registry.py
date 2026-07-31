@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app
@@ -141,13 +142,18 @@ class TestMergeRegistry(unittest.TestCase):
         self.assertTrue(all(m["provider"] == "ollama" and m["host"] == "local" for m in out))
 
     def test_vllm_catalog_entry_merged_in(self):
-        catalog = [{"service": "vllm-server", "provider": "vllm", "model": "mistral-7b-instruct",
-                    "loaded": True, "vram_mb": 5200}]
+        catalog = [{"host": "gpu-node-01",
+                    "service": "vllm-server",
+                    "provider": "vllm",
+                    "model": "mistral-7b-instruct",
+                    "loaded": True,
+                    "vram_mb": 5200}]
         out = app._merge_registry([], catalog)
         self.assertEqual(len(out), 1)
         m = out[0]
         self.assertEqual(m["name"], "mistral-7b-instruct")
         self.assertEqual(m["provider"], "vllm")
+        self.assertEqual(m["host"], "gpu-node-01")
         self.assertTrue(m["loaded"])
         self.assertEqual(m["vram_mb"], 5200)
         self.assertIsNone(m["size_bytes"])   # vLLM's /v1/models has no on-disk size
@@ -161,9 +167,50 @@ class TestMergeRegistry(unittest.TestCase):
         out = app._merge_registry(ollama, catalog)
         self.assertEqual(len(out), 3)   # still just the 3 ollama disk entries
 
+    def test_remote_ollama_entries_pass_through_with_detail(self):
+        # THE #236 regression: every provider=='ollama' catalog entry was
+        # dropped, which blinded the fleet registry to remote hosts' ollama —
+        # the exact hosts the fleet slice exists for. Remote entries (host set,
+        # not the hub) must survive, with their registry detail carried.
+        catalog = [{"host": "vader", "service": "ollama", "provider": "ollama",
+                    "model": "glm-air:80k", "loaded": True, "vram_mb": 62461,
+                    "size_bytes": 65495378161, "family": "glm4moe",
+                    "param_size": "110.5B", "quant": "Q3_K_M",
+                    "modified": "2026-07-20T10:00:00Z"}]
+        out = app._merge_registry([], catalog)
+        self.assertEqual(len(out), 1)
+        m = out[0]
+        self.assertEqual((m["host"], m["provider"]), ("vader", "ollama"))
+        self.assertTrue(m["loaded"])
+        self.assertEqual(m["vram_mb"], 62461)
+        self.assertEqual(m["param_size"], "110.5B")
+        self.assertEqual(m["size_gb"], round(65495378161 / 1073741824, 2))
+
+    def test_hub_hostname_ollama_entries_still_deduped(self):
+        # The hub's own probe stamps its real hostname — those are covered by
+        # the richer disk registry and must still be dropped like host-less ones.
+        with mock.patch.object(app.socket, "gethostname", return_value="hubbox"):
+            out = app._merge_registry([], [{"host": "hubbox", "provider": "ollama",
+                                            "model": "gemma3:1b", "loaded": False}])
+        self.assertEqual(out, [])
+
     def test_catalog_entries_missing_model_name_skipped(self):
         catalog = [{"service": "x", "provider": "vllm", "model": None}]
         self.assertEqual(app._merge_registry([], catalog), [])
+
+    def test_same_model_same_provider_different_hosts_kept(self):
+        catalog = [
+            {"host": "gpu-node-01", "service": "a", "provider": "vllm",
+             "model": "llama3", "loaded": True, "vram_mb": 1000},
+            {"host": "gpu-node-02", "service": "b", "provider": "vllm",
+             "model": "llama3", "loaded": False, "vram_mb": None},
+        ]
+        out = app._merge_registry([], catalog)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(
+            {m["host"] for m in out},
+            {"gpu-node-01", "gpu-node-02"}
+        )
 
     def test_same_name_two_providers_both_kept(self):
         catalog = [{"service": "a", "provider": "vllm", "model": "llama3", "loaded": True, "vram_mb": 1},

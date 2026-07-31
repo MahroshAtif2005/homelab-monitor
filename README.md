@@ -24,7 +24,7 @@ docker compose up -d
 
 Open `http://<your-host>:9800` and you're done. Full options (from source, GPU toolkit, Windows/WSL2) → [**Install docs**](https://sikamikanikobg.github.io/homelab-monitor/install/).
 
-> 🆕 **v0.24 — a restructured engine underneath, and controls on by default.** The ~7,600-line `app.py` monolith is now a proper `backend/` module tree (routes, collectors, probes, notify, DB access — all separated, all snapshot-tested) — behavior unchanged. Separately, container/service start-stop-restart controls and self-update flip from opt-in to **on by default** — check `docker-compose.readonly.yml` if you want the old fully read-only posture back. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md).
+> 🆕 **v0.26 — the LLM Benchmark Lab.** A new AI tab that measures what your local models *actually* do on your GPUs: generation & prompt tokens/sec, load time, the VRAM↔RAM split, and the largest context that still fits fully in VRAM — per card, priced like everything else in the app, stored so you only re-run when something changes. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md).
 
 ## What you get
 
@@ -44,12 +44,16 @@ One page, every box, the questions you actually have. The classics are all here 
 
 ![A run pushed from a notebook — its loss curve and the GPU power it actually used](docs/screenshots/experiment-detail.png)
 
+**"Will it fit?" — measured, not guessed.** The **Benchmark Lab** loads each of your local ollama models and sweeps a ladder of context sizes on your actual cards, recording generation & prompt tokens/sec, load time, how much spilled from VRAM into system RAM, and the **largest context that still fits fully in VRAM** — the cap worth setting. Pick which GPU(s) to test (via a throwaway pinned ollama container — your main one is never touched), overlay stored runs to compare cards, and every run comes back with the energy it burned and what it cost. Results are stored: benchmark once, re-run only when something changes.
+
+![The Benchmark Lab — a sortable leaderboard of your models with tokens/sec, VRAM fit and recommended context, plus a context-sweep chart](docs/screenshots/benchmark-lab.png)
+
 And the rest of the lab, the way it always was:
 
 - **Containers, honestly** — health plus **RAM and VRAM in separate columns** (real resident RAM, not page cache), and click one to tail its logs in a side drawer.
 - **systemd services** — local or remote, your own units highlighted, failures first.
 - **WizTree-style disk treemaps**, **network I/O with per-container top talkers**, and a **mini-htop** for who's eating CPU and RAM.
-- **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs.
+- **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs. The GPU tab works per host too: a remote multi-GPU rig shows **every card's VRAM, utilisation, power and temperature**, and the processes holding the memory.
 - **Uptime monitoring, in the box** — watch any **HTTP endpoint or TCP port** (your services, a NAS, a remote site) straight from the container: heartbeat strip, 24h/7d uptime %, latency, and **smart per-check alerts** — anti-flap confirm, recovery with downtime, and an optional slow-response warning. No extra uptime service to self-host — it's already in the box.
 - **Push alerts** — **Discord**, **ntfy.sh** and **Telegram**, edge-triggered so they don't spam.
 
@@ -91,7 +95,7 @@ The hub stitches `nvidia-smi` (plus AMD GPUs via the in-kernel `amdgpu` sysfs in
 
 **Your homelab is now legible to AI agents — point a client at one URL and it can see every host, container, GPU and disk. Read-only, no extra setup.**
 
-HomeLab Monitor isn't just a dashboard for *you* anymore; it's context for your AI agent too. A **read-only [MCP](https://modelcontextprotocol.io) server is built into the same container** (served on `:9810`) — so Claude, Claude Code, or any MCP client connects in one line and explores your whole lab through **12 named tools**, with the same coverage you see on the dashboard: hosts, containers, systemd services, GPU **and who's driving it**, per-process RAM, AI model servers, disk treemaps, history and alerts.
+HomeLab Monitor isn't just a dashboard for *you* anymore; it's context for your AI agent too. A **read-only [MCP](https://modelcontextprotocol.io) server is built into the same container** (served on `:9810`) — so Claude, Claude Code, or any MCP client connects in one line and explores your whole lab through **19 named tools**, with the same coverage you see on the dashboard: hosts, containers, systemd services, GPU **and who's driving it**, per-process RAM, AI model servers, installed models, costs, experiment runs, model benchmarks, disk treemaps, history and alerts.
 
 <p align="center"><img src="docs/mcp-agents.svg" alt="HomeLab Monitor connects over MCP to AI agents and MCP clients — Claude, ChatGPT, agents on local Ollama models, or any MCP client; read-only, both directions are question and answer" width="720"></p>
 
