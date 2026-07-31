@@ -88,3 +88,34 @@ baseline (642 passed), so they are pre-existing and unrelated:
 `test_public_status.py`. **Worth noting: CI only runs `test_snapshots.py` + a byte-compile
 smoke, so these 6 have been failing silently.** Out of scope here; flagged for a follow-up.
 
+## Shipped
+
+- PR **#260** `next` → `main`, all checks green (`snapshot`, `smoke`, `review`), merged with
+  `--admin` (branch protection wants an approval a solo maintainer can't self-give) → `efd7877`.
+- Tag **v0.28.0** → `efd7877`. `release.yml` published `0.28.0` / `0.28` / `latest`, each
+  `linux/amd64` + `linux/arm64`. Docker Hub tags carry **no `v`**, as expected.
+- GitHub Release published **after** the image existed, so the notes' "Pinned image" line was
+  true the moment anyone read it.
+- `repos/.../releases/latest` returns `v0.28.0`, so the in-app updater nudges deployed
+  instances (a negative update check caches for `UPDATE_TTL_NEGATIVE` = 10 min).
+
+### Comms reality vs the old policy note
+
+The release-policy note said a minor release fires selfh.st + the Discord announcer. **That is
+out of date** — checked against the live repo:
+
+- `selfhst-newsletter.yml`: `release:` trigger commented out **and** `disabled_manually` at the
+  repo level (both done 2026-07-14). It never runs. selfh.st entries are submitted **by hand**.
+- `discord-announce.yml`: `release:` trigger commented out — the external GitHub→Discord bot
+  (repo webhook) covers it, so Discord still gets the release, just not via Actions.
+
+Net: publishing the Release announced nothing through our own workflows. The community Discord
+bot posts it; **selfh.st is a manual step still outstanding** if this release is worth featuring.
+
+### Gotcha for next time
+
+`release.yml` runs on the **tag** ref, so `gh run list --branch main --workflow=release.yml`
+finds nothing and a wait-loop on it exits immediately on an unrelated match. Watch
+`--workflow=release.yml --limit 1` (its `headBranch` reads `v0.28.0`), or the run ID directly.
+
+
