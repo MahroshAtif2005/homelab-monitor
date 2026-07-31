@@ -23,15 +23,19 @@ def probe_ollama(ip):
     system RAM (`size` is the whole resident model, `size_vram` the GPU part; the
     difference is CPU-offloaded — same split the Benchmark Lab calls ram_offload).
     A model with size_vram=0 but size>0 is running fully on CPU: still Loaded.
-    If nothing is loaded, fall back to the pulled catalogue (/api/tags) so the
-    server still shows as Idle."""
+    Newer ollama also reports `context_length` — the num_ctx this load is running
+    with, i.e. what sizes the KV cache — carried as a 4th element (None on older
+    servers). If nothing is loaded, fall back to the pulled catalogue (/api/tags)
+    so the server still shows as Idle."""
     ps = _http_json(ip, 11434, "/api/ps")
     loaded = []
     for m in (ps or {}).get("models", []):
         size, vram = m.get("size") or 0, m.get("size_vram") or 0
         if not m.get("name") or (size <= 0 and vram <= 0):
             continue
-        loaded.append((m["name"], vram / 1048576, max(0, size - vram) / 1048576))
+        ctx = m.get("context_length")
+        loaded.append((m["name"], vram / 1048576, max(0, size - vram) / 1048576,
+                       int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None))
     if loaded:
         return loaded
     tags = _http_json(ip, 11434, "/api/tags")
@@ -228,10 +232,12 @@ def probe_models(ct):
     # Host-networked servers have no per-container IP; the hub shares the host net
     # namespace, so localhost reaches them on their published/default port.
     ip = ct.get("ip") or "127.0.0.1"
-    # Normalize every probe's rows to (model, vram_mb, ram_spill_mb). Only Ollama
-    # reports the spill split today, so 2-wide rows get ram=None (= unknown).
+    # Normalize every probe's rows to (model, vram_mb, ram_spill_mb, ctx_now).
+    # Only Ollama reports the spill split + runtime context today, so narrower
+    # rows get None (= unknown) for the missing fields.
     try:
-        found = [(it[0], it[1], it[2] if len(it) > 2 else None) for it in fn(ip) if it[0]]
+        found = [(it[0], it[1], it[2] if len(it) > 2 else None, it[3] if len(it) > 3 else None)
+                 for it in fn(ip) if it[0]]
     except Exception as e:
         print(f"probes/probe_models error: {e}", flush=True)
         return []
@@ -242,7 +248,7 @@ def probe_models(ct):
     # the panel. Loaded models and small catalogues (e.g. your pulled Ollama models)
     # are kept verbatim.
     if len(idle) > CATALOG_MAX:
-        idle = [(f"{len(idle)} models available", None, None)]
+        idle = [(f"{len(idle)} models available", None, None, None)]
     return loaded + idle
 
 # ── Group 2: Host metrics probe ───────────────────────────────────────────────

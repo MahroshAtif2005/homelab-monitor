@@ -430,6 +430,10 @@ LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "te
           "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
+# Where the recognised AI servers live ({name, ip, provider}) — kept OUTSIDE
+# LATEST on purpose: LATEST is served wholesale as /api/data "now", and internal
+# container IPs don't belong in a browser payload. Refreshed each sample.
+AI_SERVERS = []
 # Current state of the "status" monitors (Docker + systemd). The background
 # collector refreshes these; /api/health just serves the cached snapshot.
 HEALTH = {"docker": None, "systemd": None, "update": None, "processes": None, "at": 0}
@@ -531,7 +535,35 @@ def _http_text(ip, port, path, timeout=2):
         c.close()
     return data.decode("utf-8", "replace") if status < 400 else None
 
-_OLLAMA_META = {}   # model name -> {param_size, quant, ctx, caps}; immutable per tag, cached
+_OLLAMA_META = {}   # model name -> {param_size, quant, ctx, caps, weights_mb}; immutable per tag, cached
+
+# Per-IP cache of ollama's on-disk model sizes (/api/tags `size`). The GGUF file
+# is what gets mapped into VRAM/RAM, so it ≈ the *weights* part of a loaded
+# model's residency; total resident − weights = context/KV cache + compute
+# buffers — the split that explains WHY a model spills into system RAM.
+_OLLAMA_TAGS = {}            # ip -> {"at": ts, "sizes": {model_name: bytes}}
+_OLLAMA_TAGS_TTL = 600       # steady-state refetch cadence
+_OLLAMA_TAGS_MIN_GAP = 60    # floor between refetches when a loaded model is unknown
+
+def _ollama_weights_mb(ip, model):
+    """Weights footprint (MB) for an ollama model from the cached /api/tags size.
+    Refetches at most once per _OLLAMA_TAGS_MIN_GAP when an unknown loaded model
+    appears (fresh pull), else every _OLLAMA_TAGS_TTL. Never raises; a failed
+    fetch keeps the previous sizes and backs off."""
+    now = time.time()
+    c = _OLLAMA_TAGS.get(ip)
+    if (not c or now - c["at"] > _OLLAMA_TAGS_TTL
+            or (model not in c["sizes"] and now - c["at"] > _OLLAMA_TAGS_MIN_GAP)):
+        sizes = dict((c or {}).get("sizes") or {})
+        try:
+            d = _http_json(ip, 11434, "/api/tags", timeout=3) or {}
+            sizes = {m["name"]: m["size"] for m in d.get("models", [])
+                     if m.get("name") and m.get("size")}
+        except Exception:
+            pass                                   # keep old sizes, back off via "at"
+        c = _OLLAMA_TAGS[ip] = {"at": now, "sizes": sizes}
+    b = c["sizes"].get(model)
+    return round(b / 1048576) if b else None
 
 def _ollama_meta(ip, model):
     """POST /api/show once per model and cache. Passive — triggers no inference."""
@@ -562,7 +594,7 @@ def collect_model_meta(ai, models):
     is_ollama = {ct["name"] for ct in ai
                  if "ollama" in (ct.get("name", "") + " " + ct.get("image", "")).lower()}
     out = {}
-    for svc, mdl, vram, _ram in models:
+    for svc, mdl, vram, *_ in models:               # rows are (svc, mdl, vram, ram[, ctx])
         if svc not in is_ollama or not mdl:
             continue
         if mdl in _OLLAMA_META:
@@ -571,6 +603,14 @@ def collect_model_meta(ai, models):
             meta = _ollama_meta(ip_of.get(svc, "127.0.0.1"), mdl)
             if meta:
                 out[mdl] = meta
+        # Weights split (cheap cached /api/tags): attach for loaded models still
+        # missing it. Mutating the returned dict also fills the _OLLAMA_META cache
+        # entry, so a transient tags failure heals on a later sample.
+        m = out.get(mdl)
+        if m is not None and vram is not None and "weights_mb" not in m:
+            w = _ollama_weights_mb(ip_of.get(svc, "127.0.0.1"), mdl)
+            if w:
+                m["weights_mb"] = w
     return out
 
 _PROM_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([0-9.eEnaN+-]+)\s*$")
@@ -660,6 +700,51 @@ def collect_serving(ai):
             st["service"] = name
             out.append(st)
     return out
+
+# ── AI-tab fast path: throttled on-demand re-probe of ollama's /api/ps ────────
+# The sampler runs every INTERVAL (10s default) and the dashboard's global poll
+# every 15s, so the AI tab could lag ~25s behind a load/unload. /api/ai/now
+# serves a fresher view: re-probe just the ollama servers (one cheap HTTP call
+# each, 2s timeout) at most every _AI_NOW_TTL seconds, merged over LATEST for
+# everything else. No DB, no LOCK; network I/O happens outside any held lock.
+_AI_NOW_LOCK = threading.Lock()
+_AI_NOW_CACHE = {"at": 0.0, "models": None}
+_AI_NOW_TTL = float(os.environ.get("AI_NOW_TTL", "3"))
+
+def ai_models_now():
+    """Return (models, probed_at) — LATEST.models with the ollama entries
+    replaced by a just-probed view when the cache is stale. Shape matches
+    LATEST['models'] rows exactly ({service, model, vram, ram, ctx_now})."""
+    now = time.time()
+    with _AI_NOW_LOCK:
+        if _AI_NOW_CACHE["models"] is not None and now - _AI_NOW_CACHE["at"] < _AI_NOW_TTL:
+            return list(_AI_NOW_CACHE["models"]), _AI_NOW_CACHE["at"]
+    base = list(LATEST.get("models") or [])
+    fresh = {}                                      # svc -> replacement rows
+    for srv in list(AI_SERVERS):
+        if srv.get("provider") != "ollama":
+            continue
+        try:
+            rows = probe_ollama(srv.get("ip") or "127.0.0.1")
+        except Exception:
+            continue                                # keep the sampler's view for this svc
+        if not rows:                                # unreachable/empty → don't blank the tab
+            continue
+        out = []
+        for r in rows:                              # loaded rows are 4-wide, idle fallback 2-wide
+            name, vram, ram, ctx = (tuple(r) + (None, None))[:4]
+            loaded = vram is not None
+            out.append({"service": srv["name"], "model": name,
+                        "vram": round(vram) if loaded else None,
+                        "ram": (round(ram) if ram else 0) if loaded else None,
+                        "ctx_now": ctx if loaded else None})
+        fresh[srv["name"]] = out
+    models = [m for m in base if m.get("service") not in fresh]
+    for out in fresh.values():
+        models.extend(out)
+    with _AI_NOW_LOCK:
+        _AI_NOW_CACHE.update(at=now, models=models)
+    return list(models), now
 
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
 def _cpu_pct():
