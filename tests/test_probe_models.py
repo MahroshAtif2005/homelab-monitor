@@ -73,5 +73,61 @@ class TestReadOllamaModels(unittest.TestCase):
             self.assertEqual(probe.read_ollama_models(), [])
 
 
+class TestReadAiModels(unittest.TestCase):
+    """The multi-provider slice: every recognised server on the host, not just
+    ollama. Only LISTENING ports may be touched, and only a documented response
+    shape counts."""
+
+    OPENAI = {"data": [{"id": "mistral-7b-instruct"}, {"id": "qwen2.5-coder-7b"}]}
+
+    def test_openai_server_on_a_listening_port_is_reported(self):
+        listen = [{"proto": "tcp", "port": 8000}, {"proto": "tcp", "port": 22}]
+        with mock.patch.object(probe.http.client, "HTTPConnection",
+                               _fake_http({"/api/ps": None, "/api/tags": None,
+                                           "/v1/models": self.OPENAI})), \
+             mock.patch.object(probe.socket, "gethostname", return_value="vader"):
+            out = probe.read_ai_models(listen)
+        self.assertEqual([m["model"] for m in out],
+                         ["mistral-7b-instruct", "qwen2.5-coder-7b"])
+        self.assertEqual({m["provider"] for m in out}, {"vllm"})   # 8000 → vLLM
+        self.assertEqual(out[0]["host"], "vader")
+        # /v1/models lists what the server CAN serve, so entries are Idle — the
+        # same semantics the hub applies to its own non-ollama servers.
+        self.assertFalse(out[0]["loaded"])
+        self.assertIsNone(out[0]["vram_mb"])
+
+    def test_ports_that_are_not_listening_are_never_probed(self):
+        seen = []
+
+        class Spy:
+            def __init__(self, ip, port, timeout=None):
+                seen.append(port)
+            def request(self, *a):
+                raise ConnectionRefusedError
+            def getresponse(self):
+                raise ConnectionRefusedError
+            def close(self):
+                pass
+
+        with mock.patch.object(probe.http.client, "HTTPConnection", Spy):
+            probe.read_ai_models([{"proto": "tcp", "port": 8000}])
+        self.assertEqual(set(seen), {11434, 8000})   # ollama + the one listener
+
+    def test_non_model_server_on_a_known_port_is_ignored(self):
+        # Something answers on :8080 with valid JSON that is NOT /v1/models.
+        with mock.patch.object(probe.http.client, "HTTPConnection",
+                               _fake_http({"/api/ps": None, "/api/tags": None,
+                                           "/v1/models": {"message": "hello"}})):
+            out = probe.read_ai_models([{"proto": "tcp", "port": 8080}])
+        self.assertEqual(out, [])
+
+    def test_udp_listeners_do_not_count(self):
+        with mock.patch.object(probe.http.client, "HTTPConnection",
+                               _fake_http({"/api/ps": None, "/api/tags": None,
+                                           "/v1/models": self.OPENAI})):
+            out = probe.read_ai_models([{"proto": "udp", "port": 8000}])
+        self.assertEqual(out, [])
+
+
 if __name__ == "__main__":
     unittest.main()

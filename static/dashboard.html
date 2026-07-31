@@ -1769,6 +1769,9 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
       <input type="text" id="registry-filter" class="field" autocomplete="off" spellcheck="false"
              style="width:180px;font-size:12px;padding:5px 8px"
              placeholder="Filter by model or provider…">
+      <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap"
+             title="Show every host's inventory instead of just the selected one">
+        <input type="checkbox" id="registry-allhosts"><span data-i18n="registry.allhosts">All hosts</span></label>
       <button class="btn" id="registry-refresh" type="button"
               data-i18n="registry.refresh" title="Refresh registry">↻ Refresh</button>
     </div>
@@ -3689,7 +3692,12 @@ function renderRegistry(j){
   if(j) REGISTRY_LAST=j;
   const body=document.getElementById('registry-body');
   const sum=document.getElementById('registry-summary');
-  const all=(REGISTRY_LAST&&REGISTRY_LAST.models)||[];
+  const fleet=(REGISTRY_LAST&&REGISTRY_LAST.models)||[];
+  // Per-host by default: this tab follows the host selector, so its inventory
+  // must too — a fleet-wide list sitting under one host's name is exactly what
+  // made the tab feel unreliable. "All hosts" brings the fleet view back.
+  const showAll=!!(document.getElementById('registry-allhosts')||{}).checked;
+  const all=showAll?fleet:fleet.filter(m=>(m.host||'local')===CURRENT_HOST);
   if(!REGISTRY_LAST || !REGISTRY_LAST.enabled){
     if(sum) sum.textContent='';
     body.innerHTML='<div class="ins info" style="margin:2px 0"><div class="ic">🌙</div><div>'
@@ -3699,12 +3707,17 @@ function renderRegistry(j){
   }
   if(!all.length){
     if(sum) sum.textContent='';
-    body.innerHTML='<div class="muted" style="margin:6px 0">'+I18N.t('registry.empty','No models detected yet. Pull one to ollama, or start another recognised server, and it will appear here.')+'</div>';
+    body.innerHTML='<div class="muted" style="margin:6px 0">'+(showAll
+      ? I18N.t('registry.empty','No models detected yet. Pull one to ollama, or start another recognised server, and it will appear here.')
+      : I18N.tf('registry.empty_host','No models detected on {host} yet. Pull one to ollama there, or start another recognised server, and it will appear here.',{host:esc(CURRENT_HOST)}))+'</div>';
     return;
   }
-  const t=REGISTRY_LAST.totals||{};
+  // Totals are computed from the rows actually on screen — the payload's own
+  // totals are fleet-wide and would contradict a host-scoped list.
+  const tBytes=all.reduce((a,m)=>a+(m.size_bytes||0),0);
+  const tLoaded=all.filter(m=>m.loaded).length;
   if(sum) sum.textContent=I18N.tf('registry.summary','{n} models · {gb} GB on disk · {loaded} loaded',
-    {n:t.count!=null?t.count:all.length, gb:fmtBytes(t.total_bytes).replace(' GB',''), loaded:t.loaded!=null?t.loaded:0});
+    {n:all.length, gb:fmtBytes(tBytes).replace(' GB',''), loaded:tLoaded});
   const q=(document.getElementById('registry-filter')||{}).value||'';
   const needle=q.trim().toLowerCase();
   const models=needle
@@ -3770,6 +3783,8 @@ function _wireRegistry(){
   if(rgb) rgb.onclick=()=>loadRegistry();
   const flt=document.getElementById('registry-filter');
   if(flt) flt.addEventListener('input',()=>renderRegistry(null));
+  const allh=document.getElementById('registry-allhosts');
+  if(allh) allh.addEventListener('change',()=>renderRegistry(null));   // re-filters the cached payload, no refetch
 }
 
 // ── AI Models: expandable rows + per-model VRAM timeline ──────────────────────
@@ -5676,6 +5691,9 @@ function setHost(name){
   localStorage.setItem('hl_host', name);
   renderHostBar();
   refreshLocalOnlyNotices();   // hide/show cards across all local-only tabs
+  // The Installed-models inventory is host-scoped too — re-filter the cached
+  // payload so it can never lag a host behind the rest of the tab.
+  if(TAB === 'models' && REGISTRY_LAST) renderRegistry(null);
   refreshCurrentTab();
 }
 function refreshCurrentTab(){
@@ -7424,6 +7442,13 @@ function hostGpu(hostName){
 
 function describeMissingCapability(tabId){
   // Returns {ic, title, detail} for why this tab has no data for CURRENT_HOST.
+  // AI Models: only claim "nothing here" once a fetch has actually resolved for
+  // this host (RMODELS[host] exists). Before that the honest answer is "asking".
+  if(tabId === 'models' && CURRENT_HOST !== 'local' && !RMODELS[CURRENT_HOST]){
+    return {ic:'⏳',
+      title:`Reading ${CURRENT_HOST}'s model servers…`,
+      detail:`Asking the host what it has installed and loaded. This takes a moment on first view.`};
+  }
   if(tabId === 'gpu' || tabId === 'models'){
     const nv = hostCapability(CURRENT_HOST, 'nvidia');
     // Working nvidia-smi but no per-host data (yet): for GPU that means an
@@ -7433,7 +7458,7 @@ function describeMissingCapability(tabId){
       if(tabId === 'models'){
         return {ic:'🤖',
           title:`No AI models reported on ${CURRENT_HOST} yet`,
-          detail:`The probe reads the host's own ollama (127.0.0.1:11434) each poll — if ollama runs there, its models appear within seconds. Other AI servers (vLLM, llama.cpp, …) on remote hosts land in a later probe slice.`};
+          detail:`The probe reads the host's own AI servers each poll — ollama on 127.0.0.1:11434, plus vLLM, llama.cpp, LM Studio and friends on their standard ports. Start one there and its models appear within seconds.`};
       }
       return {ic:'🛠️',
         title:`Waiting for ${CURRENT_HOST}'s per-GPU data`,
@@ -7645,55 +7670,50 @@ function renderRemoteContainers(sec, rc){
 }
 
 // ── Per-host AI Models (remote hosts) ────────────────────────────────────────
-// The registry (/api/models) is fleet-aware: each remote's probe ships its
-// ollama catalogue cross-referenced with what's resident right now. This
-// panel shows the host's LOADED models with live VRAM, and keeps the
-// Installed-models registry card visible below (it's grouped by host). Other
-// AI servers on remotes (vLLM, llama.cpp…) are a later probe slice.
-let RMODELS_AT=0, RMODELS_HOST=null;
+// The registry (/api/models) is fleet-aware: every host's probe ships its own
+// AI-server catalogue cross-referenced with what is resident right now. This
+// panel shows the selected host's LOADED models with live VRAM and keeps the
+// Installed-models card — scoped to the same host — visible below it.
+//
+// Everything here is keyed by host on purpose. One /api/models response covers
+// the whole fleet, so switching hosts repaints from cache with no round-trip and
+// no window in which one host's numbers sit on screen under another host's name.
+let RMODELS = Object.create(null);   // host -> {at, models}; absent = never resolved
+let RMODELS_INFLIGHT = null;         // host whose fetch is in flight (one at a time)
+const RMODELS_TTL = 12000;           // deliberately < the 15s poll: an equal TTL and
+                                     // poll period race, which is what stranded the
+                                     // old code on a stale empty state.
 async function maybeRenderRemoteModels(sec){
   const host = CURRENT_HOST;
-  if(Date.now()-RMODELS_AT<15000 && RMODELS_HOST===host) return;
-  RMODELS_AT=Date.now(); RMODELS_HOST=host;
-  let j; try{ j=await(await fetch('/api/models')).json(); }catch(e){ return; }
-  if(host!==CURRENT_HOST || TAB!=='models') return;      // switched mid-fetch
-  const mine=(j.models||[]).filter(m=>m.host===host);
-  const old=sec.querySelector('.remote-models');
-  if(!mine.length){
-    if(old){ old.remove(); renderLocalOnlyNotice('models'); }
-    return;
-  }
-  const n=sec.querySelector('.scope-notice'); if(n) n.remove();
-  let box=old;
-  if(!box){ box=document.createElement('div'); box.className='remote-models'; sec.insertBefore(box, sec.firstChild); }
-  const reg=document.getElementById('registry-card');
-  if(reg) reg.style.display='';
-  const mb=document.getElementById('modelsbody');
-  if(mb) mb.style.display='none';
-  const loadedM=mine.filter(m=>m.loaded);
-  const g=hostGpu(host)||{};
-  const cap=g.mem_total||0;
-  const committed=loadedM.reduce((a,m)=>a+(m.vram_mb||0),0);
-  const kpis=[
-    {v:String(loadedM.length), l:I18N.t('rmod.loaded','Loaded now'), s:I18N.tf('rmod.of_installed','of {n} installed',{n:mine.length})},
-    {v:fmtMB(committed), l:I18N.t('rmod.vram_committed','VRAM committed'),
-     s:cap?I18N.tf('gpu.pct_full','{n}% full',{n:Math.round(committed/cap*100)})+' · '+fmtMB(cap):''},
-  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
-  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
-  const rows = loadedM.map(m=>{
-    const pct=cap?Math.round((m.vram_mb||0)/cap*100):0;
-    const det=[m.param_size, m.quant].filter(Boolean).join(' · ');
-    return `<tr><td><span class="dot" style="background:${colorFor(m.name)}"></span>${copyable(m.name)}${det?` <span class="muted">${esc(det)}</span>`:''}</td>
-      <td>${m.vram_mb!=null?fmtMB(m.vram_mb):'—'}</td>
-      <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
-  }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
-  box.innerHTML =
-    `<div class="card"><h2>🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
-      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
-      <table style="margin-top:12px"><tbody>${rows}</tbody></table>
-      <p class="cap">${I18N.t('rmod.cap','Read from the host\'s ollama (resident set + live VRAM). Other AI servers on remotes and the per-model VRAM timeline are a later slice.')}</p>
-    </div>`;
-  applyIcons(box);
+  // Never leave another host's card on screen, not even for one frame.
+  const stale = sec.querySelector('.remote-models');
+  if(stale && stale.dataset.host !== host) stale.remove();
+
+  const c = RMODELS[host];
+  if(c) paintRemoteModels(sec, host, c.models);          // instant, correct host
+  if(c && Date.now()-c.at < RMODELS_TTL) return;         // fresh enough
+  if(RMODELS_INFLIGHT === host) return;                  // one fetch per host at a time
+
+  RMODELS_INFLIGHT = host;
+  let j;
+  try{ j = await(await fetch('/api/models')).json(); }
+  catch(e){ return; }                                    // keep the last good cache
+  finally{ if(RMODELS_INFLIGHT === host) RMODELS_INFLIGHT = null; }
+
+  // Cache the whole fleet even when the tab is not visible: that is precisely
+  // what makes "switch host elsewhere, then open AI Models" paint instantly
+  // instead of showing a false empty state until the next poll.
+  const at = Date.now(), byHost = Object.create(null);
+  (j.models||[]).forEach(m => (byHost[m.host] = byHost[m.host] || []).push(m));
+  Object.keys(byHost).forEach(h => RMODELS[h] = {at, models: byHost[h]});
+  if(!RMODELS[host]) RMODELS[host] = {at, models: []};   // resolved: this host has none
+  // The Installed-models card reads the same payload — hand it over rather than
+  // making it fetch /api/models a second time.
+  REGISTRY_LAST = j;
+  if(TAB === 'models') renderRegistry(null);
+
+  if(CURRENT_HOST !== host || TAB !== 'models') return;  // cached above; just don't paint
+  paintRemoteModels(sec, host, RMODELS[host].models);
 }
 
 function renderLocalOnlyNotice(tabId){
@@ -7720,18 +7740,81 @@ function renderLocalOnlyNotice(tabId){
     }
   }
   if(tabId === 'models'){
-    maybeRenderRemoteModels(sec);                       // async — paints when data lands
     // The hub-local models body never applies to a remote host; the
-    // fleet-aware registry card below the panel always does.
+    // registry card below the panel does (scoped to this host).
     const mb=document.getElementById('modelsbody');
     if(mb) mb.style.display='none';
-    if(sec.querySelector('.remote-models')){            // panel already up: keep it,
+    // Refresh FIRST: this call is also the 15s tick's only path back into the
+    // fetch, so returning early on an existing panel would freeze it forever.
+    // It paints synchronously when the host is already cached.
+    maybeRenderRemoteModels(sec);
+    const panel = sec.querySelector('.remote-models');
+    if(panel && panel.dataset.host === CURRENT_HOST){
       const reg=document.getElementById('registry-card');
       if(reg) reg.style.display='';                     // and undo this call's hide-all on the registry
       return;
     }
   }
   sec.querySelectorAll('.remote-gpu, .remote-ct, .remote-models').forEach(el => el.remove());
+  showScopeNotice(sec, tabId);
+}
+function paintRemoteModels(sec, host, mine){
+  // Guard against a late paint: the fetch may resolve after the user has moved
+  // on, and the panel must never show one host's models under another's name.
+  if(host !== CURRENT_HOST) return;
+
+  const old=sec.querySelector('.remote-models');
+  if(!mine.length){
+    // Resolved and genuinely empty. Call showScopeNotice directly — going back
+    // through renderLocalOnlyNotice would re-enter this function via
+    // maybeRenderRemoteModels (the cache is warm by now) and recurse.
+    if(old) old.remove();
+    showScopeNotice(sec, 'models');
+    return;
+  }
+  const n=sec.querySelector('.scope-notice'); if(n) n.remove();
+  let box=old;
+  if(!box){
+    box=document.createElement('div');
+    box.className='remote-models';
+    sec.insertBefore(box, sec.firstChild);
+  }
+  box.dataset.host = host;   // stamp every paint, not just the first
+
+  const reg=document.getElementById('registry-card');
+  if(reg) reg.style.display='';
+  const mb=document.getElementById('modelsbody');
+  if(mb) mb.style.display='none';
+  const loadedM=mine.filter(m=>m.loaded);
+  const g=hostGpu(host)||{};
+  const cap=g.mem_total||0;
+  const committed=loadedM.reduce((a,m)=>a+(m.vram_mb||0),0);
+  const kpis=[
+    {v:String(loadedM.length), l:I18N.t('rmod.loaded','Loaded now'), s:I18N.tf('rmod.of_installed','of {n} installed',{n:mine.length})},
+    {v:fmtMB(committed), l:I18N.t('rmod.vram_committed','VRAM committed'),
+     s:cap?I18N.tf('gpu.pct_full','{n}% full',{n:Math.round(committed/cap*100)})+' · '+fmtMB(cap):''},
+  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
+  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
+  const rows = loadedM.map(m=>{
+    const pct=cap?Math.round((m.vram_mb||0)/cap*100):0;
+    const det=[m.param_size, m.quant].filter(Boolean).join(' · ');
+    return `<tr><td><span class="dot" style="background:${colorFor(m.name)}"></span>${copyable(m.name)}${det?` <span class="muted">${esc(det)}</span>`:''}</td>
+      <td>${m.vram_mb!=null?fmtMB(m.vram_mb):'—'}</td>
+      <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
+  }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
+  box.innerHTML =
+    `<div class="card"><h2>🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+      <table style="margin-top:12px"><tbody>${rows}</tbody></table>
+      <p class="cap">${I18N.t('rmod.cap','Read on the host itself: ollama\'s resident set with live VRAM, plus any other recognised AI server answering on its standard port. The per-model VRAM timeline stays hub-only for now.')}</p>
+    </div>`;
+  applyIcons(box);
+}
+
+// The scope notice — "this tab has nothing for the selected host, and here is
+// why". Extracted from renderLocalOnlyNotice so paintRemoteModels can show it
+// without calling back into renderLocalOnlyNotice (which would recurse).
+function showScopeNotice(sec, tabId){
   let notice = sec.querySelector('.scope-notice');
   if(!notice){
     notice = document.createElement('div');

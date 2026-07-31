@@ -1524,6 +1524,23 @@ def read_power(dwell=0.3):
     return out
 
 
+def _local_http_json(port, path, timeout=2):
+    """GET a JSON document from a service on this host's loopback. Best-effort:
+    any failure (down, slow, not HTTP, not JSON) is just None."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            status = r.status
+        finally:
+            c.close()
+        return json.loads(body) if status < 400 else None
+    except Exception:
+        return None
+
+
 def read_ollama_models():
     """Detect ollama on this host (#219 fleet-wide, Ollama slice): loaded models
     from /api/ps (with live VRAM), falling back to the on-disk catalogue
@@ -1532,18 +1549,7 @@ def read_ollama_models():
     running here. Shape matches what backend/probes' local model_catalog uses,
     so the hub can merge local + remote entries with the same code path."""
     def _http_json(path, timeout=2):
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", 11434, timeout=timeout)
-            try:
-                c.request("GET", path)
-                r = c.getresponse()
-                body = r.read()
-                status = r.status
-            finally:
-                c.close()
-            return json.loads(body) if status < 400 else None
-        except Exception:
-            return None
+        return _local_http_json(11434, path, timeout)
 
     hostname = socket.gethostname()
     # Resident set first (/api/ps): name -> live VRAM MB.
@@ -1584,8 +1590,66 @@ def read_ollama_models():
     return out
 
 
+# Recognised AI servers by the port they serve on, for hosts other than the hub.
+# Provider ids match backend/probes' PROBES keys so the same server reads the same
+# whether it runs on the hub or on a remote. Every one of these speaks the
+# OpenAI-compatible GET /v1/models; ollama is handled separately above because it
+# reports far more (live VRAM, on-disk size, quant).
+_OPENAI_PORTS = (
+    (8000,  "vllm"),
+    (8080,  "llama.cpp"),
+    (1234,  "lmstudio"),
+    (5000,  "tabbyapi"),
+    (5001,  "koboldcpp"),
+    (9997,  "xinference"),
+    (2242,  "aphrodite"),
+    (30000, "sglang"),
+    (4000,  "litellm"),
+    (7997,  "infinity"),
+    (39281, "cortex"),
+)
+
+
+def read_ai_models(listen=None):
+    """Every AI model server this host is running, for the fleet-wide registry.
+
+    Ollama gets the full treatment (resident set + on-disk catalogue with live
+    VRAM). Every other recognised server is read through the OpenAI-compatible
+    `GET /v1/models` that vLLM, llama.cpp, LM Studio, tabbyAPI, xinference,
+    SGLang, LiteLLM and friends all speak.
+
+    Three deliberate guards keep this cheap and honest:
+      * only ports ALREADY listening (from the `ss` data read_net collects) are
+        touched, so the usual cost is zero extra connections;
+      * an answer counts only when it parses as the documented shape, so an
+        unrelated web server on :8080 is never reported as a model host;
+      * models are reported Idle (loaded=False, vram_mb=None) because /v1/models
+        lists what a server CAN serve -- same semantics the hub applies to its
+        own non-ollama servers, which get their VRAM from nvidia-smi instead.
+    """
+    out = list(read_ollama_models())
+    ports = {s.get("port") for s in (listen or []) if s.get("proto") == "tcp"}
+    if not ports:
+        return out
+    hostname = socket.gethostname()
+    for port, provider in _OPENAI_PORTS:
+        if port not in ports:
+            continue
+        data = (_local_http_json(port, "/v1/models") or {}).get("data")
+        if not isinstance(data, list):
+            continue
+        for m in data:
+            name = m.get("id") if isinstance(m, dict) else None
+            if not name:
+                continue
+            out.append({"host": hostname, "service": provider, "provider": provider,
+                        "model": name, "loaded": False, "vram_mb": None})
+    return out
+
+
 def main():
     gpu_block = read_gpu()
+    net_block = read_net()          # hoisted: its listen list also drives model discovery
     data = {
         "host": {
             **read_cpu(),
@@ -1599,14 +1663,14 @@ def main():
             **read_systemd(),
             **read_os(),
             **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
-            **read_net(),
+            **net_block,
             **read_sec(),
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
-        "model_catalog": read_ollama_models(),
+        "model_catalog": read_ai_models((net_block.get("net") or {}).get("listen")),
         "at": int(time.time()),
-        "probe_version": "0.12",
+        "probe_version": "0.13",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

@@ -268,6 +268,27 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(len(j["models"]), 1)
         self.assertEqual(j["models"][0]["provider"], "vllm")
 
+    def test_remote_catalog_is_keyed_by_the_registered_host_name(self):
+        """A remote's probe reports its own socket.gethostname(), which need not
+        match the name the host is registered under. The dashboard filters by the
+        REGISTERED name, so /api/models must speak that name — otherwise the host's
+        models are silently invisible on its own AI Models tab."""
+        app.COPILOT_ENABLED = True
+        app.COPILOT_OLLAMA_URL = "http://127.0.0.1:1"   # dead port — no hub entries
+        with app.HOST_DATA_LOCK:
+            app.HOST_DATA["Work"] = {"data": {"model_catalog": [
+                {"host": "DESKTOP-ABC", "service": "ollama", "provider": "ollama",
+                 "model": "qwen3:8b", "loaded": True, "vram_mb": 5200},
+            ]}}
+        try:
+            j = self.c.get("/api/models").get_json()
+        finally:
+            with app.HOST_DATA_LOCK:
+                app.HOST_DATA.pop("Work", None)
+        self.assertEqual(len(j["models"]), 1)
+        self.assertEqual(j["models"][0]["host"], "Work")          # registered name wins
+        self.assertEqual(j["models"][0]["name"], "qwen3:8b")
+
     def test_disabled_returns_enabled_false_empty(self):
         app.COPILOT_ENABLED = False
         j = self.c.get("/api/models").get_json()
