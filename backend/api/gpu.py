@@ -65,7 +65,11 @@ def api_models():
     for _name, entry in remote_items:
         remote_catalog = (entry.get("data") or {}).get("model_catalog")
         if remote_catalog:
-            catalog.extend(remote_catalog)
+            # Key every remote entry by its REGISTERED fleet name — that is what the
+            # host selector sends and what the UI filters on. The probe's own
+            # socket.gethostname() may differ (registered "Work" vs "DESKTOP-…"),
+            # which silently hid that host's models.
+            catalog.extend(dict(m, host=_name) for m in remote_catalog)
     models = _app._merge_registry(ollama_models, catalog)
     return jsonify({
         "enabled": _app.COPILOT_ENABLED,

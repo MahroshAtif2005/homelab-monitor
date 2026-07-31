@@ -121,7 +121,6 @@
   "col.model": "Model",
   "col.now": "Now",
   "col.peak_avg": "Peak·Avg",
-  "col.runs": "Runs",
   "col.used_by": "Used by",
   "col.unit": "Unit",
   "col.memory": "Memory",
@@ -599,7 +598,7 @@
   "rmod.of_installed": "of {n} installed",
   "rmod.vram_committed": "VRAM committed",
   "rmod.none": "Nothing loaded right now — the installed models below are idle.",
-  "rmod.cap": "Read from the host's ollama (resident set + live VRAM). Other AI servers on remotes and the per-model VRAM timeline are a later slice.",
+  "rmod.cap": "Read on the host itself: ollama's resident set with live VRAM, plus any other recognised AI server answering on its standard port. The per-model VRAM timeline stays hub-only for now.",
   "mc.scope_fleet": "fleet · {n} boxes",
   "mc.scope_hub": "hub",
   "mc.scope_fleet_t": "Every box with measurable power, priced from its own poll history",
@@ -710,5 +709,7 @@
   "rules.status_test_failed": "Test failed",
   "rules.status_sending_test": "Sending test…",
   "rules.status_test_sent": "Test sent to: {channels}.",
-  "rules.status_error": "Error: {msg}"
+  "rules.status_error": "Error: {msg}",
+  "registry.empty_host": "No models detected on {host} yet. Pull one to ollama there, or start another recognised server, and it will appear here.",
+  "registry.allhosts": "All hosts"
 }

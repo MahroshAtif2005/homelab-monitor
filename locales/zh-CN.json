@@ -43,7 +43,6 @@
       "rmod.of_installed",
       "rmod.vram_committed",
       "rmod.none",
-      "rmod.cap",
       "mc.scope_fleet",
       "mc.scope_hub",
       "mc.scope_fleet_t",
@@ -61,9 +60,11 @@
       "uptime.f_target_http",
       "uptime.tcp_prefix",
       "diag.lbl.nvidia",
-      "diag.lbl.dbus"
+      "diag.lbl.dbus",
+      "registry.empty_host",
+      "registry.allhosts"
     ],
-    "coverage": 0.9173
+    "coverage": 0.918
   },
   "nav.group.monitoring": "监控",
   "nav.group.ai": "AI",
@@ -181,7 +182,6 @@
   "col.model": "模型",
   "col.now": "当前",
   "col.peak_avg": "峰值·平均",
-  "col.runs": "运行次数",
   "col.used_by": "使用方",
   "col.unit": "单元",
   "col.memory": "内存",
@@ -770,5 +770,7 @@
   "rules.status_test_failed": "测试失败",
   "rules.status_sending_test": "正在发送测试…",
   "rules.status_test_sent": "测试已发送至：{channels}。",
-  "rules.status_error": "错误：{msg}"
+  "rules.status_error": "错误：{msg}",
+  "registry.empty_host": "No models detected on {host} yet. Pull one to ollama there, or start another recognised server, and it will appear here.",
+  "registry.allhosts": "All hosts"
 }
