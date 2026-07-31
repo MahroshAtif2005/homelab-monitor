@@ -145,7 +145,7 @@ Issues and PRs are very welcome — especially new model-server probes, new moni
 
 ### Contributors
 
-Thanks to everyone who's filed an issue, opened a PR, or helped shape the roadmap. v0.24.0's `backend/` module-tree refactor came from **[@pehota](https://github.com/pehota)**. v0.23.0's maintenance windows came from **[@1HazyOne707](https://github.com/1HazyOne707)**. See the [changelog](CHANGELOG.md) for the full, ongoing credit trail.
+Thanks to everyone who's filed an issue, opened a PR, or helped shape the roadmap. The entire AMD GPU back-end — per-process VRAM via DRM fdinfo and full panel parity in v0.28.0, real VRAM on unified-memory APUs in v0.26.0 — came from **[@andreahaku](https://github.com/andreahaku)**. v0.27.0's fleet-aware model registry and v0.23.0's maintenance windows came from **[@1HazyOne707](https://github.com/1HazyOne707)**. v0.27.0's RAPL CPU/DRAM power and v0.24.0's `backend/` module-tree refactor came from **[@pehota](https://github.com/pehota)**. See the [changelog](CHANGELOG.md) for the full, ongoing credit trail.
 
 ## License
 
