@@ -19,12 +19,18 @@ def open_db_connection(path: str):
 
 
 def apply_schema_migrations(conn, schema_sql, sample_migrations, host_migrations,
-                             runs_migrations, uptime_migrations, uptime_check_migrations):
+                             runs_migrations, uptime_migrations, uptime_check_migrations,
+                             models_migrations=()):
     """Run the full schema bootstrap + column-addition migrations on *conn*."""
     conn.executescript(schema_sql)
     for col in sample_migrations:
         try:
             conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in models_migrations:
+        try:
+            conn.execute(f"ALTER TABLE models ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     for col in host_migrations:
