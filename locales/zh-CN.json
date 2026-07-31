@@ -354,6 +354,8 @@
   "gpu.chip_power_t": "相对显卡功耗上限的实际功耗。长期接近 ~100% = 受功耗限制。",
   "gpu.chip_pstate": "性能状态",
   "gpu.chip_pstate_t": "P0 = 最高性能；P 编号越大频率越低。",
+  "gpu.chip_perflevel": "性能策略",
+  "gpu.chip_perflevel_t": "amdgpu 性能策略：auto 由驱动自动选择频率，low/high 锁定频率，manual 为用户强制指定档位。",
   "gpu.chip_memtemp": "显存温度",
   "gpu.throttling_tip": "降频：{x}",
   "gpu.throttling_badge": "降频中",

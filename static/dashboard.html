@@ -3334,7 +3334,15 @@ function renderGpuDetail(x, powerNow){
     chips.push({v:`${Math.round(powerNow||0)} / ${Math.round(x.power_limit)} W`, l:I18N.tf('gpu.chip_power','Power · {n}% of cap',{n:head}),
                 c: head>=98?'bad':head>=90?'warn':'', t:I18N.t('gpu.chip_power_t','Draw vs the card power limit. Pinned at ~100% = power-capped.')});
   }
-  if(x.pstate) chips.push({v:x.pstate, l:I18N.t('gpu.chip_pstate','Perf state'), t:I18N.t('gpu.chip_pstate_t','P0 = max performance; higher P-numbers = lower clocks.')});
+  if(x.pstate){
+    // NVIDIA reports numeric P-states (P0, P2, …); AMD reports the amdgpu power
+    // policy (auto/low/high/manual) in the same field. Same chip, right tooltip.
+    const amdLevel = !/^P\d+$/i.test(x.pstate);
+    chips.push({v:x.pstate,
+                l:amdLevel?I18N.t('gpu.chip_perflevel','Perf level'):I18N.t('gpu.chip_pstate','Perf state'),
+                t:amdLevel?I18N.t('gpu.chip_perflevel_t','The amdgpu performance policy: auto lets the driver pick clocks, low/high pin them, manual means user-forced levels.')
+                          :I18N.t('gpu.chip_pstate_t','P0 = max performance; higher P-numbers = lower clocks.')});
+  }
   if(x.temp_mem>0) chips.push({v:Math.round(x.temp_mem)+'°C', l:I18N.t('gpu.chip_memtemp','Mem temp'), c:x.temp_mem>=95?'bad':x.temp_mem>=85?'warn':''});
   box.innerHTML = chips.map(c=>`<div class="gpu-chip ${c.c||''}"${c.t?` title="${esc(c.t)}"`:''}><div class="v">${esc(c.v)}</div><div class="l">${esc(c.l)}</div></div>`).join('');
 }

@@ -4878,6 +4878,72 @@ def _amd_hwmon(dev, fname):
         pass
     return None
 
+_PCI_IDS_PATHS = ("/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids")
+_AMD_PCI_NAMES = None      # device-id -> pci.ids device name for vendor 0x1002, lazy
+
+def _amd_pci_names():
+    """The pci.ids device table for vendor 0x1002, parsed once and cached.
+
+    The slim image ships no pci.ids, but the host's copy is visible through the
+    HOST_ROOT bind mount (Fedora/Arch keep it in /usr/share/hwdata, Debian/Ubuntu
+    in /usr/share/misc). {} when neither file is readable — callers fall back."""
+    global _AMD_PCI_NAMES
+    if _AMD_PCI_NAMES is not None:
+        return _AMD_PCI_NAMES
+    complete_empty = False
+    for p in _PCI_IDS_PATHS:
+        names = {}
+        try:
+            with open(_hp(p), encoding="utf-8", errors="replace") as f:
+                in_amd = False
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    if not line.startswith("\t"):          # vendor row
+                        in_amd = line[:4].lower() == "1002"
+                    elif in_amd and not line.startswith("\t\t"):   # device row
+                        did, _, name = line.strip().partition("  ")
+                        if re.fullmatch(r"[0-9a-fA-F]{4}", did) and name:
+                            names[did.lower()] = name.strip()
+                    elif in_amd is False and names:
+                        break                              # left the AMD block
+        except OSError:
+            continue        # unreadable, or died mid-file — discard the partial parse
+        if names:
+            _AMD_PCI_NAMES = names
+            return names
+        complete_empty = True
+    # Cache decides by what happened: a file we consumed to the end but that had
+    # no AMD block won't grow one — cache the empty table rather than re-parsing
+    # the whole file per card per tick. No file readable at all stays uncached:
+    # a bind mount added later (or a package install) should be picked up, and
+    # the retry is just two failed opens.
+    if complete_empty:
+        _AMD_PCI_NAMES = {}
+    return {}
+
+def _amd_pci_name(dev):
+    """Card name from pci.ids for kernels that expose no product_name (every APU,
+    e.g. Strix Halo). None when the device id is unknown — the caller keeps its
+    'AMD GPU <n>' fallback.
+
+    pci.ids writes AMD entries as 'Codename [Retail Name / Retail Name / …]'. The
+    bracket is used when it names exactly one retail product; when it lists several
+    variants sharing the silicon (Strix Halo covers 8050S and 8060S) we can't tell
+    which one this host has, so the codename is the honest label."""
+    try:
+        with open(os.path.join(dev, "device")) as f:
+            did = f.read().strip().lower()
+    except OSError:
+        return None
+    raw = _amd_pci_names().get(did[2:] if did.startswith("0x") else did)
+    if not raw:
+        return None
+    m = re.fullmatch(r"(.+?)\s*\[(.+)\]", raw)
+    if m:
+        raw = m.group(1).strip() if "/" in m.group(2) else m.group(2).strip()
+    return raw if raw.upper().startswith("AMD") else "AMD " + raw
+
 def amd_gpus(drm_root=None):
     """Per-card AMD snapshot from amdgpu sysfs, matching the dict shape sample_once()
     builds for NVIDIA cards (idx/name/util/mem_used/mem_total/power/temp; MB, %, W,
@@ -4926,6 +4992,8 @@ def amd_gpus(drm_root=None):
                 name = f.read().strip() or None
         except OSError:
             pass
+        if not name:
+            name = _amd_pci_name(dev)     # pci.ids via HOST_ROOT; None when unknown
         # PCI address of the card (cardN/device is a symlink into /sys/devices/pci…):
         # lets per-process fdinfo attribution match its drm-pdev to *this* card, so a
         # hybrid APU + discrete-AMD host counts GTT only for the APU. None when the
@@ -4934,7 +5002,7 @@ def amd_gpus(drm_root=None):
         pdev = os.path.basename(os.path.realpath(dev))
         if not re.fullmatch(r"[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", pdev):
             pdev = None
-        gpus.append({
+        g = {
             "idx": int(m.group(1)),
             "name": name or "AMD GPU %s" % m.group(1),
             "util": float(busy) if busy is not None else 0.0,
@@ -4944,8 +5012,105 @@ def amd_gpus(drm_root=None):
             "temp":  round(temp_m / 1000.0, 1) if temp_m is not None else 0.0,
             "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
             "pdev": pdev,
-        })
+        }
+        _amd_enrich_card(g, dev)   # clocks/perf level/cap — here, while dev is known
+        gpus.append(g)
     return gpus
+
+_PP_DPM_CUR = re.compile(r":\s*(\d+)\s*[Mm][Hh]z\s*\*")   # the row the driver stars
+
+def _amd_dpm_mhz(dev, fname):
+    """Current clock in MHz from a pp_dpm_* table ('1: 1100Mhz *' — the starred row
+    is the active level). None when the file is absent or nothing is starred."""
+    try:
+        with open(os.path.join(dev, fname)) as f:
+            for line in f:
+                m = _PP_DPM_CUR.search(line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return None
+
+def _amd_hwmon_labeled(dev, prefix, label):
+    """Value of the hwmon channel whose <prefix>N_label matches `label` (e.g. the
+    temp channel labelled 'mem'), or None. Channel numbers are not stable across
+    cards/drivers, so matching by label is the only reliable way."""
+    try:
+        for h in sorted(os.listdir(os.path.join(dev, "hwmon"))):
+            hdir = os.path.join(dev, "hwmon", h)
+            try:
+                entries = sorted(os.listdir(hdir))
+            except OSError:
+                continue
+            for e in entries:
+                if e.startswith(prefix) and e.endswith("_label"):
+                    try:
+                        with open(os.path.join(hdir, e)) as f:
+                            if f.read().strip() != label:
+                                continue
+                    except OSError:
+                        continue
+                    v = _amd_read_int(os.path.join(hdir, e[:-6] + "_input"))
+                    if v is not None:      # unreadable input: keep scanning — another
+                        return v           # hwmon dir may carry the same label
+    except OSError:
+        pass
+    return None
+
+def _amd_hwmon_has(dev, fname):
+    """Whether any of the card's hwmon dirs contains `fname`."""
+    try:
+        for h in sorted(os.listdir(os.path.join(dev, "hwmon"))):
+            if os.path.exists(os.path.join(dev, "hwmon", h, fname)):
+                return True
+    except OSError:
+        pass
+    return False
+
+def _amd_enrich_card(g, dev):
+    """Best-effort AMD counterpart of _enrich_gpus: attach mem_util/clk_sm/clk_mem/
+    power_limit/pstate/temp_mem to one card dict, from amdgpu sysfs instead of
+    nvidia-smi. Mutates in place; an absent node leaves its field unset, so the
+    same UI chips that hide on an NVIDIA '[N/A]' stay hidden here too.
+
+    Runs inside amd_gpus' per-card loop rather than as a separate collector pass:
+    the collector re-indexes AMD cards above the NVIDIA range (gpu_samples.idx must
+    not collide), so after that point idx no longer names the sysfs cardN and the
+    dev path here is the only reliable handle. Unlike the NVIDIA enrichment (extra
+    nvidia-smi round-trips, kept out of the base query), these are a handful of
+    sysfs reads on the card we're already visiting.
+
+    What each card offers varies: discrete cards have mem_busy_percent, a power cap
+    and a 'mem' temp channel; APUs (Strix Halo) have none of those but do publish
+    the pp_dpm_* clock tables and the hwmon sclk frequency. Everything is optional
+    and read independently."""
+    clk = _amd_dpm_mhz(dev, "pp_dpm_sclk")
+    if clk is None:
+        # hwmon fallback, by label like everything else here: freq1 is usually
+        # sclk but nothing guarantees the ordering. A bare freq1_input is trusted
+        # only when the channel is unlabelled (very old kernels).
+        hz = _amd_hwmon_labeled(dev, "freq", "sclk")
+        if hz is None and not _amd_hwmon_has(dev, "freq1_label"):
+            hz = _amd_hwmon(dev, "freq1_input")        # Hz
+        clk = round(hz / 1e6) if hz else None
+    if clk is not None:
+        g["clk_sm"] = clk
+    mclk = _amd_dpm_mhz(dev, "pp_dpm_mclk")
+    if mclk is not None:
+        g["clk_mem"] = mclk
+    mbusy = _amd_read_int(os.path.join(dev, "mem_busy_percent"))
+    if mbusy is not None:
+        g["mem_util"] = mbusy
+    cap = _amd_hwmon(dev, "power1_cap")                # microwatts
+    if cap:
+        g["power_limit"] = round(cap / 1e6, 1)
+    lvl = _rt(os.path.join(dev, "power_dpm_force_performance_level"))
+    if lvl and lvl.strip():
+        g["pstate"] = lvl.strip()                      # auto / low / high / manual
+    tmem = _amd_hwmon_labeled(dev, "temp", "mem")      # millidegrees C
+    if tmem:
+        g["temp_mem"] = round(tmem / 1000.0, 1)
 
 _DRM_UNITS = {"": 1, "KiB": 1024, "MiB": 1048576, "GiB": 1073741824, "TiB": 1099511627776}
 _DRM_MAJOR = 226        # /dev/dri/* — char-major-226, Documentation/admin-guide/devices.txt
@@ -5134,7 +5299,11 @@ def _enrich_gpus(gpus):
             g = by_idx.get(int(_gpu_num(p[0])))
             if not g:
                 continue
-            g["mem_util"]    = _gpu_num(p[1])
+            # '[N/A]' must leave mem_util ABSENT, not 0: _gpu_extra averages only
+            # the cards that measured, and the UI hides the chip on absence — a
+            # coerced 0 would read as a confident "0% mem-bandwidth".
+            if p[1] and not p[1].startswith("["):
+                g["mem_util"] = _gpu_num(p[1])
             g["clk_sm"]      = _gpu_num(p[2])
             g["clk_mem"]     = _gpu_num(p[3])
             g["power_limit"] = _gpu_num(p[4])
@@ -5167,16 +5336,28 @@ def _gpu_extra(gpus):
     if not gpus:
         return {}
     g0 = gpus[0]
-    return {
-        "mem_util":  round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus)),
+    out = {
         "clk_sm":    round(g0.get("clk_sm", 0)),
         "clk_mem":   round(g0.get("clk_mem", 0)),
-        "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
         "pstate":    g0.get("pstate", ""),
         "temp_mem":  round(max((g.get("temp_mem", 0) for g in gpus), default=0)),
         "throttled": any(g.get("throttled") for g in gpus),
         "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
     }
+    # The power chip divides the POOLED draw by this cap, so the cap is published
+    # only when every card contributed one: with a card of unknown cap (AMD APUs
+    # have no power1_cap, NVIDIA can say '[N/A]') the ratio would exceed 100%
+    # merely because the denominator is missing a card the numerator includes.
+    if all(g.get("power_limit", 0) > 0 for g in gpus):
+        out["power_limit"] = round(sum(g["power_limit"] for g in gpus))
+    # mem-bandwidth utilisation averaged over the cards that actually measured it:
+    # cards without the counter (AMD APUs have no mem_busy_percent, NVIDIA can say
+    # '[N/A]') must neither surface a fabricated 0% chip nor dilute a measured
+    # value — 0 measured and 0 unknown are different claims.
+    measured = [g["mem_util"] for g in gpus if "mem_util" in g]
+    if measured:
+        out["mem_util"] = round(sum(measured) / len(measured))
+    return out
 
 def service_for_pid(pid, nm):
     try:
