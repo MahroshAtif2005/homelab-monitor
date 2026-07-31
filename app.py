@@ -34,7 +34,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.25.0"
+VERSION      = "0.27.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -145,6 +145,8 @@ if _PROM_OK:
         "gpu_temp":          _make_gauge("homelab_gpu_temp_c",          "GPU temperature (°C)",              ["gpu"]),
         "gpu_power":         _make_gauge("homelab_gpu_power_w",         "GPU power draw (W)",                ["gpu"]),
         "host_cpu":          _make_gauge("homelab_host_cpu_pct",        "Host CPU usage (%)"),
+        "host_cpu_power":    _make_gauge("homelab_host_cpu_power_w",    "Host CPU package power, RAPL (W)"),
+        "host_dram_power":   _make_gauge("homelab_host_dram_power_w",   "Host DRAM power, RAPL (W)"),
         "host_mem_used":     _make_gauge("homelab_host_mem_used_pct",   "Host memory used (%)"),
         "host_disk_used":    _make_gauge("homelab_host_disk_used_pct",  "Host disk used (%)",                ["mountpoint"]),
         "container_state":   _make_gauge("homelab_container_state",     "Container state (1=running)",       ["name", "state"]),
@@ -280,6 +282,27 @@ CREATE INDEX IF NOT EXISTS idx_samples_1m_ts     ON samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_samples_1h_ts     ON samples_1h(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1m_ts ON net_samples_1m(ts);
 CREATE INDEX IF NOT EXISTS idx_net_samples_1h_ts ON net_samples_1h(ts);
+-- Per-host time-series (multi-host slice): one raw row per successful host poll
+-- plus an hourly rollup keyed (ts, host) — the same raw/1h split the hub uses
+-- for its own samples. Raw rows are retention-purged; the 1h rollup is kept
+-- (like samples_1h) and is what the Costs integration reads.
+CREATE TABLE IF NOT EXISTS host_samples(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_host_ts ON host_samples(host, ts);
+CREATE TABLE IF NOT EXISTS host_samples_1h(
+  ts INTEGER NOT NULL, host TEXT NOT NULL,
+  cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  cnt INTEGER DEFAULT 1,
+  PRIMARY KEY(ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_host_samples_1h_host_ts ON host_samples_1h(host, ts);
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at INTEGER NOT NULL
@@ -404,6 +427,7 @@ _apply_schema_migrations(DB)
 _backfill_rollups(DB)
 
 LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "temp": 0,
+          "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
 # Where the recognised AI servers live ({name, ip, provider}) — kept OUTSIDE
@@ -1086,8 +1110,8 @@ def _rapl_domains():
     return out
 
 def read_rapl_power():
-    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_w (psys if present
-    else sum of package-* domains), dram_w (sum of dram sub-domains), domains{name:w}.
+    """Per-interval RAPL watts, or {} when unavailable. Keys: cpu_power (psys if present
+    else sum of package-* domains), dram_power (sum of dram sub-domains), domains{name:w}.
     First call after start seeds state and returns {} (no prior delta)."""
     domains = _rapl_domains()
     if not domains:
@@ -1116,10 +1140,10 @@ def read_rapl_power():
     psys = per.get("psys")
     pkgs = [w for n, w in per.items() if n.startswith("package")]
     cpu_w = psys if psys is not None else (sum(pkgs) if pkgs else None)
-    drams = [w for n, w in per.items() if n == "dram" or n.endswith(":dram")]
-    dram_w = round(sum(drams), 1) if drams else None
-    return {"cpu_w": (round(cpu_w, 1) if cpu_w is not None else None),
-            "dram_w": dram_w, "domains": {n: round(w, 1) for n, w in per.items()}}
+    drams = [w for n, w in per.items() if n == "dram"]
+    dram_power = round(sum(drams), 1) if drams else None
+    return {"cpu_power": (round(cpu_w, 1) if cpu_w is not None else None),
+            "dram_power": dram_power, "domains": {n: round(w, 1) for n, w in per.items()}}
 
 _POWER_PROC_TOPN  = 8
 _POWER_PROC_MIN_W = 0.5
@@ -3212,6 +3236,39 @@ def delete_host(name):
         rowcount = _hosts_repo.delete(name, conn=DB)
     return rowcount > 0
 
+def rename_host(old, new):
+    """Rename a registered host. The hosts row moves as-is (SSH target, tags,
+    poll calibration, last check), the in-memory poll cache is re-keyed so the
+    UI doesn't fall back to "no data yet" for a poll interval, and experiment /
+    benchmark history recorded under the old name follows so per-host filters
+    don't silently split. Returns (host_dict, error_or_None)."""
+    from backend.db.repos import hosts as _hosts_repo
+    new = (new or "").strip()
+    if not _HOST_NAME_RE.match(new):
+        return None, "Name must be 1–31 chars: letters, digits, '_' or '-', starting with a letter or digit."
+    if new.lower() == "local":
+        return None, "'local' is reserved for the hub itself."
+    if new == old:
+        return None, "Nothing to update."
+    with LOCK:
+        try:
+            rowcount = _hosts_repo.rename(old, new, conn=DB)
+        except sqlite3.IntegrityError:
+            return None, f"A host named '{new}' already exists."
+        if rowcount == 0:
+            return None, f"No host named '{old}'."
+        DB.execute("UPDATE runs SET host=? WHERE host=?", (new, old))
+        DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
+        from backend.db.repos import host_samples as _hs_repo
+        _hs_repo.rename_host(old, new, conn=DB)
+        DB.commit()
+    with HOST_DATA_LOCK:
+        if old in HOST_DATA:
+            HOST_DATA[new] = HOST_DATA.pop(old)
+    with LOCK:
+        row = _hosts_repo.get(new, conn=DB)
+    return {"name": row[0], "ssh_target": row[1], "tags": row[2]}, None
+
 def update_host(name, ssh_target=None, tags=None):
     """Patch an existing host. Returns (host_dict, error_or_None). The cached
     last-check result is cleared because the old probe no longer applies to the
@@ -3434,6 +3491,12 @@ def _local_now_snapshot():
     for k in ("os", "hw", "net", "sec"):
         if H.get(k):
             out[k] = H[k]
+    # RAPL power — top-level in LATEST (not inside host), so pull explicitly.
+    # Mirrors the shape probe.py emits for remotes (cpu_power/dram_power in host).
+    for k in ("cpu_power", "dram_power"):
+        v = (LATEST or {}).get(k)
+        if v is not None:
+            out[k] = v
     # GPU summary — the existing collector already keeps these on LATEST's top
     # level. Re-use them so the All-hosts row for `local` matches the shape
     # probe.py emits for remotes.
@@ -3558,8 +3621,32 @@ def _poll_one_host(h):
                 entry["error_at"] = int(time.time())
                 entry["fails"]    = int(entry.get("fails", 0)) + 1
             HOST_DATA[h["name"]] = entry
+        if data:
+            _record_host_sample(h["name"], data.get("host") or {})
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
+
+def _record_host_sample(name, hostd):
+    """Persist one poll's vitals into host_samples(+_1h) — the storage that the
+    per-host Costs view (and future per-host history charts) integrate over.
+    Absent sensors stay NULL (no GPU ≠ zero watts). Runs on the poller's worker
+    threads, so the write takes LOCK on its own — never nest under
+    HOST_DATA_LOCK. A storage failure must not break the poll itself."""
+    from backend.db.repos import host_samples as _hs_repo
+    gpu = hostd.get("gpu") or {}
+    try:
+        with LOCK:
+            _hs_repo.record(
+                DB, int(time.time()), name,
+                cpu=hostd.get("cpu"), ram_used=hostd.get("ram_used"),
+                ram_total=hostd.get("ram_total"), load1=hostd.get("load1"),
+                ctemp=hostd.get("ctemp"),
+                gpu_util=gpu.get("util"), gpu_mem_used=gpu.get("mem_used"),
+                gpu_mem_total=gpu.get("mem_total"), gpu_power=gpu.get("power"),
+                cpu_power=hostd.get("cpu_power"), dram_power=hostd.get("dram_power"))
+            DB.commit()
+    except Exception as e:
+        print(f"host sample store error ({name}):", e, flush=True)
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import host_poller
@@ -4882,6 +4969,72 @@ def _amd_hwmon(dev, fname):
         pass
     return None
 
+_PCI_IDS_PATHS = ("/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids")
+_AMD_PCI_NAMES = None      # device-id -> pci.ids device name for vendor 0x1002, lazy
+
+def _amd_pci_names():
+    """The pci.ids device table for vendor 0x1002, parsed once and cached.
+
+    The slim image ships no pci.ids, but the host's copy is visible through the
+    HOST_ROOT bind mount (Fedora/Arch keep it in /usr/share/hwdata, Debian/Ubuntu
+    in /usr/share/misc). {} when neither file is readable — callers fall back."""
+    global _AMD_PCI_NAMES
+    if _AMD_PCI_NAMES is not None:
+        return _AMD_PCI_NAMES
+    complete_empty = False
+    for p in _PCI_IDS_PATHS:
+        names = {}
+        try:
+            with open(_hp(p), encoding="utf-8", errors="replace") as f:
+                in_amd = False
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    if not line.startswith("\t"):          # vendor row
+                        in_amd = line[:4].lower() == "1002"
+                    elif in_amd and not line.startswith("\t\t"):   # device row
+                        did, _, name = line.strip().partition("  ")
+                        if re.fullmatch(r"[0-9a-fA-F]{4}", did) and name:
+                            names[did.lower()] = name.strip()
+                    elif in_amd is False and names:
+                        break                              # left the AMD block
+        except OSError:
+            continue        # unreadable, or died mid-file — discard the partial parse
+        if names:
+            _AMD_PCI_NAMES = names
+            return names
+        complete_empty = True
+    # Cache decides by what happened: a file we consumed to the end but that had
+    # no AMD block won't grow one — cache the empty table rather than re-parsing
+    # the whole file per card per tick. No file readable at all stays uncached:
+    # a bind mount added later (or a package install) should be picked up, and
+    # the retry is just two failed opens.
+    if complete_empty:
+        _AMD_PCI_NAMES = {}
+    return {}
+
+def _amd_pci_name(dev):
+    """Card name from pci.ids for kernels that expose no product_name (every APU,
+    e.g. Strix Halo). None when the device id is unknown — the caller keeps its
+    'AMD GPU <n>' fallback.
+
+    pci.ids writes AMD entries as 'Codename [Retail Name / Retail Name / …]'. The
+    bracket is used when it names exactly one retail product; when it lists several
+    variants sharing the silicon (Strix Halo covers 8050S and 8060S) we can't tell
+    which one this host has, so the codename is the honest label."""
+    try:
+        with open(os.path.join(dev, "device")) as f:
+            did = f.read().strip().lower()
+    except OSError:
+        return None
+    raw = _amd_pci_names().get(did[2:] if did.startswith("0x") else did)
+    if not raw:
+        return None
+    m = re.fullmatch(r"(.+?)\s*\[(.+)\]", raw)
+    if m:
+        raw = m.group(1).strip() if "/" in m.group(2) else m.group(2).strip()
+    return raw if raw.upper().startswith("AMD") else "AMD " + raw
+
 def amd_gpus(drm_root=None):
     """Per-card AMD snapshot from amdgpu sysfs, matching the dict shape sample_once()
     builds for NVIDIA cards (idx/name/util/mem_used/mem_total/power/temp; MB, %, W,
@@ -4916,7 +5069,8 @@ def amd_gpus(drm_root=None):
         # reflect reality. Discrete cards (large VRAM) are unaffected.
         gtt_total = _amd_read_int(os.path.join(dev, "mem_info_gtt_total"))    # bytes
         gtt_used  = _amd_read_int(os.path.join(dev, "mem_info_gtt_used"))     # bytes
-        if vram_total and gtt_total and vram_total <= (1 << 30):  # VRAM <= 1 GiB -> iGPU
+        unified = bool(vram_total and gtt_total and vram_total <= (1 << 30))  # VRAM <= 1 GiB -> iGPU
+        if unified:
             total, used = gtt_total, (gtt_used or 0)
         else:
             total, used = vram_total, vram_used
@@ -4929,7 +5083,17 @@ def amd_gpus(drm_root=None):
                 name = f.read().strip() or None
         except OSError:
             pass
-        gpus.append({
+        if not name:
+            name = _amd_pci_name(dev)     # pci.ids via HOST_ROOT; None when unknown
+        # PCI address of the card (cardN/device is a symlink into /sys/devices/pci…):
+        # lets per-process fdinfo attribution match its drm-pdev to *this* card, so a
+        # hybrid APU + discrete-AMD host counts GTT only for the APU. None when the
+        # link doesn't resolve to a BDF (test fixtures, exotic buses) — attribution
+        # then falls back to the any-card-unified heuristic.
+        pdev = os.path.basename(os.path.realpath(dev))
+        if not re.fullmatch(r"[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", pdev):
+            pdev = None
+        g = {
             "idx": int(m.group(1)),
             "name": name or "AMD GPU %s" % m.group(1),
             "util": float(busy) if busy is not None else 0.0,
@@ -4937,8 +5101,255 @@ def amd_gpus(drm_root=None):
             "mem_total": round(total / 1048576.0) if total is not None else 0.0,
             "power": round(powr_u / 1e6, 1) if powr_u is not None else 0.0,
             "temp":  round(temp_m / 1000.0, 1) if temp_m is not None else 0.0,
-        })
+            "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
+            "pdev": pdev,
+        }
+        _amd_enrich_card(g, dev)   # clocks/perf level/cap — here, while dev is known
+        gpus.append(g)
     return gpus
+
+_PP_DPM_CUR = re.compile(r":\s*(\d+)\s*[Mm][Hh]z\s*\*")   # the row the driver stars
+
+def _amd_dpm_mhz(dev, fname):
+    """Current clock in MHz from a pp_dpm_* table ('1: 1100Mhz *' — the starred row
+    is the active level). None when the file is absent or nothing is starred."""
+    try:
+        with open(os.path.join(dev, fname)) as f:
+            for line in f:
+                m = _PP_DPM_CUR.search(line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return None
+
+def _amd_hwmon_labeled(dev, prefix, label):
+    """Value of the hwmon channel whose <prefix>N_label matches `label` (e.g. the
+    temp channel labelled 'mem'), or None. Channel numbers are not stable across
+    cards/drivers, so matching by label is the only reliable way."""
+    try:
+        for h in sorted(os.listdir(os.path.join(dev, "hwmon"))):
+            hdir = os.path.join(dev, "hwmon", h)
+            try:
+                entries = sorted(os.listdir(hdir))
+            except OSError:
+                continue
+            for e in entries:
+                if e.startswith(prefix) and e.endswith("_label"):
+                    try:
+                        with open(os.path.join(hdir, e)) as f:
+                            if f.read().strip() != label:
+                                continue
+                    except OSError:
+                        continue
+                    v = _amd_read_int(os.path.join(hdir, e[:-6] + "_input"))
+                    if v is not None:      # unreadable input: keep scanning — another
+                        return v           # hwmon dir may carry the same label
+    except OSError:
+        pass
+    return None
+
+def _amd_hwmon_has(dev, fname):
+    """Whether any of the card's hwmon dirs contains `fname`."""
+    try:
+        for h in sorted(os.listdir(os.path.join(dev, "hwmon"))):
+            if os.path.exists(os.path.join(dev, "hwmon", h, fname)):
+                return True
+    except OSError:
+        pass
+    return False
+
+def _amd_enrich_card(g, dev):
+    """Best-effort AMD counterpart of _enrich_gpus: attach mem_util/clk_sm/clk_mem/
+    power_limit/pstate/temp_mem to one card dict, from amdgpu sysfs instead of
+    nvidia-smi. Mutates in place; an absent node leaves its field unset, so the
+    same UI chips that hide on an NVIDIA '[N/A]' stay hidden here too.
+
+    Runs inside amd_gpus' per-card loop rather than as a separate collector pass:
+    the collector re-indexes AMD cards above the NVIDIA range (gpu_samples.idx must
+    not collide), so after that point idx no longer names the sysfs cardN and the
+    dev path here is the only reliable handle. Unlike the NVIDIA enrichment (extra
+    nvidia-smi round-trips, kept out of the base query), these are a handful of
+    sysfs reads on the card we're already visiting.
+
+    What each card offers varies: discrete cards have mem_busy_percent, a power cap
+    and a 'mem' temp channel; APUs (Strix Halo) have none of those but do publish
+    the pp_dpm_* clock tables and the hwmon sclk frequency. Everything is optional
+    and read independently."""
+    clk = _amd_dpm_mhz(dev, "pp_dpm_sclk")
+    if clk is None:
+        # hwmon fallback, by label like everything else here: freq1 is usually
+        # sclk but nothing guarantees the ordering. A bare freq1_input is trusted
+        # only when the channel is unlabelled (very old kernels).
+        hz = _amd_hwmon_labeled(dev, "freq", "sclk")
+        if hz is None and not _amd_hwmon_has(dev, "freq1_label"):
+            hz = _amd_hwmon(dev, "freq1_input")        # Hz
+        clk = round(hz / 1e6) if hz else None
+    if clk is not None:
+        g["clk_sm"] = clk
+    mclk = _amd_dpm_mhz(dev, "pp_dpm_mclk")
+    if mclk is not None:
+        g["clk_mem"] = mclk
+    mbusy = _amd_read_int(os.path.join(dev, "mem_busy_percent"))
+    if mbusy is not None:
+        g["mem_util"] = mbusy
+    cap = _amd_hwmon(dev, "power1_cap")                # microwatts
+    if cap:
+        g["power_limit"] = round(cap / 1e6, 1)
+    lvl = _rt(os.path.join(dev, "power_dpm_force_performance_level"))
+    if lvl and lvl.strip():
+        g["pstate"] = lvl.strip()                      # auto / low / high / manual
+    tmem = _amd_hwmon_labeled(dev, "temp", "mem")      # millidegrees C
+    if tmem:
+        g["temp_mem"] = round(tmem / 1000.0, 1)
+
+_DRM_UNITS = {"": 1, "KiB": 1024, "MiB": 1048576, "GiB": 1073741824, "TiB": 1099511627776}
+_DRM_MAJOR = 226        # /dev/dri/* — char-major-226, Documentation/admin-guide/devices.txt
+
+def _fdinfo_bytes(val):
+    """DRM fdinfo memory value ('326612 KiB', '4 MiB') → bytes. 0 when the field is
+    absent or malformed.
+
+    A bare number is BYTES, not KiB: the kernel's fdinfo formatter only scales up
+    while the value divides evenly by 1024, so anything unaligned prints raw — which
+    is also why a zero shows up as a plain '0' and never '0 KiB'. An unrecognised
+    unit yields 0 rather than a figure that could be off by a factor of 1024."""
+    parts = (val or "").split()
+    try:
+        n = int(parts[0])
+    except (IndexError, ValueError):
+        return 0
+    return n * _DRM_UNITS.get(parts[1] if len(parts) > 1 else "", 0)
+
+def _fdinfo_region_bytes(f, region):
+    """Bytes one DRM client holds privately in <region> ('vram' or 'gtt').
+
+    drm-resident-* is the standardised key; kernels predating that standardisation
+    (6.1–6.14, including the 6.6 and 6.12 LTS lines) publish the same figure as
+    drm-memory-*, and drm-total-* is its printed alias — so both are fallbacks.
+    Without them attribution silently reports nothing on those kernels.
+
+    Selection is by key PRESENCE, not truthiness: drm-resident-* can legitimately
+    say 0 (an evicted allocation) while drm-total-* stays nonzero, and falling
+    through on the zero would attribute non-resident memory as current residency.
+
+    drm-shared-* is subtracted: a buffer shared between two clients (a dma-buf
+    between an app and a compositor, say) is counted in the residency of BOTH, and
+    their client-ids differ so dedup can't catch it. Crediting it whole to each
+    would let per-service totals exceed the card's capacity; the shared remainder
+    stays in the chart's system/other bucket instead of being counted twice."""
+    resident = 0
+    for prefix in ("drm-resident-", "drm-memory-", "drm-total-"):
+        val = f.get(prefix + region)
+        if val is not None:
+            resident = _fdinfo_bytes(val)
+            break
+    return max(0, resident - _fdinfo_bytes(f.get("drm-shared-" + region)))
+
+def _drm_fd_rdev(proc_root, pid, fd):
+    """The fd's device number, or None when the stat isn't possible.
+
+    Identity is the device number, not the path: a container may map the render node
+    anywhere (--device=/dev/dri/renderD128:/dev/gpu0), and a path test would drop it
+    along with all of that container's attribution. None means "read fdinfo anyway"
+    — a process in another user namespace (rootless podman) denies the stat while
+    still allowing fdinfo, and that container is often the one holding all the
+    VRAM."""
+    try:
+        st = os.stat(os.path.join(proc_root, pid, "fd", fd))
+    except OSError:
+        return None
+    return st.st_rdev                              # 0 for anything but a device
+
+def amd_fdinfo_procs(proc_root="/proc"):
+    """Per-PID AMD GPU memory from DRM fdinfo — the amdgpu counterpart of
+    `nvidia-smi --query-compute-apps`, which AMD has no equivalent of without ROCm
+    tools (and this project's AMD back-end is deliberately sysfs-only, issue #1).
+    Any process holding the GPU has /proc/<pid>/fd/N → a char-major-226 device and
+    a matching fdinfo file with `drm-driver: amdgpu` plus per-region residency keys
+    (drm-resident-*, or drm-memory-*/drm-total-* on older kernels; pre-5.19 kernels
+    have none and yield {}). Returns {pid: {pdev: {"vram": MB, "gtt": MB}}} — split
+    per PCI device (pdev may be None on kernels that omit drm-pdev) so the caller
+    can apply the APU-vs-discrete GTT policy per card, not host-wide.
+
+    Clients are counted once per (device, client-id) GLOBALLY, not per pid: dup()'d
+    fds, threads and forked children all republish the same DRM client, and a
+    supervisor keeping an inherited fd open would otherwise double the worker's
+    buffers across two services. Pids scan lowest-first so such a client is always
+    credited to the same process — with readdir order the owner would flip between
+    samples and the per-service history would sawtooth. Client-ids are recycled, so
+    in the rare case where one is freed and reissued mid-scan we drop the second
+    sighting — one sample's worth of memory, self-correcting on the next.
+
+    Reads the hub's own /proc: the hub runs in the host PID namespace, so host pids
+    and their fds are visible (same access service_for_pid relies on)."""
+    out = {}
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return {}
+    seen = set()       # (device, client-id) already counted, across ALL pids
+    for pid in sorted(pids, key=int):
+        fddir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue   # process vanished, or fd table not readable
+        devs = {}      # pdev -> [vram bytes, gtt bytes]
+        for fd in fds:
+            rdev = _drm_fd_rdev(proc_root, pid, fd)
+            if rdev is not None and os.major(rdev) != _DRM_MAJOR:
+                continue                       # cheap reject; None = read fdinfo anyway
+            try:
+                with open(os.path.join(proc_root, pid, "fdinfo", fd)) as f:
+                    txt = f.read(8192)     # the drm-* block sits well inside this
+            except OSError:
+                continue
+            if "drm-driver" not in txt:
+                continue
+            fields = {}
+            for line in txt.splitlines():
+                k, sep, val = line.partition(":")
+                if sep and k.startswith("drm-"):
+                    fields[k.strip()] = val.strip()
+            client = fields.get("drm-client-id")
+            pdev = fields.get("drm-pdev")
+            # Dedup device identity: pdev when the kernel names it; else the fd's
+            # device number (client-ids are per-device counters, so two pdev-less
+            # cards can carry the same id — collapsing them would drop one); else
+            # the pid, which narrows dedup to upstream's per-pid semantics rather
+            # than ever dropping a client.
+            dev_id = pdev if pdev is not None else (rdev if rdev is not None else pid)
+            if (fields.get("drm-driver") != "amdgpu" or client is None
+                    or (dev_id, client) in seen):
+                continue
+            seen.add((dev_id, client))
+            vb = _fdinfo_region_bytes(fields, "vram")
+            gb = _fdinfo_region_bytes(fields, "gtt")
+            if vb or gb:
+                d = devs.setdefault(pdev, [0, 0])
+                d[0] += vb
+                d[1] += gb
+        if devs:
+            out[int(pid)] = {pdev: {"vram": v / 1048576.0, "gtt": g / 1048576.0}
+                             for pdev, (v, g) in devs.items()}
+    return out
+
+def _amd_attrib_mb(devs, amd_cards):
+    """MB one pid holds across AMD cards, given its per-pdev fdinfo split. VRAM
+    always counts; GTT counts only on unified-memory (APU) devices — matched by
+    pdev so a discrete AMD card living next to an APU doesn't get its staging
+    buffers in GTT misread as VRAM. A pdev we can't match to a known card (kernel
+    omits drm-pdev, or sysfs didn't yield a BDF) falls back to the host-wide
+    any-card-unified heuristic."""
+    known   = {g["pdev"] for g in amd_cards if g.get("pdev")}
+    uni_set = {g["pdev"] for g in amd_cards if g.get("pdev") and g.get("unified")}
+    any_uni = any(g.get("unified") for g in amd_cards)
+    mb = 0.0
+    for pdev, m in devs.items():
+        uni = (pdev in uni_set) if (pdev and pdev in known) else any_uni
+        mb += m["vram"] + (m["gtt"] if uni else 0.0)
+    return mb
 
 # Extra per-card telemetry the AI/DS crowd actually debugs with: memory-bandwidth
 # utilisation (mem-bound vs compute-bound), core/memory clocks, power limit (for
@@ -4979,7 +5390,11 @@ def _enrich_gpus(gpus):
             g = by_idx.get(int(_gpu_num(p[0])))
             if not g:
                 continue
-            g["mem_util"]    = _gpu_num(p[1])
+            # '[N/A]' must leave mem_util ABSENT, not 0: _gpu_extra averages only
+            # the cards that measured, and the UI hides the chip on absence — a
+            # coerced 0 would read as a confident "0% mem-bandwidth".
+            if p[1] and not p[1].startswith("["):
+                g["mem_util"] = _gpu_num(p[1])
             g["clk_sm"]      = _gpu_num(p[2])
             g["clk_mem"]     = _gpu_num(p[3])
             g["power_limit"] = _gpu_num(p[4])
@@ -5012,16 +5427,28 @@ def _gpu_extra(gpus):
     if not gpus:
         return {}
     g0 = gpus[0]
-    return {
-        "mem_util":  round(sum(g.get("mem_util", 0) for g in gpus) / len(gpus)),
+    out = {
         "clk_sm":    round(g0.get("clk_sm", 0)),
         "clk_mem":   round(g0.get("clk_mem", 0)),
-        "power_limit": round(sum(g.get("power_limit", 0) for g in gpus)),
         "pstate":    g0.get("pstate", ""),
         "temp_mem":  round(max((g.get("temp_mem", 0) for g in gpus), default=0)),
         "throttled": any(g.get("throttled") for g in gpus),
         "throttle":  sorted({r for g in gpus for r in g.get("throttle", [])}),
     }
+    # The power chip divides the POOLED draw by this cap, so the cap is published
+    # only when every card contributed one: with a card of unknown cap (AMD APUs
+    # have no power1_cap, NVIDIA can say '[N/A]') the ratio would exceed 100%
+    # merely because the denominator is missing a card the numerator includes.
+    if all(g.get("power_limit", 0) > 0 for g in gpus):
+        out["power_limit"] = round(sum(g["power_limit"] for g in gpus))
+    # mem-bandwidth utilisation averaged over the cards that actually measured it:
+    # cards without the counter (AMD APUs have no mem_busy_percent, NVIDIA can say
+    # '[N/A]') must neither surface a fabricated 0% chip nor dilute a measured
+    # value — 0 measured and 0 unknown are different claims.
+    measured = [g["mem_util"] for g in gpus if "mem_util" in g]
+    if measured:
+        out["mem_util"] = round(sum(measured) / len(measured))
+    return out
 
 def service_for_pid(pid, nm):
     try:
@@ -5509,7 +5936,15 @@ def _fetch_model_registry():
 def _model_registry(now=None):
     """Cached registry accessor. Serves a fresh fetch at most once per _REGISTRY_TTL
     so a chatty UI can't hammer ollama. Returns (models, reachable). Network I/O
-    happens OUTSIDE the cache lock."""
+    happens OUTSIDE the cache lock.
+
+    Double-checked locking: after a cache-miss triggers a fetch, we re-check the
+    cache under the lock again before writing. Without this, a burst of concurrent
+    callers that all observe a stale cache at the same time each independently
+    fetch in parallel (N simultaneous HTTP round-trips to ollama), defeating the
+    TTL rate-limit on every cache expiry under load. With it, only the first
+    caller past the gate fetches; everyone else who raced in behind it gets the
+    winner's fresh result instead of triggering their own redundant fetch."""
     now = now or time.time()
     with _REGISTRY_LOCK:
         c = _REGISTRY_CACHE
@@ -5517,6 +5952,13 @@ def _model_registry(now=None):
             return list(c["models"]), c["reachable"]
     models, reachable = _fetch_model_registry()
     with _REGISTRY_LOCK:
+        c = _REGISTRY_CACHE
+        # Someone else may have already refreshed the cache while we were
+        # fetching (network I/O happens outside the lock, so this window is
+        # real). If so, defer to their result instead of overwriting it with
+        # our possibly-slightly-older one.
+        if c and (now - c["ts"]) < _REGISTRY_TTL:
+            return list(c["models"]), c["reachable"]
         globals()["_REGISTRY_CACHE"] = {
             "ts": now, "models": models, "reachable": reachable}
     return list(models), reachable
@@ -5534,20 +5976,30 @@ def _merge_registry(ollama_models, catalog):
     (name/provider/loaded/vram — no on-disk size, most catalogue APIs don't expose
     one). Entries missing a model name are skipped."""
     out = [dict(m, provider="ollama", host="local") for m in ollama_models]
-    seen = {(m["name"], m["provider"]) for m in out}
+    seen = {(m["name"], m["provider"], "local") for m in out}
+    hub = socket.gethostname()
     for c in catalog or []:
         name = c.get("model")
         provider = c.get("provider") or "other"
-        if not name or provider == "ollama":
+        chost = c.get("host") or "local"
+        # The hub's OWN ollama is covered by the richer disk registry above —
+        # drop only those duplicates. A REMOTE host's ollama models arrive
+        # through this catalog and MUST pass through: dropping every
+        # provider=='ollama' entry (as this did originally) silently blinded
+        # the fleet registry to exactly the hosts #236 set out to cover.
+        if not name or (provider == "ollama" and chost in ("local", hub)):
             continue
-        key = (name, provider)
+        key = (name, provider, chost)
         if key in seen:
             continue
         seen.add(key)
+        size = c.get("size_bytes")
         out.append({
-            "name": name, "provider": provider, "host": "local",
-            "size_bytes": None, "size_gb": None, "family": None,
-            "param_size": None, "quant": None, "modified": None,
+            "name": name, "provider": provider, "host": chost,
+            "size_bytes": size,
+            "size_gb": round(size / 1073741824, 2) if size else None,
+            "family": c.get("family"), "param_size": c.get("param_size"),
+            "quant": c.get("quant"), "modified": c.get("modified"),
             "loaded": bool(c.get("loaded")), "vram_mb": c.get("vram_mb"),
         })
     return out
@@ -5632,18 +6084,18 @@ def sync_mlflow():
 
 _CT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
-def _docker_log_stream(name, tail, follow):
+def _docker_log_stream(name, tail, follow, timeout=20):
     """Yield Server-Sent Events of a container's logs over the Docker socket.
     Demuxes Docker's 8-byte stream framing (skipped for TTY containers); for
     follow=1 it keeps the connection open and emits a heartbeat every ~20s so a
-    closed browser EventSource is noticed and the socket torn down cleanly."""
-    c = http.client.HTTPConnection("localhost", timeout=None)
-    c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    c.sock.connect(DOCKER_SOCK)
-    if follow:
-        c.sock.settimeout(20)
-    path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
-            f"&tail={tail}&follow={'1' if follow else '0'}")
+    closed browser EventSource is noticed and the socket torn down cleanly.
+    Speaks HTTP/1.0 straight over the socket: a 1.0 response is streamed raw
+    (no chunked transfer-encoding), so a quiet-log heartbeat timeout simply
+    recv()s again. The previous http.client version could not resume its chunked
+    decoder after a timeout — the stdlib marks the socket file timed-out and
+    every later read raises "cannot read from timed out object" — so the stream
+    died with a traceback whenever a followed container went quiet."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     text = ""
     def lines_from(s):
         nonlocal text
@@ -5654,39 +6106,59 @@ def _docker_log_stream(name, tail, follow):
             out.append(line)
         return out
     try:
-        c.request("GET", path)
-        r = c.getresponse()
-        if r.status != 200:
-            yield f"event: srverror\ndata: {r.status} {r.reason}\n\n"
+        sock.connect(DOCKER_SOCK)
+        if follow:
+            sock.settimeout(timeout)
+        path = (f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=0"
+                f"&tail={tail}&follow={'1' if follow else '0'}")
+        sock.sendall(f"GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n".encode())
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 65536:
+            data = sock.recv(4096)
+            if not data:
+                break
+            head += data
+        head, _, chunk = head.partition(b"\r\n\r\n")
+        st = head.split(b"\r\n", 1)[0].split(None, 2)   # e.g. b'HTTP/1.0 404 No such container'
+        code = int(st[1]) if len(st) > 1 and st[1].isdigit() else 0
+        if code != 200:
+            reason = st[2].decode("utf-8", "replace") if len(st) > 2 else "bad response from docker"
+            yield f"event: srverror\ndata: {code} {reason}\n\n"
             return
         framed, buf = None, b""
         while True:
+            if chunk:
+                if framed is None:
+                    framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
+                if framed:
+                    buf += chunk
+                    while len(buf) >= 8:
+                        size = int.from_bytes(buf[4:8], "big")
+                        if len(buf) < 8 + size:
+                            break
+                        payload, buf = buf[8:8 + size], buf[8 + size:]
+                        for line in lines_from(payload.decode("utf-8", "replace")):
+                            yield f"data: {line}\n\n"
+                else:
+                    for line in lines_from(chunk.decode("utf-8", "replace")):
+                        yield f"data: {line}\n\n"
             try:
-                chunk = r.read(4096)
+                chunk = sock.recv(4096)
             except socket.timeout:
+                chunk = b""
                 yield ": keep-alive\n\n"          # heartbeat → Flask sees a gone client
                 continue
             if not chunk:
                 break
-            if framed is None:
-                framed = chunk[0] in (0, 1, 2)     # 8-byte header stream vs raw TTY
-            if framed:
-                buf += chunk
-                while len(buf) >= 8:
-                    size = int.from_bytes(buf[4:8], "big")
-                    if len(buf) < 8 + size:
-                        break
-                    payload, buf = buf[8:8 + size], buf[8 + size:]
-                    for line in lines_from(payload.decode("utf-8", "replace")):
-                        yield f"data: {line}\n\n"
-            else:
-                for line in lines_from(chunk.decode("utf-8", "replace")):
-                    yield f"data: {line}\n\n"
         if text:
             yield f"data: {text}\n\n"
         yield "event: end\ndata: done\n\n"
+    except OSError as e:
+        # Docker socket unreachable / connection reset mid-stream: tell the log
+        # drawer instead of tracebacking through werkzeug into our own logs.
+        yield f"event: srverror\ndata: {e}\n\n"
     finally:
-        try: c.close()
+        try: sock.close()
         except Exception: pass
 
 

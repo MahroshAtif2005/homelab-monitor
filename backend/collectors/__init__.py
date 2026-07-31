@@ -1,3 +1,4 @@
+import socket
 """
 backend/collectors — background worker functions extracted from app.py (Phase 3.2).
 
@@ -161,25 +162,48 @@ def sample_once():
         power     = sum(g["power"] for g in gpus)
         util      = round(sum(g["util"] for g in gpus) / len(gpus))
         temp      = max(g["temp"] for g in gpus)
-        # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
+        # NVIDIA enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
-        # the same objects held in `gpus`, so in-place enrichment shows through. AMD
-        # cards show the core panel (util/VRAM/temp/power); per-process AMD
-        # attribution is a follow-up (issue #1).
+        # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
-            gpu_extra = _app._gpu_extra(nv_gpus)
-            for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                if line.strip():
-                    pid, mem = (p.strip() for p in line.split(","))
-                    svc = _app.service_for_pid(pid, nm)
-                    procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                    try:
-                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                    except ValueError:
-                        pass
-        else:
-            gpu_extra = {}
+            try:
+                # Best-effort on its own: a timeout or malformed row in this extra
+                # query must cost this sample's NVIDIA attribution, not the GPU
+                # chips below it nor the AMD fdinfo attribution that follows.
+                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+                    if line.strip():
+                        pid, mem = (p.strip() for p in line.split(","))
+                        svc = _app.service_for_pid(pid, nm)
+                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
+                        try:
+                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
+        # NVIDIA cards were enriched just above, AMD ones arrive already enriched
+        # (amd_gpus reads clocks/perf level/cap in its per-card pass). The pooled
+        # sums must span vendors — an NVIDIA-only aggregate on a hybrid box
+        # compares total draw (both vendors) against the NVIDIA cap alone, and the
+        # power chip reads >100% whenever the AMD card draws anything.
+        gpu_extra = _app._gpu_extra(gpus)
+        # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
+        # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
+        # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
+        # cost attribution all light up on AMD too. On a unified-memory APU the
+        # working set lives in GTT (see amd_gpus), so GTT counts there — matched
+        # per-device by _amd_attrib_mb, so a discrete AMD card in the same box
+        # keeps counting VRAM only, matching what mem_used reports.
+        if amd_cards:
+            for pid, devs in _app.amd_fdinfo_procs().items():
+                mb = _app._amd_attrib_mb(devs, amd_cards)
+                if mb < 1:
+                    continue   # sub-MB DRM clients (compositors idling etc.) are noise
+                svc = _app.service_for_pid(pid, nm)
+                procs[svc] = procs.get(svc, 0) + mb
+                gpu_pids[pid] = gpu_pids.get(pid, 0) + mb
     except Exception as e:
         # Log only on the ok→fail edge so a permanently GPU-less host doesn't spam.
         if _app.LATEST.get("gpu_avail"):
@@ -191,7 +215,7 @@ def sample_once():
     # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
     ai = [c for c in conts if _match_probe(c)]
     models = []
-    model_catalog = []   # {service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
+    model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
     ai_servers = []      # {name, ip, provider} — for the /api/ai/now throttled live re-probe
     if ai:
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
@@ -216,9 +240,15 @@ def sample_once():
                     ram_val = None
                 models.append((svc, mdl, vram_val, ram_val,
                                ctx if vram_val is not None else None))
-                model_catalog.append({"service": svc, "provider": provider, "model": mdl,
-                                       "loaded": vram_val is not None, "vram_mb": vram_val,
-                                       "ram_mb": ram_val})
+                model_catalog.append({
+                    "host": socket.gethostname(),
+                    "service": svc,
+                    "provider": provider,
+                    "model": mdl,
+                    "loaded": vram_val is not None,
+                    "vram_mb": vram_val,
+                    "ram_mb": ram_val,
+                })
 
     # Attribute model-server traffic to its callers (who is driving Ollama, etc.).
     edges = _app.sample_callers(conts, {c["name"] for c in ai})
@@ -257,7 +287,13 @@ def sample_once():
     except Exception as e:
         print(f"collectors/sample_once read_rapl_power error: {e}", flush=True)
         rapl = {}
-    cpu_power, dram_power = rapl.get("cpu_w"), rapl.get("dram_w")
+    cpu_power, dram_power = rapl.get("cpu_power"), rapl.get("dram_power")
+    # Surface measured watts on the live snapshot so /metrics can export them.
+    # Only overwrite on a real reading — a transient {} from read_rapl_power keeps the last good value.
+    if cpu_power is not None:
+        _app.LATEST["cpu_power"] = cpu_power
+    if dram_power is not None:
+        _app.LATEST["dram_power"] = dram_power
     try:
         top_cpu = _app.collect_top_processes()
     except Exception as e:
@@ -331,7 +367,7 @@ def sample_once():
                     _app.DB.executemany("INSERT INTO proc_io_samples(ts,pid,comm,read_bps,write_bps) "
                                    "VALUES(?,?,?,?,?)", _pio_rows)
         if _retention is not None:
-            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc"):
+            for t in ("samples", "proc", "models", "edges", "events", "gpu_samples", "net_samples", "power_proc", "host_samples"):
                 _app.DB.executemany(f"DELETE FROM {t} WHERE ts<?", [(ts - _retention,)])
             _app.DB.executemany("DELETE FROM disk_io_samples WHERE ts<?", [(ts - _app._DISK_IO_RETENTION,)])
             _app.DB.executemany("DELETE FROM proc_io_samples WHERE ts<?", [(ts - _app._PROC_IO_RETENTION,)])
