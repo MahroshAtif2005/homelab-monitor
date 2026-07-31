@@ -170,5 +170,45 @@ class TestModelsRamMigration(unittest.TestCase):
         conn.close()
 
 
+class TestSpillInsightKeepsResponseIntact(unittest.TestCase):
+    """A spilling model must not corrupt /api/data's `total` time-series.
+
+    The spill insight computes the model's residency (vram + ram) in the same
+    scope that already holds `total` — the util/mem/power/temp arrays the
+    dashboard charts read. Naming that local `total` shadowed the dict and the
+    response returned a bare number instead, so every chart broke for exactly
+    as long as a model was spilling — i.e. whenever this feature had something
+    to say. Guard the response shape, not just the insight text.
+    """
+    def setUp(self):
+        import app
+        self.app = app
+        self.client = app.app.test_client()
+
+    def test_total_stays_a_series_dict_while_a_model_spills(self):
+        app = self.app
+        latest = dict(app.LATEST)
+        latest["models"] = [{"service": "ollama", "model": "qwen3-coder:30b",
+                             "vram": 17000, "ram": 3400, "ctx_now": 32768}]
+        latest["model_meta"] = {"qwen3-coder:30b": {"weights_mb": 17300}}
+        latest["mem_total"] = 24576
+        with patch.object(app, "LATEST", latest), \
+             patch("app.uptime_summary", return_value={"total": 0, "up": 0, "down": 0,
+                                                      "unknown": 0, "worst_down": None}), \
+             patch("app.uptime_insights", return_value=[]):
+            data = self.client.get("/api/data?range=1h").get_json()
+
+        self.assertIsInstance(data["total"], dict,
+                              "spill insight clobbered the `total` time-series")
+        for key in ("util", "mem", "mempk"):
+            self.assertIn(key, data["total"])
+            self.assertIsInstance(data["total"][key], list)
+        # And the insight it was computing still fired, with the weights split.
+        spill = [i for i in data["insights"] if "spilling into system RAM" in i["title"]]
+        self.assertEqual(len(spill), 1)
+        self.assertIn("weights", spill[0]["detail"])
+        self.assertIn("32,768 ctx", spill[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

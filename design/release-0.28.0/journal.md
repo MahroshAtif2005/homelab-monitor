@@ -53,3 +53,38 @@ on hardware (Strix Halo / Radeon 8060S) that isn't in this fleet.
   site-packages. `UPDATE_SNAPSHOTS=1` → 71 passed; the clean re-run (CI's determinism check)
   also passed. 6 baselines changed: `api_changelog`, `api_data`, `api_health`,
   `api_settings_get`, `api_settings_post`, `healthz`. Scratch clone removed afterwards.
+
+### The AI review caught a real release blocker
+
+PR #260's automated review flagged variable shadowing in `backend/api/system.py`, and it was
+right — verified by reproducing it rather than taking the report at face value:
+
+- Line 26 builds `total` = the util/mem/power/temp **time-series dict** that `/api/data`
+  returns and every dashboard chart reads.
+- The new #243 spill-insight loop then computed a model's residency into a local **also named
+  `total`**, clobbering the dict with a scalar before line 121 returned it.
+- Trigger: any loaded model with `ram > 0` — i.e. **precisely the condition this release's
+  headline feature exists to surface**. The charts would break for exactly as long as a model
+  was spilling.
+- Reproduced on ardi against the buggy line: `data["total"]` came back as `20400`, not a dict.
+- Fixed by renaming the local to `resident` (+ a comment saying why the name is taken), and
+  guarded by a new `TestSpillInsightKeepsResponseIntact` — which **fails on the old code and
+  passes on the new**, checked both ways.
+
+The snapshot suite missed it because its `_mock_latest()` fixture has no loaded models, so the
+loop never ran.
+
+Also from the same review: `models.wsplit_t` / `models.wsplit_cap` were used in
+`static/dashboard.html` but never added to `locales/en.json` (source of truth) or `zh-CN.json`.
+Inline fallbacks meant English was fine, but zh-CN users would have seen English in the middle
+of a translated feature. Both keys added. Neither fix gets a CHANGELOG entry — both bugs only
+ever existed on `next` and never reached a release.
+
+### Test-suite state
+
+Full suite on the fixed tree: **643 passed, 6 failed**. The same 6 fail on the untouched `next`
+baseline (642 passed), so they are pre-existing and unrelated:
+`test_no_silent_swallow::test_no_silent_broad_except` and 5 maintenance-window tests in
+`test_public_status.py`. **Worth noting: CI only runs `test_snapshots.py` + a byte-compile
+smoke, so these 6 have been failing silently.** Out of scope here; flagged for a follow-up.
+

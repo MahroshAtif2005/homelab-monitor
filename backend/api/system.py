@@ -93,10 +93,11 @@ def api_data():
                 # When we know the weights size, say WHY it spilled: weights vs the
                 # context/KV share of the residency (ctx_now = the num_ctx loaded).
                 w = ((_app.LATEST.get("model_meta") or {}).get(m["model"]) or {}).get("weights_mb")
-                total = (m.get("vram") or 0) + m["ram"]
-                if w and total > w:
+                # NB: not `total` — that name holds this response's time-series dict.
+                resident = (m.get("vram") or 0) + m["ram"]
+                if w and resident > w:
                     ctx = m.get("ctx_now")
-                    detail += (f" The residency is ~{round(w)} MB weights + ~{round(total - w)} MB "
+                    detail += (f" The residency is ~{round(w)} MB weights + ~{round(resident - w)} MB "
                                f"context/KV & buffers{f' (running at {ctx:,} ctx)' if ctx else ''} — "
                                "a smaller context window would shrink the KV cache and may fit VRAM.")
                 insights.append({"level": "warning",

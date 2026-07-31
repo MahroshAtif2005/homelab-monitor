@@ -340,6 +340,8 @@
   "models.loaded_spill": "Loaded · RAM spill",
   "models.spill_t": "Part of the model does not fit VRAM and sits in system RAM — those layers run on the CPU.",
   "models.now_split_t": "{tot} total resident: {vram} in VRAM + {ram} spilled into system RAM",
+  "models.wsplit_t": "{tot} resident = {w} model weights + {k} context/KV & buffers. Weights are the model file itself; the context/KV part grows with the context window — when weights + context no longer fit free VRAM, the overflow spills into system RAM.",
+  "models.wsplit_cap": "weights {w} · ctx {k}",
   "models.runs_t": "Load sessions in this range: {g} fully on GPU, {s} spilled into system RAM (worst spill {mb})",
   "models.n_spilled": "{n} spilled",
   "models.used_by_t": "~{min}m of connection time to this server while the model was loaded (approximate when models share the server)",
