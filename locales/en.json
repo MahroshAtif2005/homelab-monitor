@@ -296,6 +296,8 @@
   "gpu.chip_power_t": "Draw vs the card power limit. Pinned at ~100% = power-capped.",
   "gpu.chip_pstate": "Perf state",
   "gpu.chip_pstate_t": "P0 = max performance; higher P-numbers = lower clocks.",
+  "gpu.chip_perflevel": "Perf level",
+  "gpu.chip_perflevel_t": "The amdgpu performance policy: auto lets the driver pick clocks, low/high pin them, manual means user-forced levels.",
   "gpu.spill_title": "Model spilling into system RAM right now",
   "gpu.spill_past_title": "Some model runs spilled into system RAM in this range",
   "gpu.spill_live": "<b>{model}</b> — {vram} VRAM + {ram} RAM ({tot} total)",

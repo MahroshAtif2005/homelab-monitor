@@ -166,6 +166,213 @@ class TestAmdSysfs(unittest.TestCase):
         self.assertEqual(probe._amd_gpu_sysfs(drm_root=missing), [])
 
 
+class TestAmdEnrich(unittest.TestCase):
+    """amd_gpus must attach the _enrich_gpus-equivalent fields (clk_sm/clk_mem/
+    mem_util/power_limit/pstate/temp_mem) from amdgpu sysfs, so the same UI chips
+    that light up on NVIDIA light up on AMD. Every node is optional: a card that
+    lacks one simply doesn't get the field."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.drm = os.path.join(self.tmp, "drm")
+        os.makedirs(self.drm)
+
+    def _card(self, **kw):
+        return _amd_card(self.drm, 0, total=24 * 1024**3, used=0, busy=0, **kw)
+
+    def test_clocks_come_from_the_starred_dpm_rows(self):
+        dev = self._card()
+        _write(os.path.join(dev, "pp_dpm_sclk"), "0: 600Mhz *\n1: 1100Mhz \n2: 2900Mhz \n")
+        _write(os.path.join(dev, "pp_dpm_mclk"), "0: 97MHz\n3: 1000MHz *\n")   # case varies
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["clk_sm"], 600)
+        self.assertEqual(g["clk_mem"], 1000)
+
+    def test_sclk_falls_back_to_hwmon_freq(self):
+        # Unlabelled freq1 (very old kernels): trusted as sclk.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 2_900_000_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["clk_sm"], 2900)
+
+    def test_labelled_freq_channels_are_matched_not_assumed(self):
+        # freq1 is usually sclk, but only the label says so: with freq1 labelled
+        # mclk, the sclk value must come from the channel actually labelled sclk,
+        # wherever it sits.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_label"), "mclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 1_000_000_000)
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq2_label"), "sclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq2_input"), 600_000_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["clk_sm"], 600)
+
+    def test_labelled_non_sclk_freq_is_not_misread(self):
+        # A labelled channel that is NOT sclk, and no sclk channel at all: better
+        # no clock than the wrong one.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_label"), "mclk\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "freq1_input"), 1_000_000_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertNotIn("clk_sm", g)
+
+    def test_labelled_channel_with_unreadable_input_keeps_scanning(self):
+        # hwmon3 has the right label but no readable input; hwmon4 carries the
+        # same label with a value. The scan must reach it, not give up.
+        dev = self._card()
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp3_label"), "mem\n")
+        _write(os.path.join(dev, "hwmon", "hwmon4", "temp5_label"), "mem\n")
+        _write(os.path.join(dev, "hwmon", "hwmon4", "temp5_input"), 78_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["temp_mem"], 78.0)
+
+    def test_no_starred_row_leaves_the_field_unset(self):
+        dev = self._card()
+        _write(os.path.join(dev, "pp_dpm_sclk"), "0: 600Mhz \n1: 1100Mhz \n")
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertNotIn("clk_sm", g)
+        self.assertNotIn("clk_mem", g)
+        self.assertNotIn("pstate", g)
+        self.assertNotIn("power_limit", g)
+
+    def test_discrete_extras_cap_membusy_memtemp(self):
+        dev = self._card()
+        _write(os.path.join(dev, "mem_busy_percent"), 42)
+        _write(os.path.join(dev, "hwmon", "hwmon3", "power1_cap"), 291_000_000)
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp3_label"), "mem\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp3_input"), 78_000)
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp1_label"), "edge\n")
+        _write(os.path.join(dev, "hwmon", "hwmon3", "temp1_input"), 55_000)
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["mem_util"], 42)
+        self.assertEqual(g["power_limit"], 291.0)
+        self.assertEqual(g["temp_mem"], 78.0)     # temp3 via its label, not its number
+
+    def test_perf_level_becomes_pstate(self):
+        dev = self._card()
+        _write(os.path.join(dev, "power_dpm_force_performance_level"), "auto\n")
+        g = app.amd_gpus(drm_root=self.drm)[0]
+        self.assertEqual(g["pstate"], "auto")
+
+    def test_gpu_extra_aggregates_amd_fields(self):
+        # The 'GPU right now' chips read the aggregate dict — it must work from
+        # AMD-enriched cards exactly as from NVIDIA ones.
+        dev = self._card()
+        _write(os.path.join(dev, "pp_dpm_sclk"), "2: 2900Mhz *\n")
+        _write(os.path.join(dev, "power_dpm_force_performance_level"), "auto\n")
+        x = app._gpu_extra(app.amd_gpus(drm_root=self.drm))
+        self.assertEqual(x["clk_sm"], 2900)
+        self.assertEqual(x["pstate"], "auto")
+        self.assertFalse(x["throttled"])
+        # No card measured mem-bandwidth utilisation (APUs have no
+        # mem_busy_percent): the aggregate must omit the field entirely, not
+        # report a fabricated 0% — the UI hides the chip only when it's absent.
+        self.assertNotIn("mem_util", x)
+
+    def test_gpu_extra_keeps_measured_zero_mem_util(self):
+        # A measured 0% is a real claim and must survive the presence filter.
+        dev = self._card()
+        _write(os.path.join(dev, "mem_busy_percent"), 0)
+        x = app._gpu_extra(app.amd_gpus(drm_root=self.drm))
+        self.assertEqual(x["mem_util"], 0)
+
+
+class TestAmdPciName(unittest.TestCase):
+    """Kernels without product_name (every APU) fall back to the host's pci.ids,
+    read through HOST_ROOT. The bracket in an AMD entry lists retail names; it is
+    used only when unambiguous, the codename otherwise."""
+
+    IDS = (
+        "# comment\n"
+        "1001  Vendor before\n"
+        "\t0001  Not an AMD device\n"
+        "1002  Advanced Micro Devices, Inc. [AMD/ATI]\n"
+        "\t1586  Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]\n"
+        "\t744c  Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M]\n"
+        "\t\t1002 0e3b  Subsystem line to be skipped\n"
+        "\t73ff  Navi 23 [Radeon RX 6600]\n"
+        "\t15bf  Phoenix1\n"
+        "10de  NVIDIA Corporation\n"
+        "\t2684  AD102 [GeForce RTX 4090]\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        ids = os.path.join(self.tmp, "pci.ids")
+        _write(ids, self.IDS)
+        self.addCleanup(setattr, app, "_AMD_PCI_NAMES", None)
+        mock.patch.object(app, "_PCI_IDS_PATHS", (ids,)).start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(app, "_hp", lambda p: p).start()
+        app._AMD_PCI_NAMES = None      # drop the cache between tests
+
+    def _dev(self, device_id):
+        dev = os.path.join(self.tmp, "card0", "device")
+        _write(os.path.join(dev, "device"), device_id + "\n")
+        return dev
+
+    def test_multi_variant_bracket_keeps_the_codename(self):
+        # Strix Halo silicon ships as 8050S or 8060S — we can't tell which, so
+        # claiming either would be wrong.
+        self.assertEqual(app._amd_pci_name(self._dev("0x1586")), "AMD Strix Halo")
+        self.assertEqual(app._amd_pci_name(self._dev("0x744c")), "AMD Navi 31")
+
+    def test_single_retail_name_wins_over_codename(self):
+        self.assertEqual(app._amd_pci_name(self._dev("0x73ff")), "AMD Radeon RX 6600")
+
+    def test_entry_without_bracket_is_used_as_is(self):
+        self.assertEqual(app._amd_pci_name(self._dev("0x15bf")), "AMD Phoenix1")
+
+    def test_unknown_device_and_foreign_vendor_yield_none(self):
+        self.assertIsNone(app._amd_pci_name(self._dev("0xdead")))
+        self.assertIsNone(app._amd_pci_name(self._dev("0x2684")))   # NVIDIA row ignored
+
+    def test_subsystem_rows_do_not_leak_into_the_table(self):
+        # A regressed \t\t guard would file the subsystem row under its vendor id.
+        self.assertNotIn("1002", app._amd_pci_names())
+
+    def test_missing_file_is_not_cached(self):
+        # pci.ids may appear after startup (bind mount added, package installed):
+        # a miss must be retried, only a parsed table is cached for good.
+        with mock.patch.object(app, "_PCI_IDS_PATHS", (os.path.join(self.tmp, "nope"),)):
+            self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+        self.assertEqual(app._amd_pci_name(self._dev("0x1586")), "AMD Strix Halo")
+
+    def test_readable_amd_less_file_is_cached_as_empty(self):
+        # The other side of the retry rule: a file consumed to the end that has
+        # no AMD block won't grow one — cache the empty result instead of
+        # re-parsing the whole file per card per tick.
+        bare = os.path.join(self.tmp, "bare.ids")
+        _write(bare, "10de  NVIDIA Corporation\n\t2684  AD102 [GeForce RTX 4090]\n")
+        with mock.patch.object(app, "_PCI_IDS_PATHS", (bare,)):
+            self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+        # Still None: the empty parse was cached, the good file is not re-read.
+        self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+
+    def test_missing_ids_file_yields_none(self):
+        app._AMD_PCI_NAMES = None
+        with mock.patch.object(app, "_PCI_IDS_PATHS", (os.path.join(self.tmp, "nope"),)):
+            self.assertIsNone(app._amd_pci_name(self._dev("0x1586")))
+
+    def test_amd_gpus_uses_the_lookup_when_product_name_is_absent(self):
+        drm = os.path.join(self.tmp, "drm")
+        dev = _amd_card(drm, 1, total=512 * 1024**2, used=0, busy=0,
+                        gtt_total=124 * 1024**3)
+        _write(os.path.join(dev, "device"), "0x1586\n")
+        g = app.amd_gpus(drm_root=drm)[0]
+        self.assertEqual(g["name"], "AMD Strix Halo")
+
+    def test_product_name_still_wins(self):
+        drm = os.path.join(self.tmp, "drm")
+        dev = _amd_card(drm, 0, total=24 * 1024**3, used=0, busy=0,
+                        name="AMD Radeon RX 7900 XTX")
+        _write(os.path.join(dev, "device"), "0x744c\n")
+        g = app.amd_gpus(drm_root=drm)[0]
+        self.assertEqual(g["name"], "AMD Radeon RX 7900 XTX")
+
+
 class TestVendorAwareDiagnostics(unittest.TestCase):
     """The local diagnostics GPU row must speak the right vendor: an AMD host must
     NOT be told to install the NVIDIA runtime (issue #1 follow-up)."""

@@ -356,6 +356,8 @@
   "gpu.chip_power_t": "相对显卡功耗上限的实际功耗。长期接近 ~100% = 受功耗限制。",
   "gpu.chip_pstate": "性能状态",
   "gpu.chip_pstate_t": "P0 = 最高性能；P 编号越大频率越低。",
+  "gpu.chip_perflevel": "性能策略",
+  "gpu.chip_perflevel_t": "amdgpu 性能策略：auto 由驱动自动选择频率，low/high 锁定频率，manual 为用户强制指定档位。",
   "gpu.spill_title": "模型此刻正溢出到系统内存",
   "gpu.spill_past_title": "此范围内有模型运行溢出到系统内存",
   "gpu.spill_live": "<b>{model}</b> — 显存 {vram} + 内存 {ram}（共 {tot}）",

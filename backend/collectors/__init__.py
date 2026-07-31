@@ -162,23 +162,33 @@ def sample_once():
         power     = sum(g["power"] for g in gpus)
         util      = round(sum(g["util"] for g in gpus) / len(gpus))
         temp      = max(g["temp"] for g in gpus)
-        # NVIDIA-only enrichment (clocks/throttle) + per-process VRAM attribution
+        # NVIDIA enrichment (clocks/throttle) + per-process VRAM attribution
         # (nvidia-smi compute-apps), applied to the NVIDIA cards only — the dicts are
         # the same objects held in `gpus`, so in-place enrichment shows through.
         if nv_gpus:
             _app._enrich_gpus(nv_gpus)
-            gpu_extra = _app._gpu_extra(nv_gpus)
-            for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                if line.strip():
-                    pid, mem = (p.strip() for p in line.split(","))
-                    svc = _app.service_for_pid(pid, nm)
-                    procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                    try:
-                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                    except ValueError:
-                        pass
-        else:
-            gpu_extra = {}
+            try:
+                # Best-effort on its own: a timeout or malformed row in this extra
+                # query must cost this sample's NVIDIA attribution, not the GPU
+                # chips below it nor the AMD fdinfo attribution that follows.
+                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+                    if line.strip():
+                        pid, mem = (p.strip() for p in line.split(","))
+                        svc = _app.service_for_pid(pid, nm)
+                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
+                        try:
+                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
+        # NVIDIA cards were enriched just above, AMD ones arrive already enriched
+        # (amd_gpus reads clocks/perf level/cap in its per-card pass). The pooled
+        # sums must span vendors — an NVIDIA-only aggregate on a hybrid box
+        # compares total draw (both vendors) against the NVIDIA cap alone, and the
+        # power chip reads >100% whenever the AMD card draws anything.
+        gpu_extra = _app._gpu_extra(gpus)
         # AMD per-process VRAM via DRM fdinfo (kernel 5.19+) — the amdgpu counterpart
         # of --query-compute-apps, feeding the same procs/gpu_pids pipeline so the
         # VRAM-allocation panel, VRAM-by-service chart, container VRAM column and GPU
