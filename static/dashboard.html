@@ -3400,8 +3400,12 @@ function renderData(){
   // The GPU tab is host-agnostic and owns its own data (/api/gpu/*), so it is
   // refreshed here rather than populated here — the only GPU panel still fed
   // from /api/data is the model RAM-spill banner, which is a hub-local concern.
-  renderGpuSpill(n);
-  if(TAB==='gpu') renderGpuTab(false);
+  // The model RAM-spill banner is hub-local (it reads the hub's own loaded
+  // models), so it must not paint under a remote host's name — that is the same
+  // cross-host bleed this tab was rebuilt to remove. The tab's own data is
+  // refreshed on the 15s tick, not here.
+  if(CURRENT_HOST === 'local'){ renderGpuSpill(n); }
+  else { const sp = document.getElementById('gpu-spill'); if(sp) sp.style.display = 'none'; }
 
   // AI models — expandable rows + per-model VRAM timeline (see renderModels)
   renderModels();
@@ -3715,6 +3719,15 @@ async function renderGpuTab(force){
 
 function paintGpuTab(loading){
   const d = GPUC;
+  // Self-heal: this tab owns its whole section, so undo anything that hid its
+  // cards or dropped a scope notice into it. `clearLocalOnlyNotice('gpu')` is
+  // never called now that the tab is host-scoped, so without this a single
+  // stray call to the notice renderer would leave the cockpit blank forever.
+  const gsec = document.querySelector('section[data-tab="gpu"]');
+  if(gsec){
+    gsec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display = '');
+    gsec.querySelectorAll(':scope > .scope-notice').forEach(el => el.remove());
+  }
   const pooledCard = document.getElementById('gpu-pooled-card');
   const perCard    = document.getElementById('pergpu-card');
   const combCard   = document.getElementById('gpu-combined-card');
@@ -8976,7 +8989,15 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
-  if((TAB==='gpu'||TAB==='containers'||TAB==='models') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
+  // The GPU tab owns its own host-scoped data (/api/gpu/*), so refresh it here
+  // rather than off the back of /api/data — a remote's cockpit shouldn't go
+  // stale just because the hub's own sample call failed.
+  if(TAB==='gpu')      renderGpuTab(false);
+  // Drive the scope notice off LOCAL_ONLY_TABS, never a hardcoded list. The GPU
+  // tab is host-scoped now, and leaving 'gpu' spelled out here meant every tick
+  // hid all its cards and repainted the "waiting for per-GPU data" notice on top
+  // of a fully populated cockpit — data on screen, gone ~15s later.
+  if(LOCAL_ONLY_TABS.has(TAB) && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
 // AI-tab fast poll: while the AI Models tab is visible, ride the light
 // /api/ai/now (no DB; server-side throttled re-probe of ollama) every 5s so
