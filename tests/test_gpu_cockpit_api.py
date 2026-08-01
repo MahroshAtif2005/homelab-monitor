@@ -328,5 +328,29 @@ class TestAttribution(unittest.TestCase):
         self.assertEqual(d["services"], [])
 
 
+class TestHubEnrichmentIsAbsentNotZero(unittest.TestCase):
+    """The hub's own cards must follow the same rule the probe does.
+
+    _enrich_gpus() used _gpu_num, which coerces '[N/A]' to 0.0 — so an
+    unsupported clock or power cap on the HUB's GPU advertised itself as
+    supported and then drew a confident flat line at zero.
+    """
+
+    def test_unsupported_fields_stay_absent_on_the_hub(self):
+        import app
+        cards = [{"idx": 0, "name": "Quadro P2000"}]
+        rows = "0, [N/A], 1500, [N/A], [Not Supported], [N/A], P8\n"
+        with mock.patch.object(app, "smi",
+                               side_effect=lambda a: rows if "utilization.memory" in a[0] else ""):
+            app._enrich_gpus(cards)
+        c = cards[0]
+        self.assertNotIn("mem_util", c)
+        self.assertNotIn("clk_mem", c)
+        self.assertNotIn("power_limit", c)
+        self.assertNotIn("temp_mem", c)
+        self.assertEqual(c["clk_sm"], 1500)      # the one it did report
+        self.assertEqual(c["pstate"], "P8")
+
+
 if __name__ == "__main__":
     unittest.main()

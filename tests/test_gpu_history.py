@@ -277,6 +277,24 @@ class TestVramAttribution(unittest.TestCase):
         self.assertEqual(rows, [(0, "ollama", 8000)])
 
 
+class TestRenameFollowsGpuHistory(unittest.TestCase):
+    def test_renaming_a_host_carries_its_gpu_history(self):
+        # Without this the cockpit history is orphaned under the old name and
+        # the renamed host shows an empty GPU tab.
+        conn = _fresh_db()
+        from backend.db.repos import gpu_samples as repo
+        repo.record(conn, 1000, "oldname", [_card(0), _card(1)])
+        conn.execute("INSERT INTO proc(ts,service,mem,host) VALUES(1000,'ollama',8000,'oldname')")
+        repo.rename_host("oldname", "newname", conn=conn)
+        self.assertEqual(repo.cards_for("oldname", conn=conn), [])
+        self.assertEqual(repo.cards_for("newname", conn=conn), [0, 1])
+        self.assertEqual(repo.vram_by_service("newname", 0, 3600, conn=conn),
+                         [(0, "ollama", 8000)])
+        # The rollup has to follow too, or long-range history splits in two.
+        n = conn.execute("SELECT COUNT(*) FROM gpu_samples_1h WHERE host='newname'").fetchone()[0]
+        self.assertEqual(n, 2)
+
+
 class TestLegacyGpuRows(unittest.TestCase):
     def test_pre_migration_card_history_reads_as_the_hub(self):
         # The hub has been storing per-card rows for multi-GPU rigs all along

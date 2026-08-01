@@ -3648,17 +3648,24 @@ function gpuMiniCard(card, d, ranges){
       return `<div class="spark-row"><span class="sl">${def.label()}</span>
         <span class="spark-na" title="${I18N.t('gpu.na_t','This card or driver does not report this metric.')}">${I18N.t('gpu.na','not reported')}</span></div>`;
     }
-    const r = ranges[m] || {};
-    // VRAM reads as a percentage of the card, which is what makes three cards
-    // of different sizes comparable at a glance.
+    let r = ranges[m] || {};
+    let vals2 = vals;
+    // VRAM reads as a percentage of THIS card, which is what makes cards of
+    // different sizes comparable. The trace has to be on that same scale —
+    // plotting raw MB against a range pooled across cards would show a small
+    // card as a low flat line while its label said 92%.
     let disp = def.fmt(last), cls = '';
-    if(m==='vram' && card.mem_total){ disp = Math.round(last/card.mem_total*100)+'%'; }
+    if(m==='vram' && card.mem_total){
+      disp = Math.round(last/card.mem_total*100)+'%';
+      vals2 = vals.map(v => v==null ? null : v/card.mem_total*100);
+      r = {min:0, max:100};
+    }
     if(m==='temp'){ cls = last>=d.hot_c ? 'bad' : last>=d.hot_c-8 ? 'warn' : ''; }
     if(m==='fan' && last>=95) cls = 'warn';
     const color = m==='temp' ? gpuTint(last>=d.hot_c?100:last>=d.hot_c-8?70:10)
                 : m==='util' ? gpuTint(last) : 'var(--ok)';
     return `<div class="spark-row"><span class="sl">${def.label()}</span>
-      ${sparkSvg(vals, {min:r.min, max:r.max, color, bands: m==='temp'||m==='util' ? spans : []})}
+      ${sparkSvg(vals2, {min:r.min, max:r.max, color, bands: m==='temp'||m==='util' ? spans : []})}
       <span class="sv ${cls}">${disp}</span></div>`;
   }).join('');
 
@@ -3734,7 +3741,7 @@ function paintGpuTab(loading){
   const nowCard    = document.getElementById('gpu-nowdetail-card');
   const title      = document.getElementById('gpu-pooled-title');
   if(loading || !d){
-    if(title) title.textContent = I18N.t('gpu.loading','Reading GPUs…');
+    if(title) title.innerHTML = `${sic('gpu')} ${esc(I18N.t('gpu.loading','Reading GPUs…'))}`;
     ['gpukpis','pergpu','gpu-alerts','gpu-health','sumtbl','nowtbl'].forEach(id=>{
       const el=document.getElementById(id); if(el) el.innerHTML='';
     });
@@ -3744,7 +3751,8 @@ function paintGpuTab(loading){
   // are different situations and get different words. Conflating them is how a
   // monitoring tool tells its first small lie.
   if(!d.has_gpu){
-    if(title) title.textContent = I18N.tf('gpu.none_title','No GPU detected on {host}',{host:d.host});
+    if(title) title.innerHTML = `${sic('gpu')} `
+      + esc(I18N.tf('gpu.none_title','No GPU detected on {host}',{host:d.host}));
     document.getElementById('gpukpis').innerHTML = '';
     const cap = document.getElementById('gpu-pooled-cap');
     if(cap) cap.textContent = I18N.t('gpu.none_cap','The probe found no NVIDIA card (via nvidia-smi) and no AMD or Intel GPU on this host.');
@@ -3755,7 +3763,10 @@ function paintGpuTab(loading){
   [perCard, combCard, nowCard].forEach(c=>{ if(c) c.hidden = false; });
 
   const p = d.now_pooled || {};
-  if(title) title.innerHTML = `🎮 ${I18N.tf('gpu.pooled_title','GPU on {host}',{host:esc(d.host)})}`
+  // sic('gpu'), not a raw emoji: applyIcons() swaps the leading emoji for an SVG
+  // once on load and then marks the node with dataset.ic, so re-setting raw text
+  // here would replace the SVG with an emoji that never gets upgraded again.
+  if(title) title.innerHTML = `${sic('gpu')} ${I18N.tf('gpu.pooled_title','GPU on {host}',{host:esc(d.host)})}`
     + (p.model ? ` <span class="muted" style="font-weight:400;font-size:13px">· ${esc(p.model)}</span>` : '');
 
   // Pooled KPIs, each with its own sparkline: the snapshot and the trend in one

@@ -110,12 +110,18 @@ def _live_cards(host):
 
 
 def _span_and_bucket(rng, host):
-    """(since, bucket_seconds, now) for a range key, sized like /api/data."""
+    """(since, bucket_seconds, now) for a range key, sized like /api/data.
+
+    The `range=all` branch touches the shared DB connection, so it takes LOCK
+    like every other reader in this codebase — the collector writes on its own
+    thread and an unlocked read here would race it.
+    """
     import app as _app
     span = _app.RANGES.get(rng, 21600)
     now = int(time.time())
     if span is None:
-        since = gpu_repo.min_ts(host, conn=_app.DB) or now
+        with _app.LOCK:
+            since = gpu_repo.min_ts(host, conn=_app.DB) or now
     else:
         since = now - span
     bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))

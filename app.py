@@ -3314,6 +3314,11 @@ def rename_host(old, new):
         DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
         from backend.db.repos import host_samples as _hs_repo
         _hs_repo.rename_host(old, new, conn=DB)
+        # Per-card GPU history and per-service VRAM are keyed by host name too;
+        # without this a rename orphans the whole cockpit history under the old
+        # name while the renamed host shows an empty GPU tab.
+        from backend.db.repos import gpu_samples as _gs_repo
+        _gs_repo.rename_host(old, new, conn=DB)
         DB.commit()
     with HOST_DATA_LOCK:
         if old in HOST_DATA:
@@ -5625,13 +5630,19 @@ def _enrich_gpus(gpus):
             # '[N/A]' must leave mem_util ABSENT, not 0: _gpu_extra averages only
             # the cards that measured, and the UI hides the chip on absence — a
             # coerced 0 would read as a confident "0% mem-bandwidth".
-            if p[1] and not p[1].startswith("["):
-                g["mem_util"] = _gpu_num(p[1])
-            g["clk_sm"]      = _gpu_num(p[2])
-            g["clk_mem"]     = _gpu_num(p[3])
-            g["power_limit"] = _gpu_num(p[4])
-            g["temp_mem"]    = _gpu_num(p[5])
-            g["pstate"]      = p[6] if (p[6] and not p[6].startswith("[")) else ""
+            # Every one of these stays ABSENT when the card doesn't report it,
+            # never 0. _gpu_num would coerce '[N/A]' to 0.0, and the cockpit
+            # derives its per-card `supports` map from presence — a coerced zero
+            # advertises the metric as supported and then draws a confident flat
+            # line at zero. The remote probe's _nvidia_enrich already does this;
+            # the hub's own cards were the inconsistent half.
+            for key, raw in (("mem_util", p[1]), ("clk_sm", p[2]), ("clk_mem", p[3]),
+                             ("power_limit", p[4]), ("temp_mem", p[5])):
+                v = _gpu_opt(raw)
+                if v is not None:
+                    g[key] = v
+            if p[6] and not p[6].startswith("["):
+                g["pstate"] = p[6]
     except Exception:
         pass
     for field in ("clocks_throttle_reasons.active", "clocks_event_reasons.active"):
