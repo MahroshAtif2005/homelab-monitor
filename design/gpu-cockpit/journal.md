@@ -105,6 +105,46 @@ GPU 1 sitting at 86 °C with no alert of any kind is exactly the hole this slice
    always, and counting that as throttling would show a healthy box as
    permanently throttled and train the user to ignore the indicator.
 
+### Bugs that only live verification found
+
+The test suite, the JSON payloads and the JS syntax check were all green for
+every one of these. Each was caught by pointing the thing at the real fleet and
+looking at what came back.
+
+1. **A retired GPU read as a hardware failure.** `ardi` still had history for a
+   card physically removed weeks earlier, so it rendered `NOT PRESENT` with a
+   critical. Any hardware change would have left a permanent false alarm. Split
+   into `gone` (missing from a live list — an incident) vs `retired` (last seen
+   long ago — history).
+2. **A zero-RPM idle fan read as a stalled fan.** A 3090 sitting at 53 °C with
+   its fan fully stopped is a zero-RPM cooler doing its job. The rule fired at a
+   flat 50 °C. The bar now derives from the alert threshold (10 °C below it,
+   floor 60 °C), where every zero-RPM design has long since spun up.
+3. **Per-card VRAM attribution was silently lost for containers.** `by_card`
+   came back `None` for every service. The pid is the only thing that knows both
+   which GPU it sits on and which container it belongs to; nothing downstream can
+   rebuild that from a container name, because the container is `ollama` while
+   the process on the card is `llama-server`.
+4. **Every card read `NOT PRESENT` for a minute after any restart.** `HOST_DATA`
+   is empty until the first successful poll, so all three of vader's cards were
+   "missing" from a live list that didn't exist yet. Added a third state,
+   `stale` — we don't know, and that is not an incident.
+5. **The dashboard and the notifier used different temperature thresholds.** The
+   tab hardcoded 84 °C for its HOT pill, red line and health column while the
+   alerts read a configurable setting with per-host overrides. Change the
+   setting and the page would warn at one temperature while the notifier fired
+   at another.
+6. **The VRAM-by-service chart was a solid black block.** `colorFor()` returns
+   `hsl(...)` and call sites append `'cc'` for alpha; `hsl(210 62% 56%)cc` is
+   not a colour, so Chart.js fell back to black. Pre-existing, invisible until
+   the cockpit gave that chart full width.
+7. **Every sparkline was invisible.** Correct data, correct SVG, nothing on
+   screen — the class name `.spark` was already taken by the Star-on-GitHub
+   sparkle animation (`position:absolute; opacity:0`). The new rule overrode
+   width/height but not those two, so each sparkline was pulled out of flow and
+   painted at zero opacity. Renamed to `.gspark`. Found only by screenshotting a
+   single card and seeing an empty column where five traces should be.
+
 ### Baseline test state (so later failures are attributable)
 
 On `next` @ `83cf977`, before any of my changes, **6 tests already fail**:
@@ -115,3 +155,21 @@ holds at those same 6, with 677 passing.
 
 Local Python is 3.8 and can't even import the app (PEP 585 annotations), so the
 suite runs on ardi's 3.13 via a sync-and-run helper.
+
+Final state: **738 passing, the same 6 pre-existing failures.** 63 new tests.
+
+> **Worth reporting separately:** `test_db_factory.py::test_different_threads_
+> return_different_conns` is **flaky on `next`**, independent of this branch —
+> it failed in roughly 1 of 3 full-suite runs and then passed 5 times in a row
+> with no changes. Not investigated; out of scope for this slice.
+
+### Verified live on `ardi:9801` against vader (3× RTX 3090)
+
+- 3 cards, per-card history, 5 sparklines each, per-card VRAM attribution
+- fan speed live (32% / 32% / 12%) — a metric this codebase never had
+- clocks, mem-BW, power cap (280/230/280 W), perf state, all from the remote probe
+- ollama's 63 GB correctly split 22.5 / 22.1 / 18.8 GB across the three cards
+- card health showing GPU 1's real history: 8 min hot, 86 °C peak, fan 100%
+- no page errors, no false alerts
+- caught a live model unload mid-capture: the VRAM traces drop off a cliff and
+  the combined chart shows all three cards releasing at once
