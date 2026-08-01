@@ -188,3 +188,36 @@ Final state: **738 passing, the same 6 pre-existing failures.** 63 new tests.
 Also: `locales/zh-CN.json` is generated — `_meta.untranslated`/`coverage` are
 derived. Hand-adding keys there needs `python scripts/i18n-sync.py` afterwards
 to refresh them (coverage 91.8% → 92.5% here).
+
+### PR review rounds (the automated gate earned its keep)
+
+The `review` job found real bugs across two rounds. Worth recording because the
+test suite was green for all of them:
+
+**Round 1**
+1. `gpuStatusPill()` emitted `mc-pill ok`, but the dashboard convention is the
+   compound `mc-pill mc-pill-ok` — none of my classes matched any rule, so every
+   status pill rendered neutral and the colour coding the small-multiples layout
+   depends on was silently absent.
+2. The hub's compute-apps parser trusted "rows came back" as proof of the query
+   shape, while `probe.py` verified the UUID column. Fixed the drift.
+3. `gpu_samples_1h` was written every poll and never read — the same dead-table
+   pattern this journal criticises two sections above. Worse: raw rows are
+   retention-purged, so a 30-day request answered from raw alone would have
+   shown two days and called it a month.
+
+**Round 2** — both of these are the "absent is not zero" rule failing to survive
+into the rollup, i.e. the feature's own central principle:
+4. `MAX(COALESCE(temp_max,-273), …)` left `-273` stored once two metric-less
+   polls shared an hour. A fabricated reading, in the long-term record.
+5. The incremental average divided by total poll count rather than by the polls
+   that actually reported the metric: three silent polls then two at 80% fan
+   averaged to 32%. A fan average dragged toward zero is exactly what the
+   fan-stall alert fires on. Added `fan_cnt`.
+6. `GPU_SEL_CARD` was written on click and never read — "click a card for the
+   full chart" only switched views. It now focuses that card's line.
+
+Round 3 returned no new findings.
+
+**Final:** 747 passing, the same 6 pre-existing failures. Verified live on
+`ardi:9801` against vader after every round.
