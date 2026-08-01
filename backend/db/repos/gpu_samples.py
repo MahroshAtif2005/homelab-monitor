@@ -114,21 +114,26 @@ def series(host: str, since: int, bucket: int, conn=None) -> list:
         (bucket, bucket, host, since)).fetchall()
 
 
-def health(host: str, since: int, conn=None) -> list:
+def health(host: str, since: int, hot_c: int = 84, conn=None) -> list:
     """Per-card health rollup since `since`, for the card-health table.
 
     (idx, samples, avg_temp, peak_temp, peak_fan, throttled_samples,
-     hot_samples_at_84, capped_samples). Counts rather than durations — the
-     caller multiplies by the poll interval, which it knows and this doesn't.
+     hot_samples, capped_samples). Counts rather than durations — the caller
+     multiplies by the poll interval, which it knows and this doesn't.
+
+    `hot_c` is passed in rather than fixed so the "hot" column counts against
+    the same threshold the alerts use, including a per-host override. A table
+    that says 0 minutes hot while the notifier is paging about heat would be
+    worse than no table.
     """
     c = conn or connection()
     return c.execute(
         "SELECT idx, COUNT(*), AVG(temp), MAX(temp), MAX(fan), "
         "       SUM(CASE WHEN COALESCE(throttle,0) & ? THEN 1 ELSE 0 END), "
-        "       SUM(CASE WHEN temp >= 84 THEN 1 ELSE 0 END), "
+        "       SUM(CASE WHEN temp >= ? THEN 1 ELSE 0 END), "
         "       SUM(CASE WHEN power_limit > 0 AND power >= power_limit * 0.98 THEN 1 ELSE 0 END) "
         "FROM gpu_samples WHERE host=? AND ts>=? GROUP BY idx ORDER BY idx",
-        (_THERMAL_BITS, host, since)).fetchall()
+        (_THERMAL_BITS, hot_c, host, since)).fetchall()
 
 
 def throttle_spans(host: str, since: int, conn=None) -> list:

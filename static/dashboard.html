@@ -3982,6 +3982,12 @@ function syncGpuViewButtons(){
   if(b) b.classList.toggle('on', GPU_VIEW==='metric');
 }
 
+// The temperature at which a 0% fan stops being a zero-RPM idle mode and starts
+// being a broken fan. Mirrors notify._notify's rule exactly (10 °C under the
+// alert threshold, floor 60 °C) — the strip and the notifier must never
+// disagree about what counts as an incident.
+const gpuStallBar = d => Math.max(60, (d.hot_c || 84) - 10);
+
 // The alert strip: what / how bad / who is driving it and is there headroom.
 // Rendered only when something is actually wrong — an always-present banner is
 // an always-ignored banner.
@@ -4022,10 +4028,14 @@ function renderGpuAlertStrip(d){
         d: I18N.tf('gpu.al_hot_d','At or above {h}°C. Not throttling yet{f}.',
              {h:d.hot_c, f: now.fan!=null ? I18N.tf('gpu.al_hot_fan',', fan at {f}%',{f:Math.round(now.fan)}) : ''})});
     }
-    // A fan reporting exactly 0% on a warm card is a stalled fan — the one
-    // reading worth waking someone for. `supports.fan` guards it, so a
-    // passively cooled card can never trip this.
-    if(c.supports.fan && now.fan === 0 && (now.temp||0) >= 50){
+    // A fan reporting exactly 0% on a HOT card is a stalled fan. Two guards:
+    // `supports.fan` (a passively cooled card reports none, and absent must
+    // never read as stopped), and a bar derived from the alert threshold rather
+    // than a fixed temperature — modern cards have zero-RPM idle modes and
+    // legitimately sit in the 50s with their fans off. Same rule as the
+    // notifier's, so the dashboard can never show a critical that no alert
+    // would ever be sent for.
+    if(c.supports.fan && now.fan === 0 && (now.temp||0) >= gpuStallBar(d)){
       items.push({lvl:'crit', ic:'alert',
         t: I18N.tf('gpu.al_fanstall','GPU {n} fan is stopped while the card is at {t}°C',{n:c.idx,t:Math.round(now.temp||0)}),
         d: I18N.t('gpu.al_fanstall_d','The card reports a fan but it is reading 0%. A seized fan or an unplugged header will cook a GPU under load.')});

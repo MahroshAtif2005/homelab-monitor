@@ -223,6 +223,44 @@ class TestHealth(unittest.TestCase):
         self.assertEqual(h["peak_temp"], 87)
 
 
+class TestThresholdIsShared(unittest.TestCase):
+    """The number the dashboard draws and the number that pages you must match.
+
+    A tab that shows a red "HOT" pill at one temperature while the notifier
+    fires at another teaches the user to trust neither.
+    """
+
+    def setUp(self):
+        self.c = _client()
+        _wipe()
+
+    def tearDown(self):
+        import app
+        app.save_settings({"gpu_temp_alert_c": "84", "gpu_temp_overrides": ""})
+
+    def test_hot_c_follows_the_configured_setting(self):
+        import app
+        app.save_settings({"gpu_temp_alert_c": "90"})
+        d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        self.assertEqual(d["hot_c"], 90)
+
+    def test_hot_c_follows_a_per_host_override(self):
+        import app
+        app.save_settings({"gpu_temp_alert_c": "84", "gpu_temp_overrides": '{"vader": 88}'})
+        a = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        b = self.c.get("/api/gpu/history?host=local&range=1h").get_json()
+        self.assertEqual((a["hot_c"], b["hot_c"]), (88, 84))
+
+    def test_the_hot_column_counts_against_that_same_threshold(self):
+        import app
+        app.save_settings({"gpu_temp_alert_c": "90"})
+        now = int(time.time())
+        _seed("vader", [(now - t, [_card(0, temp=86)]) for t in range(300, 0, -10)])
+        d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        # 86 C is hot under an 84 C threshold but not under 90 C.
+        self.assertEqual(d["cards"][0]["health"]["hot_sec"], 0)
+
+
 class TestAttribution(unittest.TestCase):
     def setUp(self):
         self.c = _client()

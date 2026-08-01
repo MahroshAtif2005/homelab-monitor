@@ -26,11 +26,24 @@ from backend.db.repos import gpu_samples as gpu_repo
 
 bp = Blueprint('gpu_cockpit', __name__)
 
-# Cards hotter than this are "hot" in the status pill and the health table. It is
-# a display default only — the alert rules carry their own configurable threshold
-# with per-host overrides, because a box whose cards run at a deliberately
-# lowered power limit lives in the low 80s by design.
+# Fallback only. The real threshold comes from settings via _hot_c() below, so
+# the cockpit's "HOT" pill, its red threshold line and the alert that actually
+# pages you are all the same number. A dashboard that draws a warning at one
+# temperature while the notifier fires at another teaches the user to distrust
+# both.
 HOT_C = 84
+
+
+def _hot_c(host):
+    """The temperature threshold for `host`: its per-host override, else the
+    configured global, else the default. Same resolution order the notifier
+    uses — deliberately, so the two can never disagree."""
+    import app as _app
+    try:
+        from backend.notify import _gpu_temp_threshold
+        return _gpu_temp_threshold(_app.get_settings(), host)
+    except Exception:
+        return HOT_C
 
 
 def _live_services(host):
@@ -174,12 +187,13 @@ def api_gpu_history():
     since, bk, now = _span_and_bucket(rng, host)
     interval = _app.INTERVAL
 
+    hot_c = _hot_c(host)
     live_cards, live_agg, live_procs, at, online = _live_cards(host)
     live_by_idx = {c["idx"]: c for c in live_cards if c.get("idx") is not None}
 
     with _app.LOCK:
         rows = gpu_repo.series(host, since, bk, conn=_app.DB)
-        health_rows = gpu_repo.health(host, since, conn=_app.DB)
+        health_rows = gpu_repo.health(host, since, hot_c=hot_c, conn=_app.DB)
         thr_rows = gpu_repo.throttle_spans(host, since, conn=_app.DB)
         stored_idxs = gpu_repo.cards_for(host, conn=_app.DB)
         last_seen = gpu_repo.last_seen(host, conn=_app.DB)
@@ -255,7 +269,7 @@ def api_gpu_history():
             "power_limit": (live or {}).get("power_limit") or 0,
             "present": live is not None,
             "last_seen": last_seen.get(idx),
-            "status": _status_for(live, HOT_C,
+            "status": _status_for(live, hot_c,
                                   recent=(last_seen.get(idx) or 0) >= recent_cutoff),
             "now": _now_block(live),
             "supports": supports,
@@ -285,7 +299,7 @@ def api_gpu_history():
         "labels": labels, "at": at, "online": online,
         "cards": cards, "combined": combined,
         "capacity_mb": capacity, "power_limit": pooled_limit,
-        "hot_c": HOT_C,
+        "hot_c": hot_c,
         "now_services": _live_services(host),
         "now_pooled": _pooled_now(live_cards, live_agg),
         # An empty payload has two very different causes and the UI must not
