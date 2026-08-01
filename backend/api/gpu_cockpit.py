@@ -1,0 +1,378 @@
+"""backend/api/gpu_cockpit.py — per-card GPU history and attribution, any host.
+
+Two endpoints, both host-parameterised, both serving the hub and a remote from
+the same storage:
+
+  /api/gpu/history?host=&range=      per-card series + combined + card health
+  /api/gpu/attribution?host=&range=  per-service VRAM over time + power estimate
+
+`host=local` is the hub. There is deliberately no separate "remote" endpoint:
+the dashboard used to render charts for the hub and a bare snapshot for everyone
+else, and that fork existed only because the storage did. One reader, one shape.
+
+Honesty rules applied throughout:
+
+* A metric no card in the range ever reported is advertised as unsupported in
+  `supports`, not sent as a row of zeros. "This driver can't tell us" and "the
+  measured value is zero" are different claims and the UI draws them differently.
+* Power attributed to a service is explicitly flagged `estimated` — GPUs do not
+  meter power per process, so it is apportioned, and the payload says so rather
+  than letting a chart imply a measurement.
+"""
+from flask import Blueprint, request, jsonify
+import time
+
+from backend.db.repos import gpu_samples as gpu_repo
+
+bp = Blueprint('gpu_cockpit', __name__)
+
+# Cards hotter than this are "hot" in the status pill and the health table. It is
+# a display default only — the alert rules carry their own configurable threshold
+# with per-host overrides, because a box whose cards run at a deliberately
+# lowered power limit lives in the low 80s by design.
+HOT_C = 84
+
+
+def _live_cards(host):
+    """(cards, aggregate, procs, at, online) as most recently seen for `host`.
+
+    The live snapshot, not history: it carries fields the time-series doesn't
+    (card name, vendor, per-process by_card VRAM) and it is what makes the tab
+    paint instantly on a host whose history is still filling.
+    """
+    import app as _app
+    if host == "local":
+        return (list(_app.LATEST.get("gpus") or []),
+                _app.LATEST.get("gpu_extra") or {},
+                list(_app.LATEST.get("procs") or []),
+                _app.LATEST.get("ts"), True)
+    with _app.HOST_DATA_LOCK:
+        entry = _app.HOST_DATA.get(host)
+    if not entry or "data" not in entry:
+        return [], {}, [], (entry or {}).get("at"), False
+    h = (entry["data"].get("host") or {})
+    return (list(h.get("gpus") or []), h.get("gpu") or {},
+            list(h.get("gpu_procs") or []), entry.get("at"),
+            _app._host_is_online(entry))
+
+
+def _span_and_bucket(rng, host):
+    """(since, bucket_seconds, now) for a range key, sized like /api/data."""
+    import app as _app
+    span = _app.RANGES.get(rng, 21600)
+    now = int(time.time())
+    if span is None:
+        since = gpu_repo.min_ts(host, conn=_app.DB) or now
+    else:
+        since = now - span
+    bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
+    return since, bk, now
+
+
+def _stitch_spans(rows, interval):
+    """Throttle samples → [{idx, start, end, reasons}] merged spans.
+
+    Consecutive samples belong to one span; a gap longer than two poll intervals
+    starts a new one. Done here rather than in SQL because "consecutive" depends
+    on the poll interval, which the caller knows and the database doesn't.
+    """
+    import app as _app
+    gap = max(interval * 2, 2)
+    spans, open_span = [], {}
+    for ts, idx, mask in rows:
+        cur = open_span.get(idx)
+        if cur and ts - cur["end"] <= gap:
+            cur["end"] = ts
+            cur["mask"] |= (mask or 0)
+        else:
+            if cur:
+                spans.append(cur)
+            open_span[idx] = {"idx": idx, "start": ts, "end": ts, "mask": mask or 0}
+    spans.extend(open_span.values())
+    for s in spans:
+        # A span one sample long has zero width; give it the poll interval so it
+        # is visible on a chart rather than being a zero-width invisible marker.
+        if s["end"] == s["start"]:
+            s["end"] = s["start"] + interval
+        s["reasons"] = _app._decode_throttle(hex(s.pop("mask")))
+    return sorted(spans, key=lambda s: (s["idx"], s["start"]))
+
+
+def _status_for(live, hot_c):
+    """The status pill: what a human should conclude about this card at a glance.
+
+    Ordering matters — a card can be hot AND busy, and "hot" is the fact worth
+    surfacing. Power-capping is deliberately NOT a warning state: a box running a
+    deliberately lowered power limit sits at its cap by design.
+    """
+    import app as _app
+    if live is None:
+        return "gone"
+    mask = live.get("throttle_mask") or 0
+    if mask & _app._THERMAL_BITS:
+        return "throttle"
+    if (live.get("temp") or 0) >= hot_c:
+        return "hot"
+    util = live.get("util") or 0
+    if util >= 5:
+        return "busy"
+    return "idle"
+
+
+@bp.route("/api/gpu/history")
+def api_gpu_history():
+    """Per-card GPU history for one host — the GPU cockpit's main feed."""
+    import app as _app
+    host = request.args.get("host", "local")
+    rng = request.args.get("range", "6h")
+    since, bk, now = _span_and_bucket(rng, host)
+    interval = _app.INTERVAL
+
+    live_cards, live_agg, live_procs, at, online = _live_cards(host)
+    live_by_idx = {c["idx"]: c for c in live_cards if c.get("idx") is not None}
+
+    with _app.LOCK:
+        rows = gpu_repo.series(host, since, bk, conn=_app.DB)
+        health_rows = gpu_repo.health(host, since, conn=_app.DB)
+        thr_rows = gpu_repo.throttle_spans(host, since, conn=_app.DB)
+        stored_idxs = gpu_repo.cards_for(host, conn=_app.DB)
+
+    labels = sorted({int(r[0]) for r in rows})
+    pos = {b: i for i, b in enumerate(labels)}
+    n = len(labels)
+    # Every card the host has EVER reported, plus whatever it is reporting right
+    # now: a card that has just been added has no history, and a card that fell
+    # off the bus has history but no live entry. Both must appear — the second is
+    # the more important one, since a vanished card is a hardware incident.
+    idxs = sorted(set(stored_idxs) | set(live_by_idx))
+
+    # series[idx][metric] = [...]; None (not 0) for buckets with no sample, so a
+    # gap in the history renders as a gap rather than a dive to zero.
+    METRICS = ("util", "vram", "vram_total", "power", "temp", "temp_max",
+               "fan", "fan_max", "mem_util", "clk_sm")
+    series = {i: {m: [None] * n for m in METRICS} for i in idxs}
+    for (b, idx, util, mem_used, mem_total, power, temp, temp_max,
+         fan, fan_max, mem_util, clk_sm, _thr) in rows:
+        i = pos.get(int(b))
+        if i is None or idx not in series:
+            continue
+        s = series[idx]
+        s["util"][i] = _r(util)
+        s["vram"][i] = _r(mem_used)
+        s["vram_total"][i] = _r(mem_total)
+        s["power"][i] = _r(power)
+        s["temp"][i] = _r(temp)
+        s["temp_max"][i] = _r(temp_max)
+        s["fan"][i] = _r(fan)
+        s["fan_max"][i] = _r(fan_max)
+        s["mem_util"][i] = _r(mem_util)
+        s["clk_sm"][i] = _r(clk_sm)
+
+    spans_by_idx = {}
+    for s in _stitch_spans(thr_rows, interval):
+        spans_by_idx.setdefault(s["idx"], []).append(s)
+
+    health_by_idx = {}
+    for (idx, cnt, avg_t, peak_t, peak_fan, thr_n, hot_n, capped_n) in health_rows:
+        health_by_idx[idx] = {
+            "idx": idx, "samples": cnt,
+            "avg_temp": _r(avg_t), "peak_temp": _r(peak_t), "peak_fan": _r(peak_fan),
+            "throttled_sec": (thr_n or 0) * interval,
+            "hot_sec": (hot_n or 0) * interval,
+            "capped_pct": round((capped_n or 0) * 100.0 / cnt, 1) if cnt else 0,
+            "window_sec": (cnt or 0) * interval,
+        }
+
+    cards = []
+    for idx in idxs:
+        live = live_by_idx.get(idx)
+        s = series[idx]
+        # "Supported" means this card actually reported the metric at least once
+        # in the window (or is reporting it live). Anything else is advertised as
+        # unsupported so the UI can say "not reported by this driver" instead of
+        # drawing a confident flat zero.
+        supports = {m: any(v is not None for v in s[m]) for m in ("fan", "mem_util", "clk_sm", "temp")}
+        if live:
+            for k, m in (("fan", "fan"), ("mem_util", "mem_util"), ("clk_sm", "clk_sm"), ("temp", "temp")):
+                if live.get(m) is not None:
+                    supports[k] = True
+        cards.append({
+            "idx": idx,
+            "name": (live or {}).get("name") or f"GPU {idx}",
+            "vendor": (live or {}).get("vendor"),
+            "mem_total": (live or {}).get("mem_total") or _last(s["vram_total"]) or 0,
+            "power_limit": (live or {}).get("power_limit") or 0,
+            "present": live is not None,
+            "status": _status_for(live, HOT_C),
+            "now": _now_block(live),
+            "supports": supports,
+            "series": s,
+            "throttle_spans": spans_by_idx.get(idx, []),
+            "health": health_by_idx.get(idx),
+        })
+
+    # Combined: VRAM and power are sums across cards, util is the mean, and
+    # temperature is the MAX. Averaging temperature across cards would hide the
+    # one card that is cooking — which is the entire question this panel answers.
+    combined = {"util": [], "vram": [], "vram_total": [], "power": [], "temp_max": [], "fan_max": []}
+    for i in range(n):
+        vals = [series[idx] for idx in idxs]
+        combined["util"].append(_mean([v["util"][i] for v in vals]))
+        combined["vram"].append(_sum([v["vram"][i] for v in vals]))
+        combined["vram_total"].append(_sum([v["vram_total"][i] for v in vals]))
+        combined["power"].append(_sum([v["power"][i] for v in vals]))
+        combined["temp_max"].append(_max([v["temp_max"][i] for v in vals]))
+        combined["fan_max"].append(_max([v["fan_max"][i] for v in vals]))
+
+    capacity = sum(c["mem_total"] for c in cards) or 0
+    pooled_limit = (sum(c["power_limit"] for c in cards)
+                    if cards and all(c["power_limit"] for c in cards) else 0)
+    return jsonify({
+        "host": host, "range": rng, "bucket_sec": bk, "interval": interval,
+        "labels": labels, "at": at, "online": online,
+        "cards": cards, "combined": combined,
+        "capacity_mb": capacity, "power_limit": pooled_limit,
+        "hot_c": HOT_C,
+        # An empty payload has two very different causes and the UI must not
+        # conflate them: a host with no GPU at all, versus a GPU host whose
+        # history hasn't accumulated yet.
+        "has_gpu": bool(cards),
+        "has_history": n > 0,
+    })
+
+
+def _now_block(live):
+    """The card's live values, with absent metrics left absent."""
+    if not live:
+        return None
+    out = {}
+    for k in ("util", "mem_used", "mem_total", "power", "power_limit", "temp",
+              "fan", "fan_rpm", "mem_util", "clk_sm", "clk_mem", "temp_mem", "pstate"):
+        v = live.get(k)
+        if v is not None:
+            out[k] = v
+    if live.get("throttled"):
+        out["throttled"] = True
+        out["throttle"] = live.get("throttle") or []
+    return out
+
+
+def _r(v, nd=0):
+    if v is None:
+        return None
+    return round(v, nd) if nd else round(v)
+
+
+def _mean(vals):
+    xs = [v for v in vals if v is not None]
+    return round(sum(xs) / len(xs)) if xs else None
+
+
+def _sum(vals):
+    xs = [v for v in vals if v is not None]
+    return round(sum(xs)) if xs else None
+
+
+def _max(vals):
+    xs = [v for v in vals if v is not None]
+    return round(max(xs)) if xs else None
+
+
+def _last(vals):
+    for v in reversed(vals):
+        if v is not None:
+            return v
+    return None
+
+
+@bp.route("/api/gpu/attribution")
+def api_gpu_attribution():
+    """Who is using this host's GPUs: VRAM per service over time, plus a power
+    estimate and what that energy cost.
+
+    The power split is an APPORTIONMENT, not a measurement. GPUs meter power per
+    card, never per process, so each service is charged a share of the card's
+    measured draw above its idle floor, in proportion to the VRAM it holds. The
+    response says `estimated: true` and the UI repeats it, because presenting a
+    modelled number as a measured one is the kind of quiet lie a monitoring tool
+    should never tell.
+    """
+    import app as _app
+    host = request.args.get("host", "local")
+    rng = request.args.get("range", "6h")
+    since, bk, now = _span_and_bucket(rng, host)
+
+    with _app.LOCK:
+        rows = gpu_repo.vram_by_service(host, since, bk, conn=_app.DB)
+        totals = gpu_repo.service_totals(host, since, conn=_app.DB)
+        ticks = gpu_repo.distinct_sample_times(host, since, conn=_app.DB)
+        power_rows = gpu_repo.series(host, since, bk, conn=_app.DB)
+
+    labels = sorted({int(r[0]) for r in rows} | {int(r[0]) for r in power_rows})
+    pos = {b: i for i, b in enumerate(labels)}
+    n = len(labels)
+
+    services = {}
+    for b, svc, mem in rows:
+        i = pos.get(int(b))
+        if i is not None:
+            services.setdefault(svc, [0] * n)[i] = _r(mem)
+
+    # Pooled draw and pooled VRAM per bucket, for the apportionment below.
+    pooled_w, pooled_vram = [0.0] * n, [0.0] * n
+    for r in power_rows:
+        i = pos.get(int(r[0]))
+        if i is None:
+            continue
+        pooled_w[i] += (r[5] or 0)
+        pooled_vram[i] += (r[3] or 0)
+
+    # Idle floor: the lowest pooled draw seen in the window. Cards burn a real,
+    # substantial baseline just being powered on (an idle 3090 is ~100 W), and
+    # charging that to whichever service happens to hold VRAM would materially
+    # overstate its cost. It is reported as its own band instead.
+    idle_floor = min((w for w in pooled_w if w > 0), default=0.0)
+
+    power_series = {}
+    for svc, mem_series in services.items():
+        ps = []
+        for i in range(n):
+            share = (mem_series[i] / pooled_vram[i]) if pooled_vram[i] else 0
+            ps.append(round(max(0.0, pooled_w[i] - idle_floor) * share, 1))
+        power_series[svc] = ps
+
+    s = _app.get_settings()
+    try:
+        price = float(s.get("kwh_price") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    hours_per_bucket = bk / 3600.0
+
+    out = []
+    peak_by_svc = {t[0]: (t[1], t[2], t[3]) for t in totals}
+    for svc, mem_series in sorted(services.items(), key=lambda kv: -max(kv[1] or [0])):
+        peak, avg, present = peak_by_svc.get(svc, (0, 0, 0))
+        kwh = sum(power_series[svc]) * hours_per_bucket / 1000.0
+        out.append({
+            "service": svc,
+            "vram": mem_series,
+            "power": power_series[svc],
+            "peak_mb": _r(peak), "avg_mb": _r(avg),
+            "pct_time": round(present * 100.0 / ticks, 1) if ticks else 0,
+            "est_kwh": round(kwh, 3),
+            "est_cost": round(kwh * price, 2) if price else None,
+        })
+
+    idle_kwh = idle_floor * n * hours_per_bucket / 1000.0
+    return jsonify({
+        "host": host, "range": rng, "bucket_sec": bk, "labels": labels,
+        "services": out,
+        "idle_floor_w": round(idle_floor, 1),
+        "idle": {"power": [round(idle_floor, 1)] * n,
+                 "est_kwh": round(idle_kwh, 3),
+                 "est_cost": round(idle_kwh * price, 2) if price else None},
+        "currency": s.get("currency") or "$",
+        "kwh_price": price,
+        # Load-bearing: the UI prints this next to every wattage on this endpoint.
+        "estimated": True,
+    })

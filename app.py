@@ -94,6 +94,7 @@ app = Flask(__name__, static_url_path="/static", static_folder="static")
 # Phase 3.4: register API blueprints (in original @app.route declaration order)
 from backend.api.system import bp as _system_bp
 from backend.api.gpu import bp as _gpu_bp
+from backend.api.gpu_cockpit import bp as _gpu_cockpit_bp
 from backend.api.costs import bp as _costs_bp
 from backend.api.experiments import bp as _experiments_bp
 from backend.api.uptime_api import bp as _uptime_api_bp
@@ -102,6 +103,7 @@ from backend.api.integrations import bp as _integrations_bp
 from backend.api.benchmarks import bp as _benchmarks_bp
 app.register_blueprint(_system_bp)
 app.register_blueprint(_gpu_bp)
+app.register_blueprint(_gpu_cockpit_bp)
 app.register_blueprint(_costs_bp)
 app.register_blueprint(_experiments_bp)
 app.register_blueprint(_uptime_api_bp)

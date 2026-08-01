@@ -29,14 +29,20 @@ Its own caption admits the gap:
 | Table | Scope | Per card? | Has temp? | Has fan? | Written by |
 |---|---|---|---|---|---|
 | `samples` / `samples_1m` / `samples_1h` | hub only | ✗ pooled | ✓ | ✗ | hub collector |
-| `gpu_samples(ts, idx, …)` | hub only | ✓ | ✓ | ✗ | **nothing — dead table** |
+| `gpu_samples(ts, idx, …)` | hub only | ✓ | ✓ | ✗ | collector, **multi-GPU hubs only** |
 | `host_samples` / `host_samples_1h` | per host | ✗ pooled | ✗ **no gpu temp** | ✗ | `_record_host_sample()` (app.py:3629) |
 
-So: the hub's *own* per-card history is never stored either (`gpu_samples` has an
-index and a schema and zero writers), and the per-host table drops GPU temperature
-on the floor. Fan speed is **not collected anywhere in the codebase** — neither
-`_nvidia_cards()` in `probe.py:374` nor `_enrich_gpus()` in `app.py:5379` query
-`fan.speed`.
+So: the per-host table drops GPU temperature on the floor, and fan speed is **not
+collected anywhere in the codebase** — neither `_nvidia_cards()` in `probe.py:374`
+nor `_enrich_gpus()` in `app.py:5379` query `fan.speed`.
+
+> **Correction (found while implementing).** My first pass called `gpu_samples` a
+> dead table with zero writers. Wrong: `backend/collectors/__init__.py:370` writes
+> it every poll — but only when the hub has more than one card, and **nothing
+> reads it**. No API, no repo, no UI. A multi-GPU hub has therefore been quietly
+> accumulating per-card history for months and never showing a pixel of it. That
+> makes extending this table the right move rather than adding a parallel one:
+> `ardi`'s existing 39 046 rows become chartable the moment the reader exists.
 
 ### Remote probe coverage gap
 `probe.py:_nvidia_cards()` queries 7 fields
@@ -67,4 +73,45 @@ GPU 1 sitting at 86 °C with no alert of any kind is exactly the hole this slice
 ## Log
 
 - **2026-08-01** — surveyed the code, captured the before-state above, wrote
-  `SPEC.md` with the ASCII cockpit mockup. Awaiting go-ahead before building.
+  `SPEC.md` with the ASCII cockpit mockup. Approved: full scope, one branch.
+- **2026-08-01** — branch `feat/gpu-cockpit` off `next` @ `83cf977`.
+- **2026-08-01** — slice 1 `04a8178`, collection. Fan speed on both the hub and
+  probe paths (NVIDIA `fan.speed`, AMD `pwm1`/`fan1_input`), the probe gains the
+  deep telemetry pass the hub already had, and both sides map `gpu_uuid` → card
+  index so VRAM is attributable to a card rather than only to the pool.
+- **2026-08-01** — slice 2 `2deaf10`, storage. `gpu_samples` and `proc` gain
+  `host`; new `gpu_samples_1h` keeps MAX alongside AVG for temp/fan.
+
+### Corrections and gotchas found while building
+
+1. **The probe is not installed on remotes.** `_ssh_with_stdin(user, host, port,
+   "python3 -", _PROBE_SCRIPT)` — `probe.py` is streamed from the hub's own image
+   on *every poll*. Shipping the new probe in the image is the entire rollout;
+   there is nothing on vader or Work to update. (This retired the "deploy probes
+   to each host" task.)
+2. **nvidia-smi rejects the whole query on one unknown field name.** Appending
+   `fan.speed` or `gpu_uuid` would make every card vanish on an older driver, so
+   each new field is asked for first and falls back to the exact previous query.
+3. **The compute-apps parser can't infer its shape from success.** It verifies
+   the leading column actually looks like a UUID (`GPU-…`/`MIG-…`), because a
+   wrong guess silently shifts every column by one.
+4. **The test fixture handed one stdout to every nvidia-smi query**, which let the
+   enrichment pass parse the card CSV as clock data. It now answers per query.
+5. **Migration indexes can't live in the schema script.** `executescript` runs
+   before the `ALTER`s, so an index over a newly added column fails on any
+   existing install. They run in their own post-migration pass.
+6. **Power-cap is not throttling.** `_THERMAL_BITS` deliberately excludes
+   `SW_POWER_CAP`: vader's cards sit at their deliberate 280 W cap essentially
+   always, and counting that as throttling would show a healthy box as
+   permanently throttled and train the user to ignore the indicator.
+
+### Baseline test state (so later failures are attributable)
+
+On `next` @ `83cf977`, before any of my changes, **6 tests already fail**:
+5 in `test_public_status.py` (maintenance-window flags) and
+`test_no_silent_swallow.py` (2 pre-existing broad-except blocks in
+`backend/api/benchmarks.py` and `backend/collectors/__init__.py`). My branch
+holds at those same 6, with 677 passing.
+
+Local Python is 3.8 and can't even import the app (PEP 585 annotations), so the
+suite runs on ardi's 3.13 via a sync-and-run helper.
