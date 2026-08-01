@@ -90,10 +90,15 @@ def query_samples_bucketed(bk: int, since: int, conn=None) -> list:
 
 
 def query_proc_bucketed(bk: int, since: int, conn=None) -> list:
-    """Return (bucket, service, avg_mem) from proc since `since`."""
+    """Return (bucket, service, avg_mem) from proc since `since`.
+
+    Scoped to host='local': `proc` used to be implicitly the hub's own table and
+    now carries every host's per-service VRAM, so an unscoped query would stack
+    a remote's services onto the hub's chart.
+    """
     c = conn or connection()
     return c.execute(
-        "SELECT (ts/?)*? b,service,AVG(mem) FROM proc WHERE ts>=? GROUP BY b,service",
+        "SELECT (ts/?)*? b,service,AVG(mem) FROM proc WHERE host='local' AND ts>=? GROUP BY b,service",
         (bk, bk, since)
     ).fetchall()
 
@@ -109,10 +114,12 @@ def query_disk_io_bucketed(bk: int, since: int, conn=None) -> list:
 
 
 def query_proc_summary(since: int, conn=None) -> list:
-    """Return (service, max_mem, avg_mem, count_distinct_ts) from proc since `since`."""
+    """Return (service, max_mem, avg_mem, count_distinct_ts) from proc since
+    `since`, for the hub's own services (see query_proc_bucketed on scoping)."""
     c = conn or connection()
     return c.execute(
-        "SELECT service,MAX(mem),AVG(mem),COUNT(DISTINCT ts) FROM proc WHERE ts>=? GROUP BY service",
+        "SELECT service,MAX(mem),AVG(mem),COUNT(DISTINCT ts) FROM proc "
+        "WHERE host='local' AND ts>=? GROUP BY service",
         (since,)
     ).fetchall()
 
@@ -194,10 +201,12 @@ def query_events_range(since: int, conn=None) -> list:
 
 
 def query_proc_at_time(ts: int, exclude_service: str, conn=None):
-    """Return (service, mem) from proc at/before ts, excluding one service."""
+    """Return (service, mem) from proc at/before ts, excluding one service.
+    Hub-scoped (see query_proc_bucketed)."""
     c = conn or connection()
     return c.execute(
-        "SELECT service,mem FROM proc WHERE ts<=? AND service!=? ORDER BY ts DESC,mem DESC LIMIT 1",
+        "SELECT service,mem FROM proc WHERE host='local' AND ts<=? AND service!=? "
+        "ORDER BY ts DESC,mem DESC LIMIT 1",
         (ts, exclude_service)
     ).fetchone()
 

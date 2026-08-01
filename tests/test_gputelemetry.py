@@ -65,7 +65,12 @@ class TestEnrichGpus(unittest.TestCase):
         with patch("app.smi", side_effect=fake_smi):
             app._enrich_gpus(gpus)
         self.assertEqual(gpus[0]["pstate"], "P8")
-        self.assertEqual(gpus[0]["temp_mem"], 0)   # [N/A] tolerated -> 0
+        # [N/A] leaves the field ABSENT, not 0. This assertion used to expect 0;
+        # that was the hub disagreeing with its own probe, which has always left
+        # unsupported fields off. It matters because the GPU cockpit derives a
+        # per-card `supports` map from presence — a coerced 0 advertises a metric
+        # as supported and then draws a confident flat line at zero.
+        self.assertNotIn("temp_mem", gpus[0])
         self.assertEqual(gpus[0]["throttle"], ["HW thermal"])
 
     def test_enrichment_never_raises_on_bad_smi(self):

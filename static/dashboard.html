@@ -328,6 +328,48 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .gpu-chip .l{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.02em}
 .gpu-chip.bad{border-color:var(--crit)} .gpu-chip.warn{border-color:var(--warn)}
 .gpu-chip.live{border-color:var(--ok)}
+/* ── GPU cockpit: per-card small multiples ────────────────────────────────────
+   Identical panels side by side so the eye finds the odd card out without
+   reading. Auto-fit rather than a fixed column count: 1 card, 3 cards and 8
+   cards all have to look deliberate, and on a phone they stack. */
+.gpu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:11px}
+.gpu-mini{border:1px solid var(--bd);border-radius:10px;padding:11px 12px;background:rgba(127,127,127,.04);
+  display:flex;flex-direction:column;gap:8px;cursor:pointer;transition:border-color .12s ease}
+.gpu-mini:hover,.gpu-mini:focus-visible{border-color:var(--mut);outline:none}
+.gpu-mini.sel{border-color:var(--ok)}
+.gpu-mini.st-throttle{border-color:var(--crit)}
+.gpu-mini.st-hot{border-color:var(--warn)}
+.gpu-mini.st-gone{border-color:var(--crit);opacity:.72}
+.gpu-mini.st-retired,.gpu-mini.st-stale{opacity:.55}
+.gpu-mini-h{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.gpu-mini-h b{font-size:13px}
+.gpu-mini-h .nm{font-size:12px;color:var(--mut);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-mini-now{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
+/* One sparkline row: fixed label column + fixed value column so the traces of
+   every card line up vertically and can be compared across panels. */
+.spark-row{display:grid;grid-template-columns:38px 1fr 62px;align-items:center;gap:8px;font-size:11px}
+.spark-row .sl{color:var(--mut);text-transform:uppercase;letter-spacing:.02em;font-size:10px}
+.spark-row .sv{text-align:right;font-variant-numeric:tabular-nums;color:var(--tx);font-size:12px}
+.spark-row .sv.warn{color:var(--warn)} .spark-row .sv.bad{color:var(--crit)}
+/* gspark, not spark: `.spark` is already taken by the Star-on-GitHub sparkle
+   animation above (position:absolute; opacity:0). A later rule here overrode
+   width/height but NOT those two, so every GPU sparkline was silently pulled
+   out of flow and rendered fully transparent — present in the DOM, invisible
+   on screen. */
+.gspark{display:block;width:100%;height:20px;overflow:visible;min-width:0}
+.spark-na{color:var(--mut);font-size:11px;font-style:italic;grid-column:2/4}
+.gpu-mini-attrib{border-top:1px solid var(--bd);padding-top:7px;display:flex;flex-direction:column;gap:5px}
+.gpu-attrib-row{display:flex;align-items:center;gap:7px;font-size:11.5px}
+.gpu-attrib-row .an{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-attrib-row .av{color:var(--mut);font-variant-numeric:tabular-nums;flex:none}
+.gpu-attrib-bar{height:5px;border-radius:4px;background:var(--bd);overflow:hidden}
+.gpu-attrib-bar>span{display:block;height:100%;border-radius:4px}
+/* Metric picker for the by-metric view — the existing .rb pill-row vocabulary. */
+.gpu-viewbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:11px}
+.gpu-viewbar .sp{flex:1}
+.gpu-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--mut);margin-top:8px}
+.gpu-legend i{display:inline-block;width:11px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+.gpu-legend .band{width:11px;height:9px;border-radius:2px;opacity:.28}
 /* model metadata badges + live-serving row on the AI Models tab */
 .mchip{display:inline-block;font-size:11px;padding:1px 6px;margin-left:4px;border:1px solid var(--bd);border-radius:9px;color:var(--mut);vertical-align:middle;font-variant-numeric:tabular-nums}
 .mchip.cap{border-color:#58a6ff66;color:#58a6ff}
@@ -1689,29 +1731,58 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
 </section>
 
 <!-- ───────── GPU ───────── -->
+<!-- GPU cockpit. Every block here renders for ANY host — the hub and a remote go
+     through one renderer over one API, which is why there is no longer a
+     "local-only" notice on this tab. -->
 <section data-tab="gpu" hidden>
-  <div id="gpu-throttle" class="ins crit" style="display:none;margin-bottom:14px"></div>
+  <div id="gpu-alerts"></div>
   <div id="gpu-spill" class="ins warning" style="display:none;margin-bottom:14px"></div>
-  <div class="cols">
-    <div class="card"><h2 data-i18n="gpu.now_title">🎮 GPU right now</h2>
-      <div class="grid" id="gpukpis" style="grid-template-columns:1fr 1fr"></div>
-      <div id="gpu-detail" class="gpu-detail"></div>
-      <div style="margin:14px 0 6px" class="muted"  data-i18n="gpu.vram_alloc">VRAM allocation</div>
-      <div class="bar" id="vrambar"></div>
-      <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
-    </div>
-    <div class="card"><h2 data-i18n="gpu.services_title">📋 Services on the GPU (selected range)</h2>
-      <table><thead><tr><th data-i18n="col.service">Service</th><th data-i18n="col.peak">Peak</th><th data-i18n="col.avg">Avg</th><th data-i18n="col.pct_time">% time</th></tr></thead><tbody id="sumtbl"></tbody></table>
-    </div>
+  <div class="card" id="gpu-pooled-card">
+    <h2 id="gpu-pooled-title" data-i18n="gpu.now_title">🎮 GPU right now</h2>
+    <div class="grid" id="gpukpis" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
+    <div id="gpu-detail" class="gpu-detail"></div>
+    <p class="cap" id="gpu-pooled-cap"></p>
   </div>
-  <div class="card" id="pergpu-card" hidden><h2 data-i18n="gpu.pergpu_title">🎮 Per-GPU</h2>
+  <div class="card" id="pergpu-card">
+    <h2 data-i18n="gpu.pergpu_title">🎮 Per-GPU</h2>
+    <div class="gpu-viewbar">
+      <span class="rb" role="group" aria-label="View">
+        <button type="button" class="btn-mini on" id="gpu-view-card" data-i18n="gpu.view_card">By card</button
+        ><button type="button" class="btn-mini" id="gpu-view-metric" data-i18n="gpu.view_metric">By metric</button>
+      </span>
+      <span class="sp"></span>
+      <span class="rb" id="gpu-metric-pick" hidden role="group" aria-label="Metric"></span>
+    </div>
     <div id="pergpu"></div>
-    <p class="cap" data-i18n="gpu.pergpu_cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
+    <div id="gpu-metric-wrap" hidden>
+      <div class="chartbox"><canvas id="gpumetric"></canvas></div>
+      <div class="gpu-legend" id="gpu-metric-legend"></div>
+    </div>
+    <p class="cap" id="pergpu_cap" data-i18n="gpu.pergpu_cap">Live per-card utilisation, VRAM, power and temperature. The cards above pool VRAM and power across all GPUs.</p>
+  </div>
+  <div class="card" id="gpu-combined-card">
+    <h2 data-i18n="gpu.combined_title">📊 All cards combined</h2>
+    <div class="chartbox short"><canvas id="gpucombined"></canvas></div>
+    <p class="cap" id="gpu_combined_cap"></p>
   </div>
   <div class="card"><h2 data-i18n="gpu.vram_title">📊 VRAM by service over time</h2>
     <div class="chartbox"><canvas id="vram"></canvas></div>
-    <p class="cap" data-i18n-html="gpu.vram_cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
-  <div class="card"><h2 data-i18n="gpu.util_title">⚡ GPU utilization, power &amp; temperature</h2><div class="chartbox short"><canvas id="gpu2"></canvas></div></div>
+    <p class="cap" id="gpu_vram_cap" data-i18n-html="gpu.vram_cap">Stacked = VRAM each service holds. Dashed = capacity. <span style="color:var(--crit)">Red bands</span> = VRAM pressure; <span style="color:var(--crit)">▼</span> markers = out-of-memory events.</p></div>
+  <div class="cols">
+    <div class="card"><h2 data-i18n="gpu.services_title">📋 Services on the GPU (selected range)</h2>
+      <table><thead><tr><th data-i18n="col.service">Service</th><th data-i18n="col.peak">Peak</th><th data-i18n="col.avg">Avg</th><th data-i18n="col.pct_time">% time</th><th data-i18n="col.est_energy">Est. energy</th></tr></thead><tbody id="sumtbl"></tbody></table>
+      <p class="cap" id="gpu_attrib_cap"></p>
+    </div>
+    <div class="card"><h2 data-i18n="gpu.health_title">🩺 Card health (selected range)</h2>
+      <table><thead><tr><th data-i18n="col.card">Card</th><th data-i18n="col.throttled">Throttled</th><th data-i18n="col.hot">Hot</th><th data-i18n="col.peak_temp">Peak temp</th><th data-i18n="col.peak_fan">Peak fan</th><th data-i18n="col.capped">Capped</th></tr></thead><tbody id="gpu-health"></tbody></table>
+      <p class="cap" id="gpu_health_cap"></p>
+    </div>
+  </div>
+  <div class="card" id="gpu-nowdetail-card">
+    <h2 data-i18n="gpu.alloc_title">🧮 VRAM allocation right now</h2>
+    <div class="bar" id="vrambar"></div>
+    <table style="margin-top:12px"><tbody id="nowtbl"></tbody></table>
+  </div>
 </section>
 
 <!-- ───────── Costs ───────── -->
@@ -2084,6 +2155,39 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
           <input type="number" id="al_disk" min="50" max="99" step="1"
                  class="field">
         </div>
+      </div>
+
+      <!-- GPU thermal alerting. Each threshold is paired with a sustain window,
+           because duration is what separates a useful GPU alert from a muted one. -->
+      <div class="flabel" style="margin-top:16px" data-i18n="set.gpu_group">GPU cards</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <div class="flabel" data-i18n="set.gpu_temp">Temperature alert (°C)</div>
+          <input type="number" id="al_gpu_temp" min="50" max="110" step="1" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_temp_sustain">…sustained for (seconds)</div>
+          <input type="number" id="al_gpu_temp_sustain" min="0" max="3600" step="30" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_throttle_sustain">Throttling sustained for (seconds)</div>
+          <input type="number" id="al_gpu_thr_sustain" min="0" max="3600" step="30" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_vram">VRAM alert per card (%)</div>
+          <input type="number" id="al_gpu_vram" min="50" max="100" step="1" class="field">
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="flabel" data-i18n="set.gpu_overrides">Per-host temperature overrides</div>
+        <input type="text" id="al_gpu_overrides" class="field" placeholder='{"vader": 88}'>
+        <div class="cap" data-i18n="set.gpu_overrides_cap">JSON, host name to °C. A machine whose cards run at a deliberately lowered power limit lives hotter by design — give it its own threshold instead of loosening the whole fleet's.</div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px">
+        <label class="chk"><input type="checkbox" id="al_gpu_fanstall">
+          <span data-i18n="set.gpu_fanstall">Alert when a fan reads 0% on a warm card</span></label>
+        <label class="chk"><input type="checkbox" id="al_gpu_missing">
+          <span data-i18n="set.gpu_missing">Alert when a card stops reporting</span></label>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
@@ -2908,6 +3012,9 @@ const SIC={
   scale:'<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10M12 3v18M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
   copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   ram:'<path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M8 11V9M16 11V9M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>',
+  fan:'<path d="M12 12c0-3 .5-5 2.5-5s3 1.5 3 3-1.5 2-3.5 2z"/><path d="M12 12c3 0 5 .5 5 2.5s-1.5 3-3 3-2-1.5-2-3.5z"/><path d="M12 12c0 3-.5 5-2.5 5s-3-1.5-3-3 1.5-2 3.5-2z"/><path d="M12 12c-3 0-5-.5-5-2.5S8.5 6.5 10 6.5s2 1.5 2 3.5z"/><circle cx="12" cy="12" r="1"/>',
+  thermo:'<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>',
+  gpu:'<rect width="18" height="12" x="3" y="6" rx="2"/><path d="M7 18v2M17 18v2"/><circle cx="9" cy="12" r="2"/><path d="M14 10h5M14 14h5"/>',
 };
 function sic(name){ const d=SIC[name]; return d ? `<svg class="sic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>` : ''; }
 const RUN_SRC_COLOR={jupyter:'#a371f7',colab:'#f59e0b',kaggle:'#4dabf7',mlflow:'#3fb950',api:'#8b949e',cli:'#6b7280'};
@@ -3049,7 +3156,33 @@ function applyIcons(scope){
 const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const ICON={critical:'⛔',warning:'⚠️',ok:'✅',info:'ℹ️'};
-function colorFor(n){ if(n==='system/other')return '#6b7280'; let h=0; for(const c of n) h=(h*31+c.charCodeAt(0))>>>0; return `hsl(${h%360} 62% 56%)`; }
+// Stable per-name colour, returned as HEX rather than hsl(). Several call sites
+// append a two-digit alpha (`colorFor(x)+'cc'`) for chart fills, and
+// "hsl(210 62% 56%)cc" is not a colour — Chart.js parses it as a failure and
+// falls back to opaque black, which is how the VRAM-by-service chart ended up
+// rendering as one solid black block. Hex keeps that idiom valid.
+// FNV-1a + the golden angle, rather than `hash % 360` over a *31 rolling hash.
+// The old pairing put this fleet's two GPU services 6° apart — two nearly
+// identical purples stacked on the same chart, which defeats the point of
+// colouring them at all. FNV mixes far better, and stepping by the golden angle
+// keeps successive hues maximally far apart.
+function colorFor(n){
+  if(n==='system/other') return '#6b7280';
+  let h=0x811c9dc5;
+  for(const c of n){ h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  const hue = ((h >>> 8) * 137.508) % 360;
+  // Alternate lightness a little so two neighbouring hues still separate.
+  return hslHex(hue, 62, (h & 1) ? 62 : 52);
+}
+// HSL → #rrggbb. Same maths the browser does; kept local so colours don't
+// depend on a canvas or computed style being available at call time.
+function hslHex(h, s, l){
+  s/=100; l/=100;
+  const k = n => (n + h/30) % 12;
+  const a = s * Math.min(l, 1-l);
+  const f = n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)))));
+  return '#' + [f(0), f(8), f(4)].map(v=>v.toString(16).padStart(2,'0')).join('');
+}
 function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86400;
   return L.map(t=>{const d=new Date(t*1000),hm=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   return md?(d.getMonth()+1)+'/'+d.getDate()+' '+hm:hm;});}
@@ -3198,6 +3331,7 @@ function showTab(id){
     else renderLocalOnlyNotice(id);
   }
   if(id==='overview'){ renderFleet(); renderAiBand(); renderMissionControl(); }
+  if(id==='gpu')      renderGpuTab(true);
   if(id==='experiments') renderExperiments(true);
   if(id==='costs') renderCosts(true);
   if(id==='host')     renderHostTab();
@@ -3263,28 +3397,15 @@ function renderData(){
     `<div class="ins ${i.level}"><div class="ic">${ICON[i.level]||'•'}</div><div><div class="t">${esc(i.title)}</div><div class="d">${esc(i.detail)}</div></div></div>`).join('')
     || '<div class="ins ok"><div class="ic">✅</div><div><div class="t">All good</div><div class="d">No issues detected.</div></div></div>'; }
 
-  // GPU now
-  const memPct=Math.round(n.mem_used/tot*100);
-  document.getElementById('gpukpis').innerHTML=[
-    {v:fmtMB(n.mem_used)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(tot)+'</span>',l:I18N.t('gpu.vram_in_use','VRAM in use'),s:I18N.tf('gpu.pct_full','{n}% full',{n:memPct})},
-    {v:Math.round(n.util)+'%',l:I18N.t('gpu.util_kpi','GPU util'),s:Math.round(n.power)+' W · '+Math.round(n.temp)+'°C'},
-  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
-  renderGpuDetail(n.gpu_extra||{}, n.power);
-  renderGpuSpill(n);
-  renderPerGpu(n.gpus);
-  const bar=document.getElementById('vrambar'); bar.innerHTML='';
-  n.procs.forEach(p=>{const s=document.createElement('div');s.style.width=(p.mem/tot*100)+'%';s.style.background=colorFor(p.service);s.title=p.service+': '+fmtMB(p.mem);bar.appendChild(s);});
-  document.getElementById('nowtbl').innerHTML = n.procs.length? n.procs.map(p=>
-    `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${esc(p.service)}</td><td>${fmtMB(p.mem)}</td>
-     <td style="width:42%"><span class="mini" style="width:${Math.max(2,p.mem/tot*100)}%;background:${colorFor(p.service)}"></span></td></tr>`).join('')
-    : '<tr><td class="muted">'+(((n.util||0)>=5||(tot&&n.mem_used/tot>=0.1))
-        ? I18N.t('gpu.no_procdata','VRAM is in use, but no per-process breakdown is available on this host.')
-          +((n.gpu_vendor==='amd'||n.gpu_vendor==='hybrid')
-            ? ' '+I18N.t('gpu.no_procdata_amd','On AMD this needs kernel 5.19+ (DRM fdinfo).') : '')
-        : I18N.t('gpu.idle','GPU is idle.'))+'</td></tr>';
-  document.getElementById('sumtbl').innerHTML = D.summary.length? D.summary.map(s=>
-    `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${esc(s.service)}</td><td>${fmtMB(s.peak)}</td><td>${fmtMB(s.avg)}</td><td>${s.present}%</td></tr>`).join('')
-    : '<tr><td class="muted">'+I18N.t('gpu.no_activity','No GPU activity yet.')+'</td></tr>';
+  // The GPU tab is host-agnostic and owns its own data (/api/gpu/*), so it is
+  // refreshed here rather than populated here — the only GPU panel still fed
+  // from /api/data is the model RAM-spill banner, which is a hub-local concern.
+  // The model RAM-spill banner is hub-local (it reads the hub's own loaded
+  // models), so it must not paint under a remote host's name — that is the same
+  // cross-host bleed this tab was rebuilt to remove. The tab's own data is
+  // refreshed on the 15s tick, not here.
+  if(CURRENT_HOST === 'local'){ renderGpuSpill(n); }
+  else { const sp = document.getElementById('gpu-spill'); if(sp) sp.style.display = 'none'; }
 
   // AI models — expandable rows + per-model VRAM timeline (see renderModels)
   renderModels();
@@ -3325,16 +3446,13 @@ function renderData(){
 // (mem-bound vs compute-bound), core/mem clocks, power draw vs limit (headroom),
 // performance state, and memory-junction temp. Chips hide individually when the
 // driver/card reports the field as unsupported, so consumer GPUs degrade cleanly.
+// `x` is the pooled telemetry for the CURRENTLY SELECTED host, derived from that
+// host's own cards — never from the hub's. Feeding this the hub's gpu_extra
+// while a remote is selected is precisely the cross-host bleed that made the AI
+// Models tab feel unreliable, so the caller passes host-scoped data or nothing.
 function renderGpuDetail(x, powerNow){
-  const banner=document.getElementById('gpu-throttle');
-  if(banner){
-    if(x.throttled && (x.throttle||[]).length){
-      banner.style.display='flex';
-      banner.innerHTML=`<div class="ic" style="color:var(--crit)">${sic('flame')}</div><div><div class="t">${I18N.t('gpu.throttling_title','GPU is throttling — running below rated clocks')}</div>`
-        +`<div class="d">`+I18N.tf('gpu.throttling_detail','Reason: <b>{reason}</b>. Your real throughput is lower than the util % suggests — check cooling or the power limit.',{reason:(x.throttle||[]).map(esc).join(', ')})+`</div></div>`;
-    } else { banner.style.display='none'; }
-  }
   const box=document.getElementById('gpu-detail'); if(!box) return;
+  if(!x){ box.innerHTML=''; return; }
   const chips=[];
   if(x.mem_util!=null && (x.mem_util>0 || x.clk_sm>0)){
     const mb = x.mem_util>=70 ? 'warn' : '';
@@ -3387,35 +3505,657 @@ function renderGpuSpill(n){
     +`<div class="d">${d}${d&&sum?'<br>':''}${sum}</div></div>`;
 }
 
-// everything in the "GPU right now" panel, which pools across cards.
-function renderPerGpu(gpus){
-  const card=document.getElementById('pergpu-card'), box=document.getElementById('pergpu');
-  if(!card||!box) return;
-  if(!gpus || gpus.length<2){ card.hidden=true; return; }
-  card.hidden=false;
-  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
-  box.innerHTML = gpus.map(g=>{
-    const memPct = g.mem_total? Math.round(g.mem_used/g.mem_total*100):0;
-    const util = Math.round(g.util||0);
-    const memUtil = Math.round(g.mem_util||0);
-    const thr = (g.throttled && (g.throttle||[]).length)
-      ? `<span class="badge crit" title="${I18N.tf('gpu.throttling_tip','Throttling: {x}',{x:esc((g.throttle||[]).join(', '))})}">${sic('flame')} ${I18N.t('gpu.throttling_badge','throttling')}</span>` : '';
-    const clk = g.clk_sm>0 ? ` · ${Math.round(g.clk_sm)} MHz` : '';
-    const cap = g.power_limit>0 ? `/${Math.round(g.power_limit)} W cap` : '';
-    return `<div class="gpucard">
-      <div class="gpucard-h"><b>GPU ${g.idx}</b> <span class="muted">${esc(g.name||'')}</span> ${thr}
-        <span class="gpucard-stats">${util}% util · ${Math.round(g.power||0)} W${cap}${clk} · ${Math.round(g.temp||0)}°C${g.pstate?' · '+esc(g.pstate):''}</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('col.vram','VRAM')}</span>
-        <span class="gpucard-bar"><span style="width:${memPct}%;background:${tint(memPct)}"></span></span>
-        <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${memPct}%</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('gpu.percard_util','Util')}</span>
-        <span class="gpucard-bar"><span style="width:${Math.min(100,util)}%;background:${tint(util)}"></span></span>
-        <span class="gpucard-val">${util}%</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl" title="${I18N.t('gpu.percard_membw_t','Memory-bandwidth utilisation — high here with low Util = memory-bound')}">${I18N.t('gpu.percard_membw','Mem-BW')}</span>
-        <span class="gpucard-bar"><span style="width:${Math.min(100,memUtil)}%;background:${tint(memUtil)}"></span></span>
-        <span class="gpucard-val">${memUtil}%</span></div>
-    </div>`;
+// ── GPU cockpit ───────────────────────────────────────────────────────────────
+// One renderer for EVERY host. There used to be two: the hub got charts from
+// /api/data, and every other host got a snapshot from renderRemoteGpu() because
+// no per-host history existed to chart. It does now, so this reads
+// /api/gpu/history + /api/gpu/attribution with a host parameter and the fork is
+// gone — a fleet where one box behaves differently from the others is exactly
+// what makes a monitoring tool untrustworthy.
+let GPUC = null;               // last /api/gpu/history payload
+let GPUC_ATTR = null;          // last /api/gpu/attribution payload
+let GPUC_HOST = null, GPUC_RANGE = null, GPUC_INFLIGHT = null;
+let GPU_VIEW = 'card';         // 'card' small multiples | 'metric' one metric, all cards
+let GPU_METRIC = 'temp';
+
+// Metric definitions shared by the sparklines and the by-metric chart, so a
+// label or unit is written once and can't disagree between the two views.
+const GPU_METRICS = {
+  util:    {key:'util',    label:()=>I18N.t('gpu.m_util','Util'),   unit:'%',   max:100, fmt:v=>Math.round(v)+'%'},
+  vram:    {key:'vram',    label:()=>I18N.t('col.vram','VRAM'),     unit:'MB',  max:null, fmt:v=>fmtMB(v)},
+  temp:    {key:'temp',    label:()=>I18N.t('gpu.m_temp','Temp'),   unit:'°C',  max:null, fmt:v=>Math.round(v)+'°'},
+  fan:     {key:'fan',     label:()=>I18N.t('gpu.m_fan','Fan'),     unit:'%',   max:100, fmt:v=>Math.round(v)+'%'},
+  power:   {key:'power',   label:()=>I18N.t('gpu.m_power','Power'), unit:'W',   max:null, fmt:v=>Math.round(v)+'W'},
+  mem_util:{key:'mem_util',label:()=>I18N.t('gpu.m_membw','Mem-BW'),unit:'%',   max:100, fmt:v=>Math.round(v)+'%'},
+  clk_sm:  {key:'clk_sm',  label:()=>I18N.t('gpu.m_clock','Clock'), unit:'MHz', max:null, fmt:v=>Math.round(v)+'M'},
+};
+// Row order in every small-multiple panel. Fixed on purpose: the same metric
+// sits at the same height on every card, so cards can be compared by scanning
+// down a column rather than by reading each label.
+const GPU_SPARK_ROWS = ['util','vram','temp','fan','power'];
+
+const gpuTint = v => v>85?'var(--crit)':v>60?'var(--warn)':'var(--ok)';
+// Per-card line colour for the by-metric view. Stable by index so a card keeps
+// its colour across range changes and reloads.
+const GPU_CARD_COLORS = ['#58a6ff','#f0883e','#3fb950','#a371f7','#e3b341','#db61a2','#39c5cf','#f85149'];
+const gpuCardColor = i => GPU_CARD_COLORS[i % GPU_CARD_COLORS.length];
+
+// An inline SVG polyline. Deliberately not a Chart.js instance: a 3-card host
+// draws 15 of these and they refresh every 15s, so each one has to cost almost
+// nothing. Nulls break the line into segments rather than being plotted as 0 —
+// a gap in history must look like a gap, not like a dive to zero.
+function sparkSvg(vals, opts){
+  const o = opts||{};
+  const W = 100, H = 20;
+  const nums = vals.filter(v => v!=null);
+  if(!nums.length) return '';
+  // Shared scale when the caller supplies one (that is what lets the same metric
+  // be compared across cards); otherwise fit to this series.
+  let lo = o.min!=null ? o.min : Math.min(...nums);
+  let hi = o.max!=null ? o.max : Math.max(...nums);
+  if(hi === lo){ hi = lo + 1; }
+  const n = vals.length;
+  const x = i => n<2 ? 0 : (i/(n-1))*W;
+  const y = v => H - ((v-lo)/(hi-lo))*H;
+  const segs = [];
+  let cur = [];
+  vals.forEach((v,i)=>{
+    if(v==null){ if(cur.length) segs.push(cur); cur=[]; return; }
+    cur.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  });
+  if(cur.length) segs.push(cur);
+  const stroke = o.color || 'var(--ok)';
+  const lines = segs.filter(s=>s.length>1)
+    .map(s=>`<polyline points="${s.join(' ')}" fill="none" stroke="${stroke}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`).join('');
+  // A single stored point has no line to draw; a dot still shows it exists.
+  const dots = segs.filter(s=>s.length===1)
+    .map(s=>`<circle cx="${s[0].split(',')[0]}" cy="${s[0].split(',')[1]}" r="1.3" fill="${stroke}"/>`).join('');
+  // Shaded spans (throttle windows) sit under the trace.
+  const bands = (o.bands||[]).map(b=>{
+    const x0 = x(b[0]), x1 = Math.max(x(b[1]), x(b[0])+0.6);
+    return `<rect x="${x0.toFixed(1)}" y="0" width="${(x1-x0).toFixed(1)}" height="${H}" fill="var(--crit)" opacity=".22"/>`;
   }).join('');
+  return `<svg class="gspark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${bands}${lines}${dots}</svg>`;
+}
+
+// Map throttle spans (unix seconds) onto sparkline sample indexes.
+function spansToIdx(spans, labels){
+  if(!labels.length) return [];
+  return (spans||[]).map(s=>{
+    const i0 = labels.findIndex(t => t >= s.start);
+    let i1 = labels.findIndex(t => t > s.end);
+    if(i1 === -1) i1 = labels.length-1;
+    return [i0===-1 ? labels.length-1 : i0, i1];
+  }).filter(p => p[1] >= p[0]);
+}
+
+// Shared y-range for a metric across all cards — the thing that makes small
+// multiples honest. Scale each card independently and a card idling at 45 °C
+// draws the same shape as one cooking at 87 °C.
+function gpuSharedRange(cards, metric){
+  let lo = Infinity, hi = -Infinity;
+  cards.forEach(c=>{
+    (c.series[metric]||[]).forEach(v=>{ if(v!=null){ if(v<lo) lo=v; if(v>hi) hi=v; } });
+  });
+  if(lo === Infinity) return null;
+  const def = GPU_METRICS[metric];
+  // Percentages always scale 0-100 so "busy" and "idle" look different rather
+  // than both filling the box.
+  if(def && def.max === 100) return {min:0, max:100};
+  const pad = Math.max(1, (hi-lo)*0.12);
+  return {min: Math.max(0, lo-pad), max: hi+pad};
+}
+
+function gpuStatusPill(card){
+  // Classes are the compound `mc-pill mc-pill-<level>` the rest of the dashboard
+  // uses. A bare `mc-pill ok` matches no rule at all and renders neutral — which
+  // would silently strip the colour coding the small-multiples layout depends on
+  // to make the odd card out obvious.
+  //
+  // The calm states (IDLE / RETIRED / NO LIVE DATA) intentionally get the base
+  // `.mc-pill` with no level: there is no `mc-pill-info`, and none of them are
+  // states a user should be drawn to.
+  const S = {
+    ok:       ['mc-pill-ok',   I18N.t('gpu.st_ok','OK')],
+    idle:     ['',             I18N.t('gpu.st_idle','IDLE')],
+    busy:     ['mc-pill-ok',   I18N.t('gpu.st_busy','BUSY')],
+    hot:      ['mc-pill-warn', I18N.t('gpu.st_hot','HOT')],
+    throttle: ['mc-pill-crit', I18N.t('gpu.st_throttle','THROTTLING')],
+    gone:     ['mc-pill-crit', I18N.t('gpu.st_gone','NOT PRESENT')],
+    // A card that hasn't reported in a long time was removed from the machine,
+    // not lost from the bus. It keeps its history; it does not raise an alarm.
+    retired:  ['',             I18N.t('gpu.st_retired','RETIRED')],
+    // The host isn't reporting cards at all right now (offline, or the hub has
+    // just restarted and hasn't polled yet). We don't know — say so.
+    stale:    ['',             I18N.t('gpu.st_stale','NO LIVE DATA')],
+  }[card.status] || ['', card.status];
+  return `<span class="mc-pill ${S[0]}">${S[1]}</span>`;
+}
+
+// One small-multiple panel per card.
+function gpuMiniCard(card, d, ranges){
+  const now = card.now || {};
+  const spans = spansToIdx(card.throttle_spans, d.labels);
+  const rows = GPU_SPARK_ROWS.map(m=>{
+    const def = GPU_METRICS[m];
+    const supported = card.supports[m] !== false;
+    const vals = card.series[m] || [];
+    const last = [...vals].reverse().find(v=>v!=null);
+    if(!supported || last==null){
+      // "Not reported by this driver" — never a flat zero line. A card that
+      // cannot measure a thing and a card measuring zero are different facts,
+      // and one of them is going to raise an alert.
+      return `<div class="spark-row"><span class="sl">${def.label()}</span>
+        <span class="spark-na" title="${I18N.t('gpu.na_t','This card or driver does not report this metric.')}">${I18N.t('gpu.na','not reported')}</span></div>`;
+    }
+    let r = ranges[m] || {};
+    let vals2 = vals;
+    // VRAM reads as a percentage of THIS card, which is what makes cards of
+    // different sizes comparable. The trace has to be on that same scale —
+    // plotting raw MB against a range pooled across cards would show a small
+    // card as a low flat line while its label said 92%.
+    let disp = def.fmt(last), cls = '';
+    if(m==='vram' && card.mem_total){
+      disp = Math.round(last/card.mem_total*100)+'%';
+      vals2 = vals.map(v => v==null ? null : v/card.mem_total*100);
+      r = {min:0, max:100};
+    }
+    if(m==='temp'){ cls = last>=d.hot_c ? 'bad' : last>=d.hot_c-8 ? 'warn' : ''; }
+    if(m==='fan' && last>=95) cls = 'warn';
+    const color = m==='temp' ? gpuTint(last>=d.hot_c?100:last>=d.hot_c-8?70:10)
+                : m==='util' ? gpuTint(last) : 'var(--ok)';
+    return `<div class="spark-row"><span class="sl">${def.label()}</span>
+      ${sparkSvg(vals2, {min:r.min, max:r.max, color, bands: m==='temp'||m==='util' ? spans : []})}
+      <span class="sv ${cls}">${disp}</span></div>`;
+  }).join('');
+
+  // Which services sit on THIS card — the piece even the hub never had.
+  const mine = (d.now_services||[])
+    .map(s => ({name:s.service, mb: s.by_card ? (s.by_card[String(card.idx)]||0) : 0}))
+    .filter(s => s.mb > 0).sort((a,b)=>b.mb-a.mb).slice(0,3);
+  const attrib = mine.length ? `<div class="gpu-mini-attrib">${mine.map(s=>`
+      <div><div class="gpu-attrib-row"><span class="an" title="${esc(s.name)}">${esc(s.name)}</span>
+        <span class="av">${fmtMB(s.mb)}</span></div>
+      <div class="gpu-attrib-bar"><span style="width:${Math.min(100,card.mem_total?s.mb/card.mem_total*100:0)}%;background:${colorFor(s.name)}"></span></div></div>`).join('')}</div>` : '';
+
+  const stats = [
+    now.util!=null ? Math.round(now.util)+'%' : null,
+    now.power!=null ? Math.round(now.power)+' W'+(now.power_limit?`/${Math.round(now.power_limit)}`:'') : null,
+    now.temp!=null ? Math.round(now.temp)+'°C' : null,
+  ].filter(Boolean).join(' · ');
+
+  return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
+       aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">
+    <div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
+    <div class="gpu-mini-now">${stats || (card.status==='retired' && card.last_seen
+        ? I18N.tf('gpu.last_seen','last reported {t}',{t:relTime(card.last_seen)})
+        : I18N.t('gpu.no_live','no live reading'))}</div>
+    ${rows}${attrib}
+  </div>`;
+}
+
+// Fetch + paint the whole GPU tab for whichever host is selected.
+// Guarded against the late-paint bug the AI Models tab had: a fetch may resolve
+// after the user has moved on, and this tab must never show one host's cards
+// under another host's name.
+async function renderGpuTab(force){
+  const sec = document.querySelector('section[data-tab="gpu"]'); if(!sec) return;
+  const host = CURRENT_HOST, range = R;
+  const stale = force || host !== GPUC_HOST || range !== GPUC_RANGE;
+  if(GPUC_INFLIGHT === host + '|' + range && !force) return;
+  if(stale){
+    // Clear immediately on a host switch so the previous host's cards can't sit
+    // on screen under the new host's name while the fetch is in flight.
+    GPUC = GPUC_ATTR = null;
+    paintGpuTab(true);
+  }
+  GPUC_INFLIGHT = host + '|' + range;
+  let hist, attr;
+  try{
+    const q = `?host=${encodeURIComponent(host)}&range=${encodeURIComponent(range)}`;
+    [hist, attr] = await Promise.all([
+      fetch('/api/gpu/history'+q).then(r=>r.json()),
+      fetch('/api/gpu/attribution'+q).then(r=>r.json()),
+    ]);
+  }catch(e){ return; }                       // keep the last good paint
+  finally{ if(GPUC_INFLIGHT === host+'|'+range) GPUC_INFLIGHT = null; }
+  if(host !== CURRENT_HOST || range !== R) return;   // user moved on; don't paint
+  GPUC = hist; GPUC_ATTR = attr; GPUC_HOST = host; GPUC_RANGE = range;
+  paintGpuTab(false);
+}
+
+function paintGpuTab(loading){
+  const d = GPUC;
+  // Self-heal: this tab owns its whole section, so undo anything that hid its
+  // cards or dropped a scope notice into it. `clearLocalOnlyNotice('gpu')` is
+  // never called now that the tab is host-scoped, so without this a single
+  // stray call to the notice renderer would leave the cockpit blank forever.
+  const gsec = document.querySelector('section[data-tab="gpu"]');
+  if(gsec){
+    gsec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display = '');
+    gsec.querySelectorAll(':scope > .scope-notice').forEach(el => el.remove());
+  }
+  const pooledCard = document.getElementById('gpu-pooled-card');
+  const perCard    = document.getElementById('pergpu-card');
+  const combCard   = document.getElementById('gpu-combined-card');
+  const nowCard    = document.getElementById('gpu-nowdetail-card');
+  const title      = document.getElementById('gpu-pooled-title');
+  if(loading || !d){
+    if(title) title.innerHTML = `${sic('gpu')} ${esc(I18N.t('gpu.loading','Reading GPUs…'))}`;
+    ['gpukpis','pergpu','gpu-alerts','gpu-health','sumtbl','nowtbl'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.innerHTML='';
+    });
+    return;
+  }
+  // A host with no GPU at all and a GPU host whose history hasn't accumulated
+  // are different situations and get different words. Conflating them is how a
+  // monitoring tool tells its first small lie.
+  if(!d.has_gpu){
+    if(title) title.innerHTML = `${sic('gpu')} `
+      + esc(I18N.tf('gpu.none_title','No GPU detected on {host}',{host:d.host}));
+    document.getElementById('gpukpis').innerHTML = '';
+    const cap = document.getElementById('gpu-pooled-cap');
+    if(cap) cap.textContent = I18N.t('gpu.none_cap','The probe found no NVIDIA card (via nvidia-smi) and no AMD or Intel GPU on this host.');
+    [perCard, combCard, nowCard].forEach(c=>{ if(c) c.hidden = true; });
+    renderGpuAlertStrip(d); renderGpuHealth(d);
+    return;
+  }
+  [perCard, combCard, nowCard].forEach(c=>{ if(c) c.hidden = false; });
+
+  const p = d.now_pooled || {};
+  // sic('gpu'), not a raw emoji: applyIcons() swaps the leading emoji for an SVG
+  // once on load and then marks the node with dataset.ic, so re-setting raw text
+  // here would replace the SVG with an emoji that never gets upgraded again.
+  if(title) title.innerHTML = `${sic('gpu')} ${I18N.tf('gpu.pooled_title','GPU on {host}',{host:esc(d.host)})}`
+    + (p.model ? ` <span class="muted" style="font-weight:400;font-size:13px">· ${esc(p.model)}</span>` : '');
+
+  // Pooled KPIs, each with its own sparkline: the snapshot and the trend in one
+  // eye movement. The sub-line is the fleet-relevant fact, not the number again.
+  const C = d.combined || {};
+  const memPct = p.mem_total ? Math.round(p.mem_used/p.mem_total*100) : 0;
+  const hotN = (d.cards||[]).filter(c=>(c.now&&c.now.temp||0) >= d.hot_c).length;
+  const kpis = [
+    {v: (p.util!=null?p.util:0)+'%', l: I18N.t('gpu.util_kpi','GPU util'),
+     s: I18N.tf('gpu.k_busy','{n} of {t} cards busy',{n:p.busy||0,t:p.count||0}), spark:C.util, m:'util'},
+    {v: fmtMB(p.mem_used||0)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(p.mem_total||0)+'</span>',
+     l: I18N.t('gpu.vram_in_use','VRAM in use'), s: I18N.tf('gpu.pct_full','{n}% full',{n:memPct}), spark:C.vram, m:'vram'},
+    {v: Math.round(p.power||0)+' W'+(p.power_limit?` <span style="font-size:13px;color:var(--mut)">/ ${p.power_limit}</span>`:''),
+     l: I18N.t('gpu.k_power','Power'),
+     s: p.power_limit ? I18N.tf('gpu.k_ofcap','{n}% of cap',{n:Math.round((p.power||0)/p.power_limit*100)}) : '',
+     spark:C.power, m:'power'},
+    {v: (p.temp_max!=null?p.temp_max:0)+' °C', l: I18N.t('gpu.k_temp','Hottest card'),
+     s: hotN ? I18N.tf('gpu.k_hotn','{n} card(s) ≥ {h}°C',{n:hotN,h:d.hot_c}) : I18N.t('gpu.k_allcool','all cards below threshold'),
+     spark:C.temp_max, m:'temp'},
+  ];
+  if(p.fan_avg!=null) kpis.push({v: p.fan_max+' %', l: I18N.t('gpu.k_fan','Fan (peak)'),
+    s: p.fan_rpm_max!=null ? I18N.tf('gpu.k_rpm','{n} rpm max',{n:p.fan_rpm_max}) : I18N.tf('gpu.k_fanavg','{n}% average',{n:p.fan_avg}),
+    spark:C.fan_max, m:'fan'});
+  document.getElementById('gpukpis').innerHTML = kpis.map(t=>{
+    const sp = (t.spark && t.spark.some(v=>v!=null))
+      ? sparkSvg(t.spark, {color:'var(--mut)', max: GPU_METRICS[t.m] && GPU_METRICS[t.m].max===100 ? 100 : null,
+                           min: GPU_METRICS[t.m] && GPU_METRICS[t.m].max===100 ? 0 : null}) : '';
+    return `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div>${sp}<div class="s">${t.s||''}</div></div>`;
+  }).join('');
+
+  const pcap = document.getElementById('gpu-pooled-cap');
+  if(pcap){
+    pcap.textContent = d.online
+      ? I18N.tf('gpu.pooled_cap','Live · updated {t} · history every {i}s',{t:relTime(d.at), i:d.interval})
+      : I18N.tf('gpu.pooled_cap_off','Host offline — showing the last snapshot from {t}',{t:relTime(d.at)});
+  }
+
+  renderGpuDetail(gpuPooledExtra(d), p.power);
+  renderGpuAlertStrip(d);
+  renderGpuHealth(d);
+  renderGpuCards(d);
+  renderGpuCombined(d);
+  renderGpuAttribution(d, GPUC_ATTR);
+  renderGpuNow(d);
+}
+
+// Small multiples, or the by-metric chart — same data, two questions.
+// "What is card 1 doing" and "which card is the problem" are genuinely
+// different lookups and neither layout answers both well.
+function renderGpuCards(d){
+  const box = document.getElementById('pergpu');
+  const wrap = document.getElementById('gpu-metric-wrap');
+  const pick = document.getElementById('gpu-metric-pick');
+  if(!box) return;
+  const byCard = GPU_VIEW === 'card';
+  box.hidden = !byCard;
+  if(wrap) wrap.hidden = byCard;
+  if(pick) pick.hidden = byCard;
+  const cap = document.getElementById('pergpu_cap');
+
+  if(byCard){
+    if(!d.has_history && !(d.cards||[]).some(c=>c.present)){
+      box.innerHTML = `<div class="topproc-empty">${I18N.t('gpu.no_history_yet','Collecting per-card history — the first points land within one poll.')}</div>`;
+      return;
+    }
+    const ranges = {};
+    GPU_SPARK_ROWS.forEach(m=>{ ranges[m] = gpuSharedRange(d.cards, m) || {}; });
+    box.className = 'gpu-grid';
+    box.innerHTML = (d.cards||[]).map(c=>gpuMiniCard(c, d, ranges)).join('');
+    box.querySelectorAll('.gpu-mini').forEach(el=>{
+      const go = ()=>{ GPU_VIEW='metric'; GPU_SEL_CARD = +el.dataset.idx; syncGpuViewButtons(); renderGpuCards(GPUC); };
+      el.onclick = go;
+      el.onkeydown = e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); go(); } };
+    });
+    if(cap) cap.textContent = I18N.t('gpu.cards_cap',
+      'One panel per card, same rows in the same order and the same scale per metric — so a taller line really is a hotter card. Shaded spans mark thermal throttling. Click a card for the full chart.');
+  } else {
+    if(pick){
+      pick.innerHTML = Object.keys(GPU_METRICS).map(m=>
+        `<button type="button" class="btn-mini ${m===GPU_METRIC?'on':''}" data-m="${m}">${GPU_METRICS[m].label()}</button>`).join('');
+      pick.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+        GPU_METRIC=b.dataset.m; localStorage.setItem('hl_gpumetric', GPU_METRIC); renderGpuCards(GPUC); });
+    }
+    renderGpuMetricChart(d);
+    if(cap) cap.textContent = I18N.t('gpu.metric_cap',
+      'Every card on one axis, so the odd one out is obvious. Shaded spans mark thermal throttling.');
+  }
+}
+let GPU_SEL_CARD = null;
+
+function renderGpuMetricChart(d){
+  const def = GPU_METRICS[GPU_METRIC];
+  const labels = fmtLabels(d.labels);
+  // A card clicked in the small-multiples view is emphasised here: thicker and
+  // fully opaque while the rest fade back. Clicking promises "the full chart for
+  // this card", so arriving at a chart where it's indistinguishable from its
+  // neighbours would not honour that.
+  const sel = GPU_SEL_CARD;
+  const hasSel = sel != null && (d.cards||[]).some(c => c.idx === sel);
+  const ds = (d.cards||[]).map((c,i)=>{
+    const on = !hasSel || c.idx === sel;
+    return {
+      label: `GPU ${c.idx}`,
+      data: c.series[GPU_METRIC] || [],
+      borderColor: gpuCardColor(i) + (on ? '' : '55'),
+      backgroundColor: gpuCardColor(i)+'22',
+      pointRadius: 0, tension: .25, spanGaps: false,
+      borderWidth: on && hasSel ? 2.6 : 1.8,
+      order: on ? 0 : 1,
+    };
+  }).filter(x=>x.data.some(v=>v!=null));
+  // Threshold line, only where a threshold means something.
+  const ann = (GPU_METRIC==='temp') ? {
+    id:'gpuThreshold',
+    afterDatasetsDraw(ch){
+      const y = ch.scales.y; if(!y) return;
+      const py = y.getPixelForValue(d.hot_c);
+      if(py < ch.chartArea.top || py > ch.chartArea.bottom) return;
+      const g = ch.ctx; g.save();
+      g.strokeStyle = cv('--crit'); g.setLineDash([5,4]); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(ch.chartArea.left, py); g.lineTo(ch.chartArea.right, py); g.stroke();
+      g.setLineDash([]); g.fillStyle = cv('--crit'); g.font = '11px sans-serif';
+      g.fillText(I18N.tf('gpu.thr_line','{h}°C threshold',{h:d.hot_c}), ch.chartArea.left+6, py-4);
+      g.restore();
+    }
+  } : null;
+  // Throttle bands behind the lines.
+  const bands = {
+    id:'gpuBands',
+    beforeDatasetsDraw(ch){
+      const x = ch.scales.x; if(!x) return;
+      const g = ch.ctx; g.save(); g.fillStyle = cv('--crit'); g.globalAlpha = .16;
+      (d.cards||[]).forEach(c=>{
+        spansToIdx(c.throttle_spans, d.labels).forEach(([i0,i1])=>{
+          const x0 = x.getPixelForValue(i0), x1 = x.getPixelForValue(i1);
+          g.fillRect(x0, ch.chartArea.top, Math.max(2, x1-x0), ch.chartArea.bottom-ch.chartArea.top);
+        });
+      });
+      g.restore();
+    }
+  };
+  mk('gpumetric', {type:'line', data:{labels, datasets:ds},
+    options:{responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')}, ticks:{color:cv('--mut'), maxTicksLimit:10, autoSkip:true}},
+              y:{beginAtZero: def.max===100, suggestedMax: def.max===100?100:undefined,
+                 grid:{color:cv('--free')},
+                 ticks:{color:cv('--mut'), callback:v=>def.fmt(v)}}},
+      plugins:{legend:{labels:{color:cv('--tx'), boxWidth:12}},
+               tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${def.fmt(c.parsed.y)}`}}}},
+    plugins: ann ? [bands, ann] : [bands]});
+  const lg = document.getElementById('gpu-metric-legend');
+  if(lg) lg.innerHTML = `<span><span class="band" style="background:var(--crit)"></span> ${I18N.t('gpu.lg_throttle','thermal throttling')}</span>`
+    + (GPU_METRIC==='temp' ? `<span><i style="background:var(--crit)"></i> ${I18N.tf('gpu.lg_thr','{h}°C alert threshold',{h:d.hot_c})}</span>` : '')
+    + (hasSel ? `<span><a href="#" id="gpu-clear-sel">${I18N.tf('gpu.lg_focus','focused on GPU {n} — show all',{n:sel})}</a></span>` : '');
+  const clr = document.getElementById('gpu-clear-sel');
+  if(clr) clr.onclick = e => { e.preventDefault(); GPU_SEL_CARD = null; renderGpuCards(GPUC); };
+}
+
+// The whole box as one unit: VRAM stacked per card against capacity, pooled
+// draw against the pooled cap, and the hottest card on its own axis.
+function renderGpuCombined(d){
+  const labels = fmtLabels(d.labels);
+  const ds = (d.cards||[]).map((c,i)=>({
+    label: `GPU ${c.idx} ${I18N.t('col.vram','VRAM')}`,
+    data: (c.series.vram||[]).map(v=>v==null?null:v/1024),
+    backgroundColor: gpuCardColor(i)+'cc', borderColor: gpuCardColor(i),
+    fill:true, pointRadius:0, tension:.2, stack:'v', yAxisID:'y', borderWidth:1,
+  }));
+  ds.push({label: I18N.t('gpu.c_temp','Hottest card (°C)'),
+    data: d.combined.temp_max || [], borderColor: cv('--crit'), backgroundColor:'transparent',
+    pointRadius:0, tension:.25, yAxisID:'y1', borderWidth:1.8, borderDash:[4,3], fill:false});
+  const capGB = d.capacity_mb ? d.capacity_mb/1024 : null;
+  const capLine = capGB ? {
+    id:'gpuCap',
+    afterDatasetsDraw(ch){
+      const y = ch.scales.y; if(!y) return;
+      const py = y.getPixelForValue(capGB);
+      if(py < ch.chartArea.top || py > ch.chartArea.bottom) return;
+      const g = ch.ctx; g.save(); g.strokeStyle = cv('--mut'); g.setLineDash([4,4]); g.lineWidth=1;
+      g.beginPath(); g.moveTo(ch.chartArea.left,py); g.lineTo(ch.chartArea.right,py); g.stroke();
+      g.setLineDash([]); g.fillStyle=cv('--mut'); g.font='11px sans-serif';
+      g.fillText(I18N.tf('gpu.c_cap','{n} GB capacity',{n:Math.round(capGB)}), ch.chartArea.left+6, py-4);
+      g.restore();
+    }
+  } : null;
+  mk('gpucombined', {type:'line', data:{labels, datasets:ds},
+    options:{responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')}, ticks:{color:cv('--mut'), maxTicksLimit:10, autoSkip:true}},
+        y:{stacked:true, beginAtZero:true, suggestedMax: capGB||undefined, grid:{color:cv('--free')},
+           ticks:{color:cv('--mut'), callback:v=>Math.round(v)+'G'}},
+        y1:{position:'right', beginAtZero:false, grid:{display:false},
+            ticks:{color:cv('--mut'), callback:v=>Math.round(v)+'°'}}},
+      plugins:{legend:{labels:{color:cv('--tx'), boxWidth:12}}}},
+    plugins: capLine ? [capLine] : []});
+  const cap = document.getElementById('gpu_combined_cap');
+  if(cap) cap.textContent = I18N.t('gpu.combined_cap',
+    'VRAM stacked per card against the box total, with the hottest card overlaid. Temperature is the maximum across cards, never the average — an average hides the one card that is cooking.');
+}
+
+// VRAM by service over time + the services table, both from the attribution
+// endpoint so hub and remote are identical.
+function renderGpuAttribution(d, a){
+  const tb = document.getElementById('sumtbl');
+  if(!a){ if(tb) tb.innerHTML=''; return; }
+  const labels = fmtLabels(a.labels);
+  const ds = (a.services||[]).map(s=>({
+    label: s.service, data: s.vram.map(v=>v==null?null:v/1024),
+    backgroundColor: colorFor(s.service)+'cc', borderColor: colorFor(s.service),
+    fill:true, pointRadius:0, tension:.2, stack:'v', borderWidth:1,
+  }));
+  const capGB = d.capacity_mb ? d.capacity_mb/1024 : null;
+  mk('vram', {type:'line', data:{labels, datasets:ds},
+    options:{responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+      scales:{x:{grid:{color:cv('--free')}, ticks:{color:cv('--mut'), maxTicksLimit:10, autoSkip:true}},
+              y:{stacked:true, beginAtZero:true, suggestedMax:capGB||undefined, grid:{color:cv('--free')},
+                 ticks:{color:cv('--mut'), callback:v=>Math.round(v)+'G'}}},
+      plugins:{legend:{labels:{color:cv('--tx'), boxWidth:12}}}}});
+  const vcap = document.getElementById('gpu_vram_cap');
+  if(vcap) vcap.textContent = I18N.t('gpu.vram_cap_new','Stacked VRAM each service holds on this host, over the selected range.');
+
+  if(tb){
+    const cur = a.currency || '$';
+    tb.innerHTML = (a.services||[]).length ? a.services.map(s=>
+      `<tr><td><span class="dot" style="background:${colorFor(s.service)}"></span>${esc(s.service)}</td>
+        <td>${fmtMB(s.peak_mb||0)}</td><td>${fmtMB(s.avg_mb||0)}</td><td>${s.pct_time}%</td>
+        <td>${(s.est_kwh||0).toFixed(2)} kWh${s.est_cost!=null?` <span class="muted">${cur}${s.est_cost.toFixed(2)}</span>`:''}</td></tr>`).join('')
+      : `<tr><td colspan="5" class="muted">${I18N.t('gpu.no_activity','No GPU activity yet.')}</td></tr>`;
+  }
+  const acap = document.getElementById('gpu_attrib_cap');
+  // Load-bearing sentence: a modelled number must never be presented as a
+  // measured one. GPUs meter watts per card, never per process.
+  if(acap) acap.textContent = I18N.tf('gpu.attrib_cap',
+    'Energy per service is an estimate: each card\'s measured draw above its idle floor ({w} W) is shared out in proportion to the VRAM each service holds. GPUs do not meter power per process.',
+    {w: a.idle_floor_w});
+}
+
+// "Right now" VRAM allocation — the live split, not the history.
+function renderGpuNow(d){
+  const tot = (d.now_pooled||{}).mem_total || d.capacity_mb || 0;
+  const procs = d.now_services || [];
+  const bar = document.getElementById('vrambar');
+  if(bar){
+    bar.innerHTML='';
+    procs.forEach(p=>{
+      const s=document.createElement('div');
+      s.style.width=(tot?p.mem/tot*100:0)+'%'; s.style.background=colorFor(p.service);
+      s.title=p.service+': '+fmtMB(p.mem); bar.appendChild(s);
+    });
+  }
+  const tb = document.getElementById('nowtbl'); if(!tb) return;
+  const util = (d.now_pooled||{}).util || 0;
+  const used = (d.now_pooled||{}).mem_used || 0;
+  tb.innerHTML = procs.length ? procs.map(p=>{
+    // Which card(s) this service sits on — the fact the old snapshot could
+    // never show, because nothing mapped a process to a GPU index.
+    const cards = p.by_card ? Object.keys(p.by_card).filter(k=>p.by_card[k]>0) : [];
+    const where = cards.length ? ` <span class="muted">· ${cards.length>1
+        ? I18N.tf('gpu.on_cards','GPUs {list}',{list:cards.join(', ')})
+        : I18N.tf('gpu.on_card','GPU {n}',{n:cards[0]})}</span>` : '';
+    return `<tr><td><span class="dot" style="background:${colorFor(p.service)}"></span>${esc(p.service)}${where}</td>
+      <td>${fmtMB(p.mem)}</td>
+      <td style="width:42%"><span class="mini" style="width:${Math.max(2,tot?p.mem/tot*100:0)}%;background:${colorFor(p.service)}"></span></td></tr>`;
+  }).join('')
+   : `<tr><td class="muted">${(util>=5 || (tot && used/tot>=0.1))
+        ? I18N.t('gpu.no_procdata','VRAM is in use, but no per-process breakdown is available on this host.')
+        : I18N.t('gpu.idle','GPU is idle.')}</td></tr>`;
+}
+
+// Pooled telemetry chips for the selected host, built from ITS cards. Follows
+// the same "only the cards that measured it" rule the backend uses: a card that
+// can't report mem-bandwidth must neither fabricate a 0% nor dilute the cards
+// that can, and a missing power cap must not produce a denominator smaller than
+// the draw it is compared against.
+function gpuPooledExtra(d){
+  const cards = (d.cards||[]).filter(c=>c.now).map(c=>c.now);
+  if(!cards.length) return null;
+  const x = {};
+  const mb = cards.filter(c=>c.mem_util!=null);
+  if(mb.length) x.mem_util = Math.round(mb.reduce((s,c)=>s+c.mem_util,0)/mb.length);
+  const c0 = cards[0];
+  if(c0.clk_sm) x.clk_sm = c0.clk_sm;
+  if(c0.clk_mem) x.clk_mem = c0.clk_mem;
+  if(c0.pstate) x.pstate = c0.pstate;
+  const tm = cards.filter(c=>c.temp_mem);
+  if(tm.length) x.temp_mem = Math.max(...tm.map(c=>c.temp_mem));
+  if(cards.every(c=>c.power_limit)) x.power_limit = cards.reduce((s,c)=>s+c.power_limit,0);
+  return x;
+}
+
+function syncGpuViewButtons(){
+  const a=document.getElementById('gpu-view-card'), b=document.getElementById('gpu-view-metric');
+  if(a) a.classList.toggle('on', GPU_VIEW==='card');
+  if(b) b.classList.toggle('on', GPU_VIEW==='metric');
+}
+
+// The temperature at which a 0% fan stops being a zero-RPM idle mode and starts
+// being a broken fan. Mirrors notify._notify's rule exactly (10 °C under the
+// alert threshold, floor 60 °C) — the strip and the notifier must never
+// disagree about what counts as an incident.
+const gpuStallBar = d => Math.max(60, (d.hot_c || 84) - 10);
+
+// The alert strip: what / how bad / who is driving it and is there headroom.
+// Rendered only when something is actually wrong — an always-present banner is
+// an always-ignored banner.
+function renderGpuAlertStrip(d){
+  const box = document.getElementById('gpu-alerts'); if(!box) return;
+  const items = [];
+  (d.cards||[]).forEach(c=>{
+    const now = c.now || {};
+    const h = c.health || {};
+    if(c.status === 'gone'){
+      items.push({lvl:'crit', ic:'xcircle',
+        t: I18N.tf('gpu.al_gone','GPU {n} is no longer reporting',{n:c.idx}),
+        d: I18N.t('gpu.al_gone_d','The card has history on this host but is absent from the latest poll. A card that falls off the bus usually means a driver crash (Xid) or a power/riser fault.')});
+      return;
+    }
+    if(c.status === 'throttle'){
+      const mins = Math.round((h.throttled_sec||0)/60);
+      const who = (d.now_services||[]).map(s=>({n:s.service, mb:s.by_card?(s.by_card[String(c.idx)]||0):0}))
+                    .filter(s=>s.mb>0).sort((a,b)=>b.mb-a.mb)[0];
+      const bits = [];
+      if(now.temp!=null) bits.push(I18N.tf('gpu.al_peak','{t}°C now',{t:Math.round(now.temp)}));
+      if((now.throttle||[]).length) bits.push((now.throttle||[]).map(esc).join(', '));
+      if(now.clk_sm) bits.push(I18N.tf('gpu.al_clock','core clock {c} MHz',{c:Math.round(now.clk_sm)}));
+      const tail = [];
+      if(who) tail.push(I18N.tf('gpu.al_driver','{svc} holds {mb} on this card',{svc:esc(who.n), mb:fmtMB(who.mb)}));
+      // "Fan already at 100%" is the difference between "turn the fans up" and
+      // "you are out of cooling" — the single most useful thing to say here.
+      if(now.fan!=null) tail.push(now.fan>=95
+        ? I18N.t('gpu.al_fanmax','fan already at 100% — no cooling headroom left')
+        : I18N.tf('gpu.al_fan','fan at {f}%',{f:Math.round(now.fan)}));
+      items.push({lvl:'crit', ic:'flame',
+        t: mins>=1 ? I18N.tf('gpu.al_thr_min','GPU {n} has been thermally throttling for {m} min',{n:c.idx,m:mins})
+                   : I18N.tf('gpu.al_thr','GPU {n} is thermally throttling',{n:c.idx}),
+        d: bits.join(' · ') + (tail.length ? '<br>' + tail.join(' · ') : '')});
+    } else if(c.status === 'hot'){
+      items.push({lvl:'warning', ic:'thermo',
+        t: I18N.tf('gpu.al_hot','GPU {n} is running hot — {t}°C',{n:c.idx, t:Math.round(now.temp||0)}),
+        d: I18N.tf('gpu.al_hot_d','At or above {h}°C. Not throttling yet{f}.',
+             {h:d.hot_c, f: now.fan!=null ? I18N.tf('gpu.al_hot_fan',', fan at {f}%',{f:Math.round(now.fan)}) : ''})});
+    }
+    // A fan reporting exactly 0% on a HOT card is a stalled fan. Two guards:
+    // `supports.fan` (a passively cooled card reports none, and absent must
+    // never read as stopped), and a bar derived from the alert threshold rather
+    // than a fixed temperature — modern cards have zero-RPM idle modes and
+    // legitimately sit in the 50s with their fans off. Same rule as the
+    // notifier's, so the dashboard can never show a critical that no alert
+    // would ever be sent for.
+    if(c.supports.fan && now.fan === 0 && (now.temp||0) >= gpuStallBar(d)){
+      items.push({lvl:'crit', ic:'alert',
+        t: I18N.tf('gpu.al_fanstall','GPU {n} fan is stopped while the card is at {t}°C',{n:c.idx,t:Math.round(now.temp||0)}),
+        d: I18N.t('gpu.al_fanstall_d','The card reports a fan but it is reading 0%. A seized fan or an unplugged header will cook a GPU under load.')});
+    }
+  });
+  if(!items.length){ box.innerHTML=''; return; }
+  const order = {crit:0, warning:1};
+  items.sort((a,b)=>(order[a.lvl]??9)-(order[b.lvl]??9));
+  box.innerHTML = items.map(i=>
+    `<div class="ins ${i.lvl}" style="margin-bottom:12px"><div class="ic" style="color:var(--${i.lvl==='crit'?'crit':'warn'})">${sic(i.ic)}</div>
+      <div><div class="t">${i.t}</div><div class="d">${i.d}</div></div></div>`).join('');
+  applyIcons(box);
+}
+
+function renderGpuHealth(d){
+  const tb = document.getElementById('gpu-health'); if(!tb) return;
+  const dur = s => s>=3600 ? (s/3600).toFixed(1)+' h' : s>=60 ? Math.round(s/60)+' min' : (s||0)+' s';
+  const rows = (d.cards||[]).filter(c=>c.health).map(c=>{
+    const h = c.health;
+    const pct = h.window_sec ? (v)=>` <span class="muted">${(v*100/h.window_sec).toFixed(1)}%</span>` : ()=>'';
+    return `<tr>
+      <td><b>GPU ${c.idx}</b> <span class="muted">${esc((c.name||'').replace(/^NVIDIA /,''))}</span></td>
+      <td>${h.throttled_sec ? dur(h.throttled_sec)+pct(h.throttled_sec) : '<span class="muted">—</span>'}</td>
+      <td>${h.hot_sec ? dur(h.hot_sec)+pct(h.hot_sec) : '<span class="muted">—</span>'}</td>
+      <td class="${h.peak_temp>=d.hot_c?'':''}" style="${h.peak_temp>=d.hot_c?'color:var(--crit)':''}">${h.peak_temp!=null?Math.round(h.peak_temp)+' °C':'—'}</td>
+      <td>${c.supports.fan && h.peak_fan!=null ? Math.round(h.peak_fan)+' %' : '<span class="muted">'+I18N.t('gpu.na','not reported')+'</span>'}</td>
+      <td>${h.capped_pct ? h.capped_pct+' %' : '<span class="muted">—</span>'}</td></tr>`;
+  }).join('');
+  tb.innerHTML = rows || `<tr><td colspan="6" class="muted">${I18N.t('gpu.no_history','No history for this host yet.')}</td></tr>`;
+  const cap = document.getElementById('gpu_health_cap');
+  if(cap){
+    let t = I18N.t('gpu.health_cap',
+      'Throttled counts thermal slowdowns only — a card sitting at a deliberately lowered power limit is working as configured, and is reported under Capped instead.');
+    // Past the raw retention window these come from the hourly rollup. Say so
+    // rather than letting an hour-granular figure read as minute-accurate.
+    if((d.cards||[]).some(c => c.health && c.health.downsampled))
+      t += ' ' + I18N.t('gpu.health_cap_rollup',
+        'Over this range the figures come from hourly history, so Hot is rounded to whole hours and Capped is not available.');
+    cap.textContent = t;
+  }
 }
 
 // Mini-htop card (issue #32): top processes by CPU% and by RAM, from /api/health
@@ -4526,26 +5266,10 @@ function closeOsUpdateModal(){ document.getElementById('osupdmodal').classList.r
 function buildCharts(){
   if(!D || !(TABS.find(t=>t.id===TAB)||{}).charts) return;
   const labels=fmtLabels(D.labels), tot=D.mem_total;
-  if(TAB==='gpu'){
-    const order=D.summary.map(s=>s.service).filter(s=>D.services[s]);
-    const ds=order.map(s=>({label:s,data:D.services[s],backgroundColor:colorFor(s)+'cc',borderColor:colorFor(s),borderWidth:1,fill:true,pointRadius:0,tension:.25,stack:'v'}));
-    ds.push({label:'system/other',data:D.other,backgroundColor:'#6b728088',borderColor:'#6b7280',borderWidth:1,fill:true,pointRadius:0,tension:.25,stack:'v'});
-    ds.push({label:'capacity',data:labels.map(()=>tot),borderColor:'#e3b341',borderDash:[6,5],borderWidth:1.5,pointRadius:0,fill:false,stack:'cap'});
-    const evIdx=(D.events||[]).map(e=>{let best=0,bd=1e18; D.labels.forEach((t,i)=>{const dd=Math.abs(t-e.ts); if(dd<bd){bd=dd;best=i;}}); return {i:best,e};});
-    const overlay={id:'ov',beforeDraw(c){const {ctx,chartArea:a,scales:{x}}=c; if(!a)return;
-      const free=D.total.mem.map(m=>tot-m), thr=D.pressure_free_mb;
-      ctx.save(); ctx.fillStyle='#f8514922';
-      for(let i=0;i<free.length;i++){ if(free[i]<thr){const x0=x.getPixelForValue(i)-(x.getPixelForValue(1)-x.getPixelForValue(0))/2; ctx.fillRect(x0,a.top,(x.getPixelForValue(1)-x.getPixelForValue(0))||2,a.bottom-a.top);} }
-      evIdx.forEach(({i})=>{const px=x.getPixelForValue(i); ctx.strokeStyle='#f85149';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(px,a.top);ctx.lineTo(px,a.bottom);ctx.stroke();
-        ctx.fillStyle='#f85149';ctx.beginPath();ctx.moveTo(px-5,a.top);ctx.lineTo(px+5,a.top);ctx.lineTo(px,a.top+8);ctx.fill();});
-      ctx.restore();}};
-    mk('vram',{type:'line',data:{labels,datasets:ds},options:baseOpts(tot,'GB',v=>Math.round(v/1024)+'G',true),plugins:[areaBg,overlay]});
-    mk('gpu2',{type:'line',data:{labels,datasets:[
-      {label:'GPU util %',data:D.total.util,borderColor:'#4dabf7',backgroundColor:'#4dabf733',fill:true,pointRadius:0,tension:.3,yAxisID:'y'},
-      {label:'Power W',data:D.total.power,borderColor:'#ff922b',borderWidth:1.5,pointRadius:0,tension:.3,yAxisID:'y1'},
-      {label:'Temp °C',data:D.total.temp,borderColor:'#f783ac',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}]},
-      options:dualOpts(labels),plugins:[areaBg]});
-  }
+  // The GPU tab draws its own charts in renderGpuTab(), from the host-scoped
+  // /api/gpu/* endpoints. It is deliberately absent here: /api/data is the hub's
+  // own series, and charting it under a remote host's name is exactly the
+  // cross-host bleed this slice set out to remove.
   if(TAB==='host'){
     const ramPctArr=D.total.ram_used.map((u,i)=>D.total.ram_total[i]?Math.round(u/D.total.ram_total[i]*100):0);
     mk('host',{type:'line',data:{labels,datasets:[
@@ -4811,6 +5535,13 @@ async function loadAlerts(){
   document.getElementById('al_email_user').value  = s.email_username||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
+  document.getElementById('al_gpu_temp').value         = s.gpu_temp_alert_c||'84';
+  document.getElementById('al_gpu_temp_sustain').value = s.gpu_temp_sustain_s||'180';
+  document.getElementById('al_gpu_thr_sustain').value  = s.gpu_throttle_sustain_s||'120';
+  document.getElementById('al_gpu_vram').value         = s.gpu_vram_alert_pct||'95';
+  document.getElementById('al_gpu_overrides').value    = s.gpu_temp_overrides||'';
+  document.getElementById('al_gpu_fanstall').checked   = (s.gpu_fanstall_alerts||'1')==='1';
+  document.getElementById('al_gpu_missing').checked    = (s.gpu_missing_alerts||'1')==='1';
   document.getElementById('al_retention_days').value = s.retention_days||'180';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
   document.getElementById('al_currency').value    = s.currency||'$';
@@ -4958,6 +5689,15 @@ function collectSettingsBody(){
     email_username:   document.getElementById('al_email_user').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
     disk_alert_pct:   (v=>{const n=parseInt(v,10);return String(isNaN(n)?90:Math.max(0,Math.min(99,n)));})(document.getElementById('al_disk').value),
+    // Clamped rather than trusted: a threshold typed as 0 (or as junk) would
+    // otherwise turn a thermal alert into a permanent one.
+    gpu_temp_alert_c:       (v=>{const n=parseInt(v,10);return String(isNaN(n)?84:Math.max(50,Math.min(110,n)));})(document.getElementById('al_gpu_temp').value),
+    gpu_temp_sustain_s:     (v=>{const n=parseInt(v,10);return String(isNaN(n)?180:Math.max(0,Math.min(3600,n)));})(document.getElementById('al_gpu_temp_sustain').value),
+    gpu_throttle_sustain_s: (v=>{const n=parseInt(v,10);return String(isNaN(n)?120:Math.max(0,Math.min(3600,n)));})(document.getElementById('al_gpu_thr_sustain').value),
+    gpu_vram_alert_pct:     (v=>{const n=parseInt(v,10);return String(isNaN(n)?95:Math.max(50,Math.min(100,n)));})(document.getElementById('al_gpu_vram').value),
+    gpu_temp_overrides:     document.getElementById('al_gpu_overrides').value.trim(),
+    gpu_fanstall_alerts:    document.getElementById('al_gpu_fanstall').checked ? '1' : '0',
+    gpu_missing_alerts:     document.getElementById('al_gpu_missing').checked ? '1' : '0',
     retention_days:   (v=>{const n=parseInt(v,10);return v.trim()===''?'180':String(isNaN(n)?180:Math.max(1,n));})(document.getElementById('al_retention_days').value),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
     currency:         document.getElementById('al_currency').value.trim()||'$',
@@ -5610,8 +6350,8 @@ async function deleteHost(name){
 }
 
 // ── Fleet + per-host (Issue #35 slice 2) ─────────────────────────────────────
-const HOST_SCOPED_TABS = new Set(['host','services']); // tabs that render from any host
-const LOCAL_ONLY_TABS  = new Set(['gpu','models','experiments','containers']);  // tabs not yet probed per-host (costs went per-host)
+const HOST_SCOPED_TABS = new Set(['host','services','gpu']); // tabs that render from any host
+const LOCAL_ONLY_TABS  = new Set(['models','experiments','containers']);  // tabs not yet probed per-host (costs and GPU went per-host)
 
 function fmtMBshort(v){
   if(v==null) return '—';
@@ -5703,6 +6443,7 @@ function refreshCurrentTab(){
   if(TAB === 'security')  { renderSecurity(); return; }
   if(TAB === 'services')  { renderServicesTab(); return; }
   if(TAB === 'costs')     { renderCosts(true); return; }
+  if(TAB === 'gpu')       { renderGpuTab(true); return; }   // host-scoped: refetch for the new host
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 
@@ -7531,72 +8272,12 @@ function describeMissingCapability(tabId){
     detail:'Per-host support lands in the next slice.'};
 }
 
-// ── Per-host GPU (remote hosts) ───────────────────────────────────────────────
-// Newer probes ship a per-card `gpus` array (plus nvidia-smi's compute-app list
-// as `gpu_procs`) in the host snapshot, so the GPU tab renders the real thing
-// for a remote host instead of the "next slice" notice. Data comes straight
-// from FLEET — no extra fetch — and the 15s auto-refresh re-renders. Hosts
-// whose probe predates `gpus` fall back to the capability notice as before.
-function remoteGpuData(){
-  const h = FLEET && (FLEET.hosts||[]).find(x => x.name === CURRENT_HOST);
-  if(!h || !h.host || !Array.isArray(h.host.gpus) || !h.host.gpus.length) return null;
-  return {gpus: h.host.gpus, procs: h.host.gpu_procs||[], agg: h.host.gpu||{}, at: h.at, online: h.online};
-}
-function renderRemoteGpu(sec, rg){
-  let box = sec.querySelector('.remote-gpu');
-  if(!box){
-    box = document.createElement('div');
-    box.className = 'remote-gpu';
-    sec.insertBefore(box, sec.firstChild);
-  }
-  const tint=v=>v>85?'#f85149':v>60?'#d29922':'#3fb950';
-  const gpus = rg.gpus, agg = rg.agg;
-  const memUsed  = agg.mem_used  != null ? agg.mem_used  : gpus.reduce((s,g)=>s+(g.mem_used||0),0);
-  const memTotal = agg.mem_total != null ? agg.mem_total : gpus.reduce((s,g)=>s+(g.mem_total||0),0);
-  const memPct = memTotal ? Math.round(memUsed/memTotal*100) : 0;
-  const util  = Math.round(agg.util||0);
-  const power = gpus.reduce((s,g)=>s+(g.power||0),0);
-  const temp  = gpus.reduce((m,g)=>Math.max(m,g.temp||0),0);
-  const names = [...new Set(gpus.map(g=>g.name||'GPU'))];
-  const model = names.length===1 ? (gpus.length>1?`${gpus.length}× ${names[0]}`:names[0]) : names.join(' + ');
-  const kpis=[
-    {v:fmtMB(memUsed)+' <span style="font-size:13px;color:var(--mut)">/ '+fmtMB(memTotal)+'</span>', l:I18N.t('gpu.vram_in_use','VRAM in use'), s:I18N.tf('gpu.pct_full','{n}% full',{n:memPct})},
-    {v:util+'%', l:I18N.t('gpu.util_kpi','GPU util'), s:Math.round(power)+' W · '+Math.round(temp)+'°C'},
-  ].map(t=>`<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div><div class="s">${t.s||''}</div></div>`).join('');
-  const cards = gpus.map(g=>{
-    const mp = g.mem_total ? Math.round(g.mem_used/g.mem_total*100) : 0;
-    const u  = Math.round(g.util||0);
-    return `<div class="gpucard">
-      <div class="gpucard-h"><b>GPU ${g.idx!=null?g.idx:''}</b> <span class="muted">${esc(g.name||'')}</span>
-        <span class="gpucard-stats">${u}% util${g.power?` · ${Math.round(g.power)} W`:''} · ${Math.round(g.temp||0)}°C</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('col.vram','VRAM')}</span>
-        <span class="gpucard-bar"><span style="width:${mp}%;background:${tint(mp)}"></span></span>
-        <span class="gpucard-val">${fmtMB(g.mem_used||0)} / ${fmtMB(g.mem_total||0)} · ${mp}%</span></div>
-      <div class="gpucard-row"><span class="gpucard-lbl">${I18N.t('gpu.percard_util','Util')}</span>
-        <span class="gpucard-bar"><span style="width:${Math.min(100,u)}%;background:${tint(u)}"></span></span>
-        <span class="gpucard-val">${u}%</span></div>
-    </div>`;
-  }).join('');
-  const procs = rg.procs.length ? rg.procs.map(p=>
-    `<tr><td><span class="dot" style="background:${colorFor(p.name||'?')}"></span>${esc(p.name||'?')} <span class="muted">· pid ${p.pid}</span></td><td>${fmtMB(p.mem||0)}</td>
-     <td style="width:42%"><span class="mini" style="width:${Math.max(2,(p.mem||0)/(memTotal||1)*100)}%;background:${colorFor(p.name||'?')}"></span></td></tr>`).join('')
-    : `<tr><td class="muted">${(util>=5||memPct>=10)
-        ? I18N.t('gpu.no_procdata','VRAM is in use, but no per-process breakdown is available on this host.')
-        : I18N.t('gpu.idle','GPU is idle.')}</td></tr>`;
-  const stale = rg.online ? '' : ` · <span style="color:var(--warn)">${I18N.t('rgpu.stale','host offline — showing last snapshot')}</span>`;
-  box.innerHTML =
-    `<div class="card"><h2>🎮 ${I18N.tf('rgpu.title','GPU on {host}',{host:esc(CURRENT_HOST)})}</h2>
-      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
-      <div class="muted" style="margin:12px 0 8px">${esc(model)}</div>
-      ${cards}
-      <p class="cap">${I18N.tf('rgpu.cap','Live snapshot from the host poller · updated {t}',{t:relTime(rg.at)})}${stale}</p>
-    </div>
-    <div class="card"><h2>📋 ${I18N.t('rgpu.procs_title','Processes on the GPU')}</h2>
-      <table><tbody>${procs}</tbody></table>
-      <p class="cap">${I18N.t('rgpu.procs_cap','VRAM per compute process, read on the host. Service attribution and history charts need per-host storage — a later slice.')}</p>
-    </div>`;
-  applyIcons(box);
-}
+// ── Per-host GPU ───────────────────────────────────────────────────
+// There is deliberately nothing here any more. remoteGpuData()/renderRemoteGpu()
+// used to paint a snapshot-only GPU panel for remote hosts, because per-host
+// history didn't exist to chart — its own caption said so. It exists now, so the
+// GPU tab renders every host through renderGpuTab() over /api/gpu/*, and this
+// fork is gone rather than maintained in parallel.
 
 // ── Per-host Containers (remote hosts) ───────────────────────────────────────
 // Newer probes ship the host's `docker ps` (+ one stats pass for RAM/CPU%) as
@@ -7721,15 +8402,6 @@ function renderLocalOnlyNotice(tabId){
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
   if(!sec) return;
   sec.querySelectorAll(':scope > .card, :scope > .cols').forEach(el => el.style.display='none');
-  if(tabId === 'gpu'){
-    const rg = remoteGpuData();
-    if(rg){
-      const old = sec.querySelector('.scope-notice');
-      if(old) old.remove();
-      renderRemoteGpu(sec, rg);
-      return;
-    }
-  }
   if(tabId === 'containers'){
     const rc = remoteContainersData();
     if(rc){
@@ -7885,7 +8557,24 @@ document.addEventListener('lang:changed', ()=>{
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
   if(TAB==='experiments') renderExperiments(true);
-  if(TAB==='costs') renderCosts(true);});
+  if(TAB==='costs') renderCosts(true);
+  if(TAB==='gpu') renderGpuTab(true);});
+// GPU cockpit view toggle. "What is card 1 doing" (small multiples) and "which
+// card is the problem" (one metric, every card) are different lookups, and the
+// choice sticks so a user who prefers one doesn't re-pick it on every visit.
+(function(){
+  const a=document.getElementById('gpu-view-card'), b=document.getElementById('gpu-view-metric');
+  // Switching views by hand clears any card focus — the focus came from
+  // clicking a specific card, and asking for the whole view means "show me
+  // everything again".
+  const set = v => { GPU_VIEW=v; GPU_SEL_CARD=null; localStorage.setItem('hl_gpuview',v);
+                     syncGpuViewButtons(); if(GPUC) renderGpuCards(GPUC); };
+  if(a) a.onclick=()=>set('card');
+  if(b) b.onclick=()=>set('metric');
+  GPU_VIEW = localStorage.getItem('hl_gpuview') || 'card';
+  GPU_METRIC = localStorage.getItem('hl_gpumetric') || 'temp';
+  syncGpuViewButtons();
+})();
 document.querySelectorAll('#costs-breakdown-card th[data-sort]').forEach(th=>{ th.style.cursor='pointer';
   th.onclick=()=>{ const k=th.dataset.sort; COSTS_SORT.dir=(COSTS_SORT.key===k)?-COSTS_SORT.dir:-1; COSTS_SORT.key=k; renderCostsTable(); }; });
 document.querySelector(`.rb[data-r="${R}"]`)?.classList.add('on');
@@ -8311,7 +9000,15 @@ setInterval(()=>{
   if(TAB==='network')  renderNetwork();
   if(TAB==='security') renderSecurity();
   if(TAB==='diskio')   renderDiskIo();
-  if((TAB==='gpu'||TAB==='containers'||TAB==='models') && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
+  // The GPU tab owns its own host-scoped data (/api/gpu/*), so refresh it here
+  // rather than off the back of /api/data — a remote's cockpit shouldn't go
+  // stale just because the hub's own sample call failed.
+  if(TAB==='gpu')      renderGpuTab(false);
+  // Drive the scope notice off LOCAL_ONLY_TABS, never a hardcoded list. The GPU
+  // tab is host-scoped now, and leaving 'gpu' spelled out here meant every tick
+  // hid all its cards and repainted the "waiting for per-GPU data" notice on top
+  // of a fully populated cockpit — data on screen, gone ~15s later.
+  if(LOCAL_ONLY_TABS.has(TAB) && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 },15000);
 // AI-tab fast poll: while the AI Models tab is visible, ride the light
 // /api/ai/now (no DB; server-side throttled re-probe of ollama) every 5s so

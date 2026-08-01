@@ -89,6 +89,42 @@ class TestReadDocker(unittest.TestCase):
         self.assertEqual(byname["ollama"]["vram_mb"], 23000)
         self.assertNotIn("vram_mb", byname["idlebox"])
 
+    def test_per_card_vram_is_carried_up_to_the_container(self):
+        # The pid is the only thing that knows BOTH which GPU it sits on and
+        # which container it belongs to. Nothing downstream can rebuild that
+        # link from a container name — the container is "ollama" while the
+        # process on the card is "llama-server" — so the probe must attach it.
+        ps = "\n".join([
+            _ps_line("ollama", "ollama/ollama", "running", "Up 1 hour", cid=CID1),
+            _ps_line("idlebox", "img", "running", "Up 1 hour", cid=CID2),
+        ])
+        gpu_procs = [
+            {"pid": 100, "name": "llama-server", "mem": 44000,
+             "by_card": {"0": 22000, "1": 22000}},
+            {"pid": 200, "name": "llama-server", "mem": 19000,
+             "by_card": {"2": 19000}},
+            {"pid": 300, "name": "python", "mem": 500, "by_card": {"0": 500}},
+        ]
+        cgroups = {100: CID1, 200: CID1, 300: None}
+        with mock.patch("probe.subprocess.run", side_effect=_dispatch(ps)), \
+             mock.patch("probe._pid_container_id", side_effect=lambda p: cgroups.get(p)):
+            out = probe.read_docker(gpu_procs=gpu_procs)
+        byname = {c["name"]: c for c in out["docker"]["containers"]}
+        self.assertEqual(byname["ollama"]["vram_by_card"],
+                         {"0": 22000, "1": 22000, "2": 19000})
+        self.assertNotIn("vram_by_card", byname["idlebox"])
+
+    def test_no_per_card_data_leaves_the_container_key_absent(self):
+        # An older driver reports no gpu_uuid, so there is no split to carry.
+        ps = _ps_line("ollama", "ollama/ollama", "running", "Up 1 hour", cid=CID1)
+        gpu_procs = [{"pid": 100, "name": "ollama", "mem": 20000}]
+        with mock.patch("probe.subprocess.run", side_effect=_dispatch(ps)), \
+             mock.patch("probe._pid_container_id", side_effect=lambda p: CID1):
+            out = probe.read_docker(gpu_procs=gpu_procs)
+        c = out["docker"]["containers"][0]
+        self.assertEqual(c["vram_mb"], 20000)
+        self.assertNotIn("vram_by_card", c)
+
     def test_stats_failure_degrades_to_inventory_only(self):
         ps = _ps_line("web", "nginx", "running", "Up 1 hour")
         def run(args, **kw):

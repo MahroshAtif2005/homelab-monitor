@@ -8,7 +8,7 @@ from backend.db import connection
 
 _COLS = ("cpu", "ram_used", "ram_total", "load1", "ctemp",
          "gpu_util", "gpu_mem_used", "gpu_mem_total",
-         "gpu_power", "cpu_power", "dram_power")
+         "gpu_power", "cpu_power", "dram_power", "gpu_temp")
 
 _UPSERT_SET = ",\n".join(
     f"{c}=CASE WHEN excluded.{c} IS NOT NULL "

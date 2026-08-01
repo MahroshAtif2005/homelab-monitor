@@ -114,6 +114,7 @@ def sample_once():
     gpus = []
     gpu_extra = {}
     procs = {}
+    svc_by_card = {}    # service -> {card idx: MB} — per-card VRAM attribution
     gpu_pids = {}
     gpu_avail = False
     gpu_vendor = None   # "nvidia" | "amd" | "hybrid" — drives the vendor-aware GPU diagnostic
@@ -127,8 +128,17 @@ def sample_once():
         # AMD card on a host without nvidia-smi was never read at all (issue #1).
         nv_gpus = []
         try:
-            rows = _app.smi(["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-                        "--format=csv,noheader,nounits"]).splitlines()
+            # fan.speed is asked for in the same pass, but nvidia-smi rejects the
+            # WHOLE query on an unrecognised field name — so a driver too old to
+            # know it falls back to the exact previous 7-field query rather than
+            # reporting no cards at all.
+            base_fields = ("index,name,utilization.gpu,memory.used,memory.total,"
+                           "power.draw,temperature.gpu")
+            rows = _app.smi([f"--query-gpu={base_fields},fan.speed",
+                             "--format=csv,noheader,nounits"]).splitlines()
+            if not any(line.strip() for line in rows):
+                rows = _app.smi([f"--query-gpu={base_fields}",
+                                 "--format=csv,noheader,nounits"]).splitlines()
             for line in rows:
                 if not line.strip():
                     continue
@@ -136,8 +146,15 @@ def sample_once():
                 if len(p) < 7:
                     continue
                 u, mu, mt, pw, tp = (_app._gpu_num(x) for x in p[2:7])
-                nv_gpus.append({"idx": int(_app._gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
-                             "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp})
+                card = {"idx": int(_app._gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
+                        "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp}
+                # Absent, not 0: passively-cooled datacentre cards have no fan to
+                # report, and a 0 here would trip the fan-stall alert on hardware
+                # that has no fan to stall.
+                fan = _app._gpu_opt(p[7]) if len(p) > 7 else None
+                if fan is not None:
+                    card["fan"] = round(fan)   # % of max, integral like the probe's
+                nv_gpus.append(card)
         except Exception:
             nv_gpus = []   # no nvidia-smi / wedged driver — an AMD card may still be present
         # AMD via the amdgpu sysfs back-end — read even when NVIDIA is present, so a
@@ -171,15 +188,44 @@ def sample_once():
                 # Best-effort on its own: a timeout or malformed row in this extra
                 # query must cost this sample's NVIDIA attribution, not the GPU
                 # chips below it nor the AMD fdinfo attribution that follows.
-                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                    if line.strip():
-                        pid, mem = (p.strip() for p in line.split(","))
-                        svc = _app.service_for_pid(pid, nm)
-                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                        try:
-                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                        except ValueError:
-                            pass
+                #
+                # gpu_uuid comes along so VRAM can be attributed to a *card*, not
+                # just to the pool — "which of the three 3090s is ollama on" is
+                # the question the per-card cockpit exists to answer. A driver
+                # that rejects the field falls back to the original query and
+                # simply reports no per-card split.
+                uuid_idx = _app._smi_uuid_idx()
+                rows = [l for l in _app.smi(["--query-compute-apps=gpu_uuid,pid,used_memory",
+                                             "--format=csv,noheader,nounits"]).splitlines()
+                        if l.strip()]
+                # CHECK the answer rather than inferring the shape from the fact
+                # that rows came back: nvidia-smi UUIDs are always "GPU-…" (or
+                # "MIG-…" on a partitioned card), so the leading field identifies
+                # itself. Guessing wrong here shifts every column by one. Same
+                # verification probe.py does — the two must not drift.
+                has_uuid = bool(rows) and all(
+                    r.strip().startswith(("GPU-", "MIG-")) for r in rows)
+                if not has_uuid:
+                    rows = _app.smi(["--query-compute-apps=pid,used_memory",
+                                     "--format=csv,noheader,nounits"]).splitlines()
+                for line in rows:
+                    if not line.strip():
+                        continue
+                    f = [x.strip() for x in line.split(",")]
+                    if len(f) < (3 if has_uuid else 2):
+                        continue
+                    uuid, (pid, mem) = (f[0], f[1:3]) if has_uuid else (None, f[:2])
+                    svc = _app.service_for_pid(pid, nm)
+                    mb = _app._gpu_num(mem)
+                    procs[svc] = procs.get(svc, 0) + mb
+                    idx = uuid_idx.get(uuid) if uuid else None
+                    if idx is not None:
+                        per = svc_by_card.setdefault(svc, {})
+                        per[idx] = per.get(idx, 0) + mb
+                    try:
+                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + mb
+                    except ValueError:
+                        pass
             except Exception:
                 pass
         # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
@@ -305,6 +351,7 @@ def sample_once():
         return
     from backend.db.repos import system as system_repo
     from backend.db.repos import experiments as exp_repo
+    from backend.db.repos import gpu_samples as gpu_samples_repo
     # Read retention before acquiring LOCK — get_settings() also takes LOCK
     # (non-reentrant), so calling it inside the block would deadlock the thread.
     _retention = _app.get_retention_secs() if ts % 360 < _app.INTERVAL else None
@@ -318,7 +365,8 @@ def sample_once():
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(ts, *gcols, host["cpu"], host["ram_used"],
               host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power)])
-        _app.DB.executemany("INSERT INTO proc VALUES(?,?,?)", [(ts, svc, mem) for svc, mem in procs.items()])
+        _app.DB.executemany("INSERT INTO proc(ts,service,mem,host) VALUES(?,?,?,'local')",
+                            [(ts, svc, mem) for svc, mem in procs.items()])
         pp_rows = _app._attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
@@ -326,12 +374,14 @@ def sample_once():
                             [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram, _ctx in models if vram is not None])
         _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
                             [(ts, caller, server, n) for (caller, server), n in edges.items()])
-        # Per-GPU history only when there's more than one card (single-GPU rigs are
-        # already covered by the aggregate `samples` table) — keeps storage lean.
-        if gpu_avail and len(gpus) > 1:
-            _app.DB.executemany(
-                "INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) VALUES(?,?,?,?,?,?,?)",
-                [(ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]) for g in gpus])
+        # Per-card history for the hub's own cards, stored under host='local' so
+        # the GPU cockpit reads them through exactly the same query it uses for a
+        # remote. Written for single-card rigs too, now that the tab charts fan,
+        # memory-bandwidth and throttle state per card — none of which the pooled
+        # `samples` table carries, so "one card means the aggregate covers it" no
+        # longer holds.
+        if gpu_avail and gpus:
+            gpu_samples_repo.record(_app.DB, ts, "local", gpus, interval=_app.INTERVAL)
         _cur_net_rows = list(_app._net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         _app.DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
                        _cur_net_rows)
@@ -395,7 +445,10 @@ def sample_once():
     _app.LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
-                  procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
+                  procs=sorted(({"service": s, "mem": round(m),
+                                 **({"by_card": {str(i): round(v) for i, v in sorted(svc_by_card[s].items())}}
+                                    if s in svc_by_card else {})}
+                                for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v, "ram": r, "ctx_now": c}
                           for s, m, v, r, c in models],
                   model_catalog=model_catalog,

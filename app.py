@@ -94,6 +94,7 @@ app = Flask(__name__, static_url_path="/static", static_folder="static")
 # Phase 3.4: register API blueprints (in original @app.route declaration order)
 from backend.api.system import bp as _system_bp
 from backend.api.gpu import bp as _gpu_bp
+from backend.api.gpu_cockpit import bp as _gpu_cockpit_bp
 from backend.api.costs import bp as _costs_bp
 from backend.api.experiments import bp as _experiments_bp
 from backend.api.uptime_api import bp as _uptime_api_bp
@@ -102,6 +103,7 @@ from backend.api.integrations import bp as _integrations_bp
 from backend.api.benchmarks import bp as _benchmarks_bp
 app.register_blueprint(_system_bp)
 app.register_blueprint(_gpu_bp)
+app.register_blueprint(_gpu_cockpit_bp)
 app.register_blueprint(_costs_bp)
 app.register_blueprint(_experiments_bp)
 app.register_blueprint(_uptime_api_bp)
@@ -159,7 +161,28 @@ LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+-- Per-card GPU history for EVERY host, hub included (the hub stores itself as
+-- host='local'). One table rather than a hub table plus a remote one: the GPU
+-- cockpit renders local and remote through the same reader, and a second table
+-- would let the two drift. Pre-existing rows predate the host column and are
+-- migrated to 'local', which is exactly what they were.
 CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+-- Hourly per-card rollup. Rates are averaged, but temp/fan also keep a MAX:
+-- an hour that averaged 71 °C while peaking at 87 °C is an hour with a thermal
+-- problem, and an average would hide exactly the event worth seeing.
+-- throttle_secs counts the seconds the card reported a thermal/power throttle.
+CREATE TABLE IF NOT EXISTS gpu_samples_1h(
+  ts INTEGER NOT NULL, host TEXT NOT NULL DEFAULT 'local', idx INTEGER NOT NULL,
+  util REAL, mem_used REAL, mem_total REAL, power REAL,
+  temp REAL, temp_max REAL, fan REAL, fan_max REAL,
+  -- fan_cnt: how many of this hour's polls actually REPORTED a fan speed. The
+  -- fan average divides by this, not by cnt — otherwise a card that reports a
+  -- fan only intermittently has its average dragged toward zero, and near-zero
+  -- is precisely what the fan-stall alert fires on.
+  fan_cnt INTEGER DEFAULT 0,
+  throttle_secs INTEGER DEFAULT 0, cnt INTEGER DEFAULT 1,
+  PRIMARY KEY(ts, host, idx));
+CREATE INDEX IF NOT EXISTS idx_gpu_1h_host_ts ON gpu_samples_1h(host, ts);
 CREATE TABLE IF NOT EXISTS net_samples(ts INTEGER, iface TEXT, bytes_in INTEGER, bytes_out INTEGER);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL, ram REAL);
@@ -290,7 +313,7 @@ CREATE TABLE IF NOT EXISTS host_samples(
   ts INTEGER NOT NULL, host TEXT NOT NULL,
   cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
   gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
-  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL, gpu_temp REAL,
   PRIMARY KEY(ts, host)
 );
 CREATE INDEX IF NOT EXISTS idx_host_samples_host_ts ON host_samples(host, ts);
@@ -298,7 +321,7 @@ CREATE TABLE IF NOT EXISTS host_samples_1h(
   ts INTEGER NOT NULL, host TEXT NOT NULL,
   cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
   gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
-  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL, gpu_temp REAL,
   cnt INTEGER DEFAULT 1,
   PRIMARY KEY(ts, host)
 );
@@ -337,6 +360,32 @@ _UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
 _UPTIME_CHECK_MIGRATIONS = ("public INTEGER NOT NULL DEFAULT 0",)
 # RAM-spill split for loaded models (ollama size - size_vram). NULL = unknown (non-ollama).
 _MODELS_MIGRATIONS = ("ram REAL",)
+# Per-card GPU history for every host (the GPU cockpit). `host` turns what was a
+# hub-only table into a fleet-wide one; existing rows are the hub's, so they
+# default to 'local' and stay valid. The rest is the telemetry the cockpit charts:
+# fan speed, memory-bandwidth utilisation, clocks, the power cap the draw is
+# measured against, memory-junction temp and the raw throttle bitmask (kept as a
+# mask, not as labels, so history can tell thermal throttling from power-capping
+# without re-parsing strings).
+_GPU_SAMPLE_MIGRATIONS = ("host TEXT NOT NULL DEFAULT 'local'", "fan REAL", "mem_util REAL",
+                          "clk_sm REAL", "clk_mem REAL", "power_limit REAL",
+                          "temp_mem REAL", "throttle INTEGER")
+# Same story for per-service VRAM: `proc` was implicitly the hub's own, so its
+# rows are 'local' and remotes now write alongside them.
+_PROC_MIGRATIONS = ("host TEXT NOT NULL DEFAULT 'local'",)
+# GPU temperature per host: host_samples has always pooled GPU util/VRAM/power
+# but silently dropped temperature, so a remote's thermal history simply didn't
+# exist. Both the raw table and the rollup gain it.
+_COLUMN_MIGRATIONS = (("host_samples", "gpu_temp REAL"),
+                      ("host_samples_1h", "gpu_temp REAL"),
+                      ("gpu_samples_1h", "fan_cnt INTEGER DEFAULT 0"))
+# Indexes that cover columns added by the migrations above. They cannot live in
+# _DB_SCHEMA: executescript runs BEFORE the ALTERs, so on an existing database
+# the column wouldn't exist yet and the whole script would fail.
+_POST_MIGRATION_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_gpus_host_ts ON gpu_samples(host, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_proc_host_ts ON proc(host, ts)",
+)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -371,7 +420,11 @@ def _apply_schema_migrations(conn):
                                   _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
                                   _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
                                   _UPTIME_CHECK_MIGRATIONS,
-                                  models_migrations=_MODELS_MIGRATIONS)
+                                  models_migrations=_MODELS_MIGRATIONS,
+                                  gpu_sample_migrations=_GPU_SAMPLE_MIGRATIONS,
+                                  proc_migrations=_PROC_MIGRATIONS,
+                                  column_migrations=_COLUMN_MIGRATIONS,
+                                  post_migration_indexes=_POST_MIGRATION_INDEXES)
     conn.executescript(_EDGE_STATE_MIGRATION)
 
 def _backfill_rollups(conn):
@@ -3261,6 +3314,11 @@ def rename_host(old, new):
         DB.execute("UPDATE bench_runs SET host=? WHERE host=?", (new, old))
         from backend.db.repos import host_samples as _hs_repo
         _hs_repo.rename_host(old, new, conn=DB)
+        # Per-card GPU history and per-service VRAM are keyed by host name too;
+        # without this a rename orphans the whole cockpit history under the old
+        # name while the renamed host shows an empty GPU tab.
+        from backend.db.repos import gpu_samples as _gs_repo
+        _gs_repo.rename_host(old, new, conn=DB)
         DB.commit()
     with HOST_DATA_LOCK:
         if old in HOST_DATA:
@@ -3626,27 +3684,90 @@ def _poll_one_host(h):
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
 
+def fleet_gpu_cards():
+    """[(host, cards, online)] for every host that reports GPUs right now.
+
+    One accessor so the alert scan doesn't need to know that the hub keeps its
+    cards in LATEST while remotes keep theirs in HOST_DATA. Offline hosts are
+    included with online=False so the caller can decide — a stale reading must
+    not be alerted on as if it were current."""
+    out = [("local", list(LATEST.get("gpus") or []), True)]
+    with HOST_DATA_LOCK:
+        items = list(HOST_DATA.items())
+    for name, entry in items:
+        if "data" not in entry:
+            continue
+        cards = ((entry["data"].get("host") or {}).get("gpus")) or []
+        if cards:
+            out.append((name, list(cards), _host_is_online(entry)))
+    return out
+
 def _record_host_sample(name, hostd):
     """Persist one poll's vitals into host_samples(+_1h) — the storage that the
     per-host Costs view (and future per-host history charts) integrate over.
     Absent sensors stay NULL (no GPU ≠ zero watts). Runs on the poller's worker
     threads, so the write takes LOCK on its own — never nest under
-    HOST_DATA_LOCK. A storage failure must not break the poll itself."""
+    HOST_DATA_LOCK. A storage failure must not break the poll itself.
+
+    Also stores the host's per-card GPU history and per-service VRAM into the
+    same tables the hub uses for itself (keyed by host name), which is what lets
+    the GPU cockpit render a remote and the hub through one code path instead of
+    a charts-here / snapshot-there fork."""
     from backend.db.repos import host_samples as _hs_repo
+    from backend.db.repos import gpu_samples as _gs_repo
     gpu = hostd.get("gpu") or {}
+    cards = hostd.get("gpus") or []
+    ts = int(time.time())
     try:
         with LOCK:
             _hs_repo.record(
-                DB, int(time.time()), name,
+                DB, ts, name,
                 cpu=hostd.get("cpu"), ram_used=hostd.get("ram_used"),
                 ram_total=hostd.get("ram_total"), load1=hostd.get("load1"),
                 ctemp=hostd.get("ctemp"),
                 gpu_util=gpu.get("util"), gpu_mem_used=gpu.get("mem_used"),
                 gpu_mem_total=gpu.get("mem_total"), gpu_power=gpu.get("power"),
+                gpu_temp=gpu.get("temp"),
                 cpu_power=hostd.get("cpu_power"), dram_power=hostd.get("dram_power"))
+            if cards:
+                _gs_repo.record(DB, ts, name, cards, interval=INTERVAL)
+            rows = _host_vram_rows(ts, name, hostd)
+            if rows:
+                DB.executemany("INSERT INTO proc(ts,service,mem,host) VALUES(?,?,?,?)", rows)
             DB.commit()
     except Exception as e:
         print(f"host sample store error ({name}):", e, flush=True)
+
+def _host_vram_rows(ts, name, hostd):
+    """One (ts, service, mem, host) row per service holding VRAM on `name`.
+
+    Prefers the container attribution the probe already computes (it maps each
+    compute pid through /proc/<pid>/cgroup, so `ollama` reads as the container
+    name a human recognises) and falls back to the bare process name for VRAM
+    held outside a container. Returns [] when the host reports no GPU processes
+    — better an honest gap in the chart than a row of zeros."""
+    procs = hostd.get("gpu_procs") or []
+    if not procs:
+        return []
+    by_svc, claimed = {}, 0
+    for c in ((hostd.get("docker") or {}).get("containers") or []):
+        mb = c.get("vram_mb") or 0
+        if mb > 0 and c.get("name"):
+            by_svc[c["name"]] = by_svc.get(c["name"], 0) + mb
+            claimed += mb
+    # Whatever the containers didn't account for is running on the host itself;
+    # attribute it by process name so it is visible rather than silently lost.
+    total = sum((p.get("mem") or 0) for p in procs)
+    if total - claimed > 0:
+        for p in sorted(procs, key=lambda x: -(x.get("mem") or 0)):
+            if claimed >= total:
+                break
+            take = min(p.get("mem") or 0, total - claimed)
+            if take > 0:
+                nm = "host:" + str(p.get("name") or "?")
+                by_svc[nm] = by_svc.get(nm, 0) + take
+                claimed += take
+    return [(ts, svc, mem, name) for svc, mem in by_svc.items()]
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import host_poller
@@ -3981,6 +4102,25 @@ SETTING_DEFAULTS = {
     "webhook_url":         "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
+    # ── GPU thermal / throttle alerting (the GPU cockpit) ─────────────────────
+    # Every threshold is paired with a SUSTAIN window, because the whole
+    # difference between a useful GPU alert and a noisy one is duration: a card
+    # touching 85 °C for two seconds mid-batch is not an incident, and a tool
+    # that pages for it gets muted within a week.
+    "gpu_temp_alert_c":      "84",     # per-card temperature that trips an alert
+    "gpu_temp_sustain_s":    "180",    # ...only after this many seconds above it
+    "gpu_throttle_sustain_s": "120",   # thermal throttling sustained this long
+    "gpu_vram_alert_pct":    "95",     # per-card VRAM %
+    "gpu_vram_sustain_s":    "300",
+    "gpu_fanstall_alerts":   "1",      # fan reading 0% on a warm card that HAS a fan
+    "gpu_missing_alerts":    "1",      # a card that was reporting stops reporting
+    "gpu_idle_watts":        "",       # blank = off; W drawn while idle before warning
+    "gpu_idle_sustain_s":    "1800",
+    # Per-host temperature overrides as JSON {"host": celsius}. Needed, not
+    # optional: a box whose cards run at a deliberately lowered power limit
+    # lives in the low-to-mid 80s by design, and a single global threshold
+    # would cry wolf there while being too slack for a well-cooled machine.
+    "gpu_temp_overrides":    "",
     "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
     "currency":            "$",        # symbol shown next to costs
     # ── dual (day/night) tariff — revamp ──────────────────────────────────────
@@ -4119,6 +4259,51 @@ def _validate_retention_settings(updates):
         return "Retention days must be a whole number."
     if days < 1 or days > 3650:
         return "Retention days must be between 1 and 3650."
+    return None
+
+def _validate_gpu_alert_settings(updates):
+    """Reject malformed GPU alert thresholds before they reach the store.
+
+    The per-host override field takes JSON typed by a human, so it is validated
+    at the door rather than being tolerated at read time: a silently-ignored
+    malformed override means the user believes a host has a raised threshold
+    when it does not, and finds out via a 3am page.
+    """
+    if "gpu_temp_overrides" in updates:
+        raw = (updates["gpu_temp_overrides"] or "").strip()
+        if raw:
+            try:
+                over = json.loads(raw)
+            except ValueError:
+                return "Per-host GPU temperature overrides must be JSON, e.g. {\"vader\": 88}."
+            if not isinstance(over, dict):
+                return "Per-host GPU temperature overrides must be a JSON object of host → °C."
+            for host, val in over.items():
+                if not isinstance(host, str) or not host:
+                    return "Each GPU temperature override needs a host name."
+                try:
+                    c = int(val)
+                except (TypeError, ValueError):
+                    return f"GPU temperature override for '{host}' must be a whole number of °C."
+                if not (50 <= c <= 110):
+                    return f"GPU temperature override for '{host}' must be between 50 and 110 °C."
+    for key, lo, hi, what in (("gpu_temp_alert_c", 50, 110, "GPU temperature alert"),
+                              ("gpu_vram_alert_pct", 50, 100, "GPU VRAM alert"),
+                              ("gpu_temp_sustain_s", 0, 3600, "GPU temperature sustain"),
+                              ("gpu_throttle_sustain_s", 0, 3600, "GPU throttle sustain"),
+                              ("gpu_vram_sustain_s", 0, 3600, "GPU VRAM sustain"),
+                              ("gpu_idle_sustain_s", 0, 86400, "GPU idle sustain")):
+        if key not in updates:
+            continue
+        val = (updates[key] or "").strip()
+        if not val:
+            continue
+        try:
+            n = int(val)
+        except ValueError:
+            return f"{what} must be a whole number."
+        if not (lo <= n <= hi):
+            return f"{what} must be between {lo} and {hi}."
     return None
 
 # ── Uptime checks: HTTP/TCP endpoint monitors ──────────────────────────────
@@ -4932,6 +5117,37 @@ def _gpu_num(x):
     except ValueError:
         return 0.0
 
+def _smi_uuid_idx():
+    """GPU UUID → card index. `--query-compute-apps` identifies a process's card
+    by UUID and never by index, so this map is the only way to answer "which card
+    is this process on". {} when unavailable — attribution then stays pooled, as
+    it was before per-card support. Mirrors probe._nvidia_uuid_idx."""
+    out = {}
+    try:
+        for line in smi(["--query-gpu=index,uuid", "--format=csv,noheader,nounits"]).splitlines():
+            p = [x.strip() for x in line.split(",")]
+            if len(p) >= 2 and p[1]:
+                out[p[1]] = int(_gpu_num(p[0]))
+    except Exception:
+        pass
+    return out
+
+def _gpu_opt(x):
+    """Like _gpu_num, but an unsupported field stays None instead of becoming 0.
+
+    Use this for any metric where "the card can't tell us" and "the measured
+    value is zero" are different claims a human would act on differently — fan
+    speed being the sharp case: 0% means a stalled fan, absent means a passively
+    cooled card. The cockpit renders the two differently and never alerts on the
+    second. Mirrors probe._smi_opt."""
+    s = (x or "").strip()
+    if not s or s.startswith("["):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
 # ── AMD GPU back-end (issue #1) ───────────────────────────────────────────────
 # NVIDIA goes through nvidia-smi (above); AMD has no universally-present CLI, so we
 # read the kernel's amdgpu sysfs directly — available on any host with the in-tree
@@ -5104,6 +5320,15 @@ def amd_gpus(drm_root=None):
             "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
             "pdev": pdev,
         }
+        # Fan: pwm1 is the duty cycle 0-255, fan1_input the tachometer in RPM.
+        # Both stay absent on a card with no fan node (passively cooled, or a
+        # laptop where the EC owns the fan) rather than reading as a stalled fan.
+        pwm = _amd_hwmon(dev, "pwm1")
+        if pwm is not None:
+            g["fan"] = round(pwm * 100.0 / 255.0)
+        rpm = _amd_hwmon(dev, "fan1_input")
+        if rpm is not None:
+            g["fan_rpm"] = rpm
         _amd_enrich_card(g, dev)   # clocks/perf level/cap — here, while dev is known
         gpus.append(g)
     return gpus
@@ -5367,14 +5592,26 @@ _THROTTLE_BITS = [
     (0x0000000000000080, "Power brake"),  # HW_POWER_BRAKE_SLOWDOWN — external power brake
 ]
 
+# The subset of _THROTTLE_BITS that means "too hot" rather than "at the power
+# cap". A card pinned at its power limit is working as configured (vader's 3090s
+# run that way by design); a card slowing down thermally is a problem. The alert
+# rules treat the two differently, so the distinction lives here, once.
+_THERMAL_BITS = 0x0000000000000068   # SW thermal | HW thermal | HW slowdown
+
 def _decode_throttle(hexstr):
     """nvidia-smi throttle bitmask → list of *meaningful* reasons. Idle / app-clocks
     / sync-boost / display bits are normal and intentionally ignored."""
+    return _decode_throttle_mask(hexstr)[1]
+
+def _decode_throttle_mask(hexstr):
+    """As _decode_throttle, but returns (mask, reasons) — the raw mask is what
+    gets stored per sample, so history can distinguish thermal throttling from
+    power-capping without re-deriving it from the label strings."""
     try:
         mask = int(str(hexstr).strip(), 16)
     except (TypeError, ValueError):
-        return []
-    return [label for bit, label in _THROTTLE_BITS if mask & bit]
+        return 0, []
+    return mask, [label for bit, label in _THROTTLE_BITS if mask & bit]
 
 def _enrich_gpus(gpus):
     """Best-effort: attach mem_util/clocks/power_limit/pstate/temp_mem and throttle
@@ -5393,13 +5630,19 @@ def _enrich_gpus(gpus):
             # '[N/A]' must leave mem_util ABSENT, not 0: _gpu_extra averages only
             # the cards that measured, and the UI hides the chip on absence — a
             # coerced 0 would read as a confident "0% mem-bandwidth".
-            if p[1] and not p[1].startswith("["):
-                g["mem_util"] = _gpu_num(p[1])
-            g["clk_sm"]      = _gpu_num(p[2])
-            g["clk_mem"]     = _gpu_num(p[3])
-            g["power_limit"] = _gpu_num(p[4])
-            g["temp_mem"]    = _gpu_num(p[5])
-            g["pstate"]      = p[6] if (p[6] and not p[6].startswith("[")) else ""
+            # Every one of these stays ABSENT when the card doesn't report it,
+            # never 0. _gpu_num would coerce '[N/A]' to 0.0, and the cockpit
+            # derives its per-card `supports` map from presence — a coerced zero
+            # advertises the metric as supported and then draws a confident flat
+            # line at zero. The remote probe's _nvidia_enrich already does this;
+            # the hub's own cards were the inconsistent half.
+            for key, raw in (("mem_util", p[1]), ("clk_sm", p[2]), ("clk_mem", p[3]),
+                             ("power_limit", p[4]), ("temp_mem", p[5])):
+                v = _gpu_opt(raw)
+                if v is not None:
+                    g[key] = v
+            if p[6] and not p[6].startswith("["):
+                g["pstate"] = p[6]
     except Exception:
         pass
     for field in ("clocks_throttle_reasons.active", "clocks_event_reasons.active"):
@@ -5415,8 +5658,10 @@ def _enrich_gpus(gpus):
             g = by_idx.get(int(_gpu_num(p[0])))
             if g is None:
                 continue
-            g["throttle"] = _decode_throttle(p[1])
-            g["throttled"] = bool(g["throttle"])
+            mask, reasons = _decode_throttle_mask(p[1])
+            g["throttle_mask"] = mask
+            g["throttle"] = reasons
+            g["throttled"] = bool(reasons)
             ok = True
         if ok:
             break
@@ -5448,6 +5693,14 @@ def _gpu_extra(gpus):
     measured = [g["mem_util"] for g in gpus if "mem_util" in g]
     if measured:
         out["mem_util"] = round(sum(measured) / len(measured))
+    # Fan follows the same "only the cards that measured it" rule: a passively
+    # cooled card in the box must not pull the average toward a speed nothing
+    # reported. fan_max is what the cockpit shows — "is there headroom left?" is
+    # answered by the busiest fan, not by the mean.
+    fans = [g["fan"] for g in gpus if g.get("fan") is not None]
+    if fans:
+        out["fan"] = round(sum(fans) / len(fans))
+        out["fan_max"] = round(max(fans))
     return out
 
 def service_for_pid(pid, nm):

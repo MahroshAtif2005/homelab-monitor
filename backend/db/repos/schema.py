@@ -20,12 +20,24 @@ def open_db_connection(path: str):
 
 def apply_schema_migrations(conn, schema_sql, sample_migrations, host_migrations,
                              runs_migrations, uptime_migrations, uptime_check_migrations,
-                             models_migrations=()):
+                             models_migrations=(), gpu_sample_migrations=(),
+                             proc_migrations=(), column_migrations=(),
+                             post_migration_indexes=()):
     """Run the full schema bootstrap + column-addition migrations on *conn*."""
     conn.executescript(schema_sql)
     for col in sample_migrations:
         try:
             conn.execute(f"ALTER TABLE samples ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in gpu_sample_migrations:
+        try:
+            conn.execute(f"ALTER TABLE gpu_samples ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    for col in proc_migrations:
+        try:
+            conn.execute(f"ALTER TABLE proc ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
     for col in models_migrations:
@@ -51,6 +63,20 @@ def apply_schema_migrations(conn, schema_sql, sample_migrations, host_migrations
     for col in uptime_check_migrations:
         try:
             conn.execute(f"ALTER TABLE uptime_checks ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    # Generic (table, column-definition) additions, for tables that don't have
+    # their own dedicated migration list above.
+    for table, col in column_migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    # Indexes over columns the ALTERs above just added — they can't ride in
+    # schema_sql, which executes before any of them exist.
+    for stmt in post_migration_indexes:
+        try:
+            conn.execute(stmt)
         except sqlite3.OperationalError:
             pass
     # Migrate legacy single-instance api_key setting -> api_keys table.
