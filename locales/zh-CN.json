@@ -62,9 +62,10 @@
       "diag.lbl.nvidia",
       "diag.lbl.dbus",
       "registry.empty_host",
-      "registry.allhosts"
+      "registry.allhosts",
+      "gpu.on_card"
     ],
-    "coverage": 0.918
+    "coverage": 0.9254
   },
   "nav.group.monitoring": "监控",
   "nav.group.ai": "AI",

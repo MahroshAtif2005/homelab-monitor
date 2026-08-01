@@ -173,3 +173,18 @@ Final state: **738 passing, the same 6 pre-existing failures.** 63 new tests.
 - no page errors, no false alerts
 - caught a live model unload mid-capture: the VRAM traces drop off a cliff and
   the combined chart shows all three cards releasing at once
+
+### Shipped
+
+**PR [#261](https://github.com/SikamikanikoBG/homelab-monitor/pull/261)** →
+`next`, 12 commits. CI: `smoke` pass, `snapshot` pass, `review` pass.
+
+> Note on the review gate: the `review` job reports green but posted no comment,
+> and its log shows an empty `ANTHROPIC_API_KEY` plus "No buffered inline
+> comments". It is passing because the action completed, not because a review
+> was produced — worth checking the `CLAUDE_CODE_OAUTH_TOKEN` secret before
+> relying on it as a gate.
+
+Also: `locales/zh-CN.json` is generated — `_meta.untranslated`/`coverage` are
+derived. Hand-adding keys there needs `python scripts/i18n-sync.py` afterwards
+to refresh them (coverage 91.8% → 92.5% here).
