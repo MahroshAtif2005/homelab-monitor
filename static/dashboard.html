@@ -351,7 +351,12 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .spark-row .sl{color:var(--mut);text-transform:uppercase;letter-spacing:.02em;font-size:10px}
 .spark-row .sv{text-align:right;font-variant-numeric:tabular-nums;color:var(--tx);font-size:12px}
 .spark-row .sv.warn{color:var(--warn)} .spark-row .sv.bad{color:var(--crit)}
-.spark{display:block;width:100%;height:20px;overflow:visible}
+/* gspark, not spark: `.spark` is already taken by the Star-on-GitHub sparkle
+   animation above (position:absolute; opacity:0). A later rule here overrode
+   width/height but NOT those two, so every GPU sparkline was silently pulled
+   out of flow and rendered fully transparent — present in the DOM, invisible
+   on screen. */
+.gspark{display:block;width:100%;height:20px;overflow:visible;min-width:0}
 .spark-na{color:var(--mut);font-size:11px;font-style:italic;grid-column:2/4}
 .gpu-mini-attrib{border-top:1px solid var(--bd);padding-top:7px;display:flex;flex-direction:column;gap:5px}
 .gpu-attrib-row{display:flex;align-items:center;gap:7px;font-size:11.5px}
@@ -3566,7 +3571,7 @@ function sparkSvg(vals, opts){
     const x0 = x(b[0]), x1 = Math.max(x(b[1]), x(b[0])+0.6);
     return `<rect x="${x0.toFixed(1)}" y="0" width="${(x1-x0).toFixed(1)}" height="${H}" fill="var(--crit)" opacity=".22"/>`;
   }).join('');
-  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${bands}${lines}${dots}</svg>`;
+  return `<svg class="gspark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${bands}${lines}${dots}</svg>`;
 }
 
 // Map throttle spans (unix seconds) onto sparkline sample indexes.
