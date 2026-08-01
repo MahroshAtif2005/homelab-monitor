@@ -340,6 +340,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .gpu-mini.st-throttle{border-color:var(--crit)}
 .gpu-mini.st-hot{border-color:var(--warn)}
 .gpu-mini.st-gone{border-color:var(--crit);opacity:.72}
+.gpu-mini.st-retired{opacity:.55}
 .gpu-mini-h{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .gpu-mini-h b{font-size:13px}
 .gpu-mini-h .nm{font-size:12px;color:var(--mut);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2151,6 +2152,39 @@ body.mc-customizing .mc-board .mc-widget{ border-radius:12px }
         </div>
       </div>
 
+      <!-- GPU thermal alerting. Each threshold is paired with a sustain window,
+           because duration is what separates a useful GPU alert from a muted one. -->
+      <div class="flabel" style="margin-top:16px" data-i18n="set.gpu_group">GPU cards</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <div class="flabel" data-i18n="set.gpu_temp">Temperature alert (°C)</div>
+          <input type="number" id="al_gpu_temp" min="50" max="110" step="1" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_temp_sustain">…sustained for (seconds)</div>
+          <input type="number" id="al_gpu_temp_sustain" min="0" max="3600" step="30" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_throttle_sustain">Throttling sustained for (seconds)</div>
+          <input type="number" id="al_gpu_thr_sustain" min="0" max="3600" step="30" class="field">
+        </div>
+        <div>
+          <div class="flabel" data-i18n="set.gpu_vram">VRAM alert per card (%)</div>
+          <input type="number" id="al_gpu_vram" min="50" max="100" step="1" class="field">
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="flabel" data-i18n="set.gpu_overrides">Per-host temperature overrides</div>
+        <input type="text" id="al_gpu_overrides" class="field" placeholder='{"vader": 88}'>
+        <div class="cap" data-i18n="set.gpu_overrides_cap">JSON, host name to °C. A machine whose cards run at a deliberately lowered power limit lives hotter by design — give it its own threshold instead of loosening the whole fleet's.</div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px">
+        <label class="chk"><input type="checkbox" id="al_gpu_fanstall">
+          <span data-i18n="set.gpu_fanstall">Alert when a fan reads 0% on a warm card</span></label>
+        <label class="chk"><input type="checkbox" id="al_gpu_missing">
+          <span data-i18n="set.gpu_missing">Alert when a card stops reporting</span></label>
+      </div>
+
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
         <button class="rb on" id="al_save" data-i18n="btn.save">Save</button>
         <button class="rb"    id="al_test" data-i18n="btn.test_alert">Send test alert</button>
@@ -3545,6 +3579,9 @@ function gpuStatusPill(card){
     hot:      ['warn', I18N.t('gpu.st_hot','HOT')],
     throttle: ['crit', I18N.t('gpu.st_throttle','THROTTLING')],
     gone:     ['crit', I18N.t('gpu.st_gone','NOT PRESENT')],
+    // A card that hasn't reported in a long time was removed from the machine,
+    // not lost from the bus. It keeps its history; it does not raise an alarm.
+    retired:  ['info', I18N.t('gpu.st_retired','RETIRED')],
   }[card.status] || ['info', card.status];
   return `<span class="mc-pill ${S[0]}">${S[1]}</span>`;
 }
@@ -3597,7 +3634,9 @@ function gpuMiniCard(card, d, ranges){
   return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
        aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">
     <div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
-    <div class="gpu-mini-now">${stats || I18N.t('gpu.no_live','no live reading')}</div>
+    <div class="gpu-mini-now">${stats || (card.status==='retired' && card.last_seen
+        ? I18N.tf('gpu.last_seen','last reported {t}',{t:relTime(card.last_seen)})
+        : I18N.t('gpu.no_live','no live reading'))}</div>
     ${rows}${attrib}
   </div>`;
 }
@@ -5398,6 +5437,13 @@ async function loadAlerts(){
   document.getElementById('al_email_user').value  = s.email_username||'';
   document.getElementById('al_minlevel').value    = s.alert_min_level||'warning';
   document.getElementById('al_disk').value        = s.disk_alert_pct||'90';
+  document.getElementById('al_gpu_temp').value         = s.gpu_temp_alert_c||'84';
+  document.getElementById('al_gpu_temp_sustain').value = s.gpu_temp_sustain_s||'180';
+  document.getElementById('al_gpu_thr_sustain').value  = s.gpu_throttle_sustain_s||'120';
+  document.getElementById('al_gpu_vram').value         = s.gpu_vram_alert_pct||'95';
+  document.getElementById('al_gpu_overrides').value    = s.gpu_temp_overrides||'';
+  document.getElementById('al_gpu_fanstall').checked   = (s.gpu_fanstall_alerts||'1')==='1';
+  document.getElementById('al_gpu_missing').checked    = (s.gpu_missing_alerts||'1')==='1';
   document.getElementById('al_retention_days').value = s.retention_days||'180';
   document.getElementById('al_kwh').value         = s.kwh_price||'';
   document.getElementById('al_currency').value    = s.currency||'$';
@@ -5545,6 +5591,15 @@ function collectSettingsBody(){
     email_username:   document.getElementById('al_email_user').value.trim(),
     alert_min_level:  document.getElementById('al_minlevel').value,
     disk_alert_pct:   (v=>{const n=parseInt(v,10);return String(isNaN(n)?90:Math.max(0,Math.min(99,n)));})(document.getElementById('al_disk').value),
+    // Clamped rather than trusted: a threshold typed as 0 (or as junk) would
+    // otherwise turn a thermal alert into a permanent one.
+    gpu_temp_alert_c:       (v=>{const n=parseInt(v,10);return String(isNaN(n)?84:Math.max(50,Math.min(110,n)));})(document.getElementById('al_gpu_temp').value),
+    gpu_temp_sustain_s:     (v=>{const n=parseInt(v,10);return String(isNaN(n)?180:Math.max(0,Math.min(3600,n)));})(document.getElementById('al_gpu_temp_sustain').value),
+    gpu_throttle_sustain_s: (v=>{const n=parseInt(v,10);return String(isNaN(n)?120:Math.max(0,Math.min(3600,n)));})(document.getElementById('al_gpu_thr_sustain').value),
+    gpu_vram_alert_pct:     (v=>{const n=parseInt(v,10);return String(isNaN(n)?95:Math.max(50,Math.min(100,n)));})(document.getElementById('al_gpu_vram').value),
+    gpu_temp_overrides:     document.getElementById('al_gpu_overrides').value.trim(),
+    gpu_fanstall_alerts:    document.getElementById('al_gpu_fanstall').checked ? '1' : '0',
+    gpu_missing_alerts:     document.getElementById('al_gpu_missing').checked ? '1' : '0',
     retention_days:   (v=>{const n=parseInt(v,10);return v.trim()===''?'180':String(isNaN(n)?180:Math.max(1,n));})(document.getElementById('al_retention_days').value),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
     currency:         document.getElementById('al_currency').value.trim()||'$',

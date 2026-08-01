@@ -135,16 +135,22 @@ def _stitch_spans(rows, interval):
     return sorted(spans, key=lambda s: (s["idx"], s["start"]))
 
 
-def _status_for(live, hot_c):
+def _status_for(live, hot_c, recent=True):
     """The status pill: what a human should conclude about this card at a glance.
 
     Ordering matters — a card can be hot AND busy, and "hot" is the fact worth
     surfacing. Power-capping is deliberately NOT a warning state: a box running a
     deliberately lowered power limit sits at its cap by design.
+
+    `recent` separates the two very different reasons a card can be missing from
+    the live snapshot. A card reporting minutes ago and absent now has fallen off
+    the bus — a real incident. A card whose last sample is days old was simply
+    removed from the machine, and calling that critical would mean every hardware
+    change leaves a permanent false alarm on the dashboard.
     """
     import app as _app
     if live is None:
-        return "gone"
+        return "gone" if recent else "retired"
     mask = live.get("throttle_mask") or 0
     if mask & _app._THERMAL_BITS:
         return "throttle"
@@ -173,6 +179,11 @@ def api_gpu_history():
         health_rows = gpu_repo.health(host, since, conn=_app.DB)
         thr_rows = gpu_repo.throttle_spans(host, since, conn=_app.DB)
         stored_idxs = gpu_repo.cards_for(host, conn=_app.DB)
+        last_seen = gpu_repo.last_seen(host, conn=_app.DB)
+    # A card counts as "should still be here" if it reported within the last few
+    # polls. Generous enough to survive a slow host or one skipped cycle, tight
+    # enough that a card pulled from the machine last week doesn't alert forever.
+    recent_cutoff = now - max(interval * 6, 120)
 
     labels = sorted({int(r[0]) for r in rows})
     pos = {b: i for i, b in enumerate(labels)}
@@ -240,7 +251,9 @@ def api_gpu_history():
             "mem_total": (live or {}).get("mem_total") or _last(s["vram_total"]) or 0,
             "power_limit": (live or {}).get("power_limit") or 0,
             "present": live is not None,
-            "status": _status_for(live, HOT_C),
+            "last_seen": last_seen.get(idx),
+            "status": _status_for(live, HOT_C,
+                                  recent=(last_seen.get(idx) or 0) >= recent_cutoff),
             "now": _now_block(live),
             "supports": supports,
             "series": s,

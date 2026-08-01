@@ -783,5 +783,16 @@
   "col.peak_temp": "Peak temp",
   "col.peak_fan": "Peak fan",
   "col.capped": "Capped",
-  "col.est_energy": "Est. energy"
+  "col.est_energy": "Est. energy",
+  "gpu.st_retired": "RETIRED",
+  "gpu.last_seen": "last reported {t}",
+  "set.gpu_group": "GPU cards",
+  "set.gpu_temp": "Temperature alert (°C)",
+  "set.gpu_temp_sustain": "…sustained for (seconds)",
+  "set.gpu_throttle_sustain": "Throttling sustained for (seconds)",
+  "set.gpu_vram": "VRAM alert per card (%)",
+  "set.gpu_overrides": "Per-host temperature overrides",
+  "set.gpu_overrides_cap": "JSON, host name to °C. A machine whose cards run at a deliberately lowered power limit lives hotter by design — give it its own threshold instead of loosening the whole fleet's.",
+  "set.gpu_fanstall": "Alert when a fan reads 0% on a warm card",
+  "set.gpu_missing": "Alert when a card stops reporting"
 }

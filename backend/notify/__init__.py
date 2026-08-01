@@ -132,6 +132,258 @@ def _alert_name(key):
     return ":".join(parts[1:]) if len(parts) > 1 else key
 
 
+# ── Per-card GPU alerting ─────────────────────────────────────────────────────
+# What makes these "smart" rather than noisy, in one place:
+#
+#   1. SUSTAINED, not instantaneous. Every threshold has a duration. A card
+#      touching 85 °C for two seconds mid-batch is not an incident, and a tool
+#      that pages for it gets muted inside a week — after which it protects
+#      nothing at all.
+#   2. HYSTERESIS on clear. A condition clears a few degrees below where it
+#      fires, so a card hovering exactly on the line doesn't flap between armed
+#      and cleared every scan.
+#   3. PER CARD, PER HOST keys. GPU 1 alerting must not suppress GPU 0, and two
+#      machines are two incidents.
+#   4. The body names the CAUSE. "GPU hot" is a fact; "GPU hot, fan already at
+#      100%, ollama holds 21.6 GB on this card" is something a human can act on.
+#   5. Power-capping is never an alert. A card at a deliberately lowered power
+#      limit is doing exactly what it was configured to do.
+#
+# _GPU_SINCE tracks when each condition first became true. In memory only: after
+# a restart a condition simply re-arms from now, which is the conservative
+# direction — it can delay an alert, never invent one.
+_GPU_SINCE = {}
+
+
+def _sustained(key, active, need_s, now):
+    """True once `active` has held continuously for `need_s`.
+
+    Returns False (and forgets the key) the moment the condition lapses, so the
+    clock always measures one unbroken run rather than a total.
+    """
+    if not active:
+        _GPU_SINCE.pop(key, None)
+        return False
+    since = _GPU_SINCE.setdefault(key, now)
+    return (now - since) >= need_s
+
+
+def _gpu_setting_int(s, key, default):
+    try:
+        v = (s.get(key) or "").strip()
+        return int(v) if v else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _gpu_temp_threshold(s, host):
+    """The temperature threshold for `host` — its override, else the global."""
+    base = _gpu_setting_int(s, "gpu_temp_alert_c", 84)
+    raw = (s.get("gpu_temp_overrides") or "").strip()
+    if not raw:
+        return base
+    try:
+        over = json.loads(raw)
+        if isinstance(over, dict) and host in over:
+            return int(over[host])
+    except (ValueError, TypeError):
+        pass
+    return base
+
+
+def _gpu_card_driver(host, idx):
+    """(service, MB) holding the most VRAM on this card, or None.
+
+    This is what turns "GPU 1 is hot" into "GPU 1 is hot and ollama is what's
+    on it" — the difference between an alert you read and one you act on.
+    """
+    try:
+        from backend.api.gpu_cockpit import _live_services
+        best = None
+        for svc in _live_services(host):
+            mb = (svc.get("by_card") or {}).get(str(idx))
+            if mb and (best is None or mb > best[1]):
+                best = (svc["service"], mb)
+        return best
+    except Exception:
+        return None
+
+
+def _fan_note(card):
+    """'fan already at 100% — no cooling headroom' vs 'fan at 62%'.
+
+    Worth its own helper because it is the single most useful sentence in a
+    thermal alert: it says whether there is anything left to try.
+    """
+    fan = card.get("fan")
+    if fan is None:
+        return ""
+    if fan >= 95:
+        return " Fan is already at 100% — there is no cooling headroom left."
+    return f" Fan is at {round(fan)}%."
+
+
+def notify_gpu_cards(s, rules):
+    """Per-card thermal / throttle / fan / VRAM alerting for every host."""
+    import app as _app
+    now = int(time.time())
+    seen_keys = set()
+    for host, cards, online in _app.fleet_gpu_cards():
+        # A stale snapshot from an offline host says nothing about the card's
+        # temperature now. Alerting on it would report a machine that may well
+        # be powered off.
+        if not online:
+            continue
+        temp_c = _gpu_temp_threshold(s, host)
+        hyst = max(2, temp_c // 20)          # clear a few degrees below the trip
+        for g in cards:
+            idx = g.get("idx")
+            if idx is None:
+                continue
+            label = f"{host}:GPU {idx}" if host != "local" else f"GPU {idx}"
+            name = g.get("name") or "GPU"
+            temp = g.get("temp")
+            mask = g.get("throttle_mask") or 0
+
+            # ── thermal throttling ──────────────────────────────────────────
+            key = f"gpu:throttle:{host}:{idx}"
+            seen_keys.add(key)
+            thr_active = bool(mask & _app._THERMAL_BITS)
+            need = _gpu_setting_int(s, "gpu_throttle_sustain_s", 120)
+            if _sustained(key, thr_active, need, now):
+                who = _gpu_card_driver(host, idx)
+                reasons = ", ".join(g.get("throttle") or []) or "thermal"
+                detail = (f"{name} on {host} is running below its rated clocks "
+                          f"({reasons}), sustained for over {need // 60} min. "
+                          f"Temperature {round(temp or 0)} °C.")
+                if who:
+                    detail += f" {who[0]} holds {round(who[1])} MB on this card."
+                detail += _fan_note(g)
+                _app._emit(s, key, "critical",
+                           f"🔴 {label} is thermally throttling", detail, rules=rules)
+            elif not thr_active:
+                _app._clear(key)
+
+            # ── running hot (not throttling yet) ────────────────────────────
+            key = f"gpu:temp:{host}:{idx}"
+            seen_keys.add(key)
+            need = _gpu_setting_int(s, "gpu_temp_sustain_s", 180)
+            hot = temp is not None and temp >= temp_c
+            if _sustained(key, hot, need, now):
+                who = _gpu_card_driver(host, idx)
+                detail = (f"{name} on {host} has been at or above {temp_c} °C for "
+                          f"over {need // 60} min (now {round(temp)} °C).")
+                if who:
+                    detail += f" {who[0]} holds {round(who[1])} MB on this card."
+                detail += _fan_note(g)
+                _app._emit(s, key, "critical", f"🔴 {label} is running hot", detail, rules=rules)
+            elif temp is not None and temp < (temp_c - hyst):
+                # Hysteresis: clear only once it has genuinely come down, not the
+                # instant it dips a tenth of a degree under the trip point.
+                _app._clear(key)
+
+            # ── fan stall ───────────────────────────────────────────────────
+            # `fan is not None` is load-bearing: a passively cooled datacentre
+            # card reports no fan at all, and treating that as 0% would page the
+            # user about hardware that has no fan to stall.
+            key = f"gpu:fanstall:{host}:{idx}"
+            seen_keys.add(key)
+            fan = g.get("fan")
+            if s.get("gpu_fanstall_alerts", "1") == "1" and fan is not None:
+                stalled = fan == 0 and (temp or 0) >= 50
+                if _sustained(key, stalled, 60, now):
+                    _app._emit(s, key, "critical", f"🔴 {label} fan has stopped",
+                               f"{name} on {host} reports a fan speed of 0% while the card "
+                               f"is at {round(temp or 0)} °C. A seized fan or an unplugged "
+                               f"header will cook a GPU under load.", rules=rules)
+                elif not stalled:
+                    _app._clear(key)
+
+            # ── per-card VRAM pressure ──────────────────────────────────────
+            key = f"gpu:vram:{host}:{idx}"
+            seen_keys.add(key)
+            mt, mu = g.get("mem_total") or 0, g.get("mem_used") or 0
+            pct = (mu / mt * 100) if mt else 0
+            lim = _gpu_setting_int(s, "gpu_vram_alert_pct", 95)
+            need = _gpu_setting_int(s, "gpu_vram_sustain_s", 300)
+            if _sustained(key, mt and pct >= lim, need, now):
+                who = _gpu_card_driver(host, idx)
+                detail = (f"{name} on {host} is {round(pct)}% full "
+                          f"({round(mu)} of {round(mt)} MB).")
+                if who:
+                    detail += f" Largest consumer: {who[0]} at {round(who[1])} MB."
+                _app._emit(s, key, "warning", f"🟠 {label} VRAM is nearly full", detail, rules=rules)
+            elif not mt or pct < (lim - 3):
+                _app._clear(key)
+
+            # ── idle but drawing power (opt-in, off by default) ─────────────
+            idle_w = _gpu_setting_int(s, "gpu_idle_watts", 0)
+            if idle_w:
+                key = f"gpu:idlewatts:{host}:{idx}"
+                seen_keys.add(key)
+                wasteful = (g.get("util") or 0) < 5 and (g.get("power") or 0) >= idle_w
+                need = _gpu_setting_int(s, "gpu_idle_sustain_s", 1800)
+                if _sustained(key, wasteful, need, now):
+                    _app._emit(s, key, "warning", f"🟠 {label} is idle but drawing {round(g.get('power') or 0)} W",
+                               f"{name} on {host} has been idle for over {need // 60} min while "
+                               f"drawing at least {idle_w} W.", rules=rules)
+                elif not wasteful:
+                    _app._clear(key)
+
+    # ── a card that was reporting has stopped ───────────────────────────────
+    if s.get("gpu_missing_alerts", "1") == "1":
+        try:
+            _notify_gpu_missing(s, rules, now)
+        except Exception as e:
+            print("notify gpu missing error:", e, flush=True)
+
+
+# {host: {card idx: last ts it was seen}}. Remembers what each host was
+# reporting, so a card disappearing is detectable at all. Only hosts observed in
+# THIS process count: after a restart the baseline is whatever is present then,
+# which can delay detection but can never invent a card that was never there.
+_GPU_ROSTER = {}
+
+# How long a card may stay missing before it is treated as deliberately removed
+# rather than failed. Past this the alert clears and the roster forgets it —
+# otherwise pulling a GPU out of a machine would leave a critical alert armed
+# forever, which is the same false-alarm the cockpit's "retired" state avoids.
+_GPU_RETIRE_S = 3600
+
+
+def _notify_gpu_missing(s, rules, now):
+    import app as _app
+    for host, cards, online in _app.fleet_gpu_cards():
+        if not online:
+            continue          # an offline host is a host alert, not a card alert
+        present = {g["idx"] for g in cards if g.get("idx") is not None}
+        roster = _GPU_ROSTER.setdefault(host, {})
+        for idx in present:
+            key = f"gpu:missing:{host}:{idx}"
+            if idx in roster and roster[idx] < now:
+                _app._clear(key)                  # it's back
+                _GPU_SINCE.pop(key, None)
+            roster[idx] = now
+        for idx in sorted(set(roster) - present):
+            key = f"gpu:missing:{host}:{idx}"
+            gone_for = now - roster[idx]
+            if gone_for > _GPU_RETIRE_S:
+                # Deliberately removed, not failed. Stop expecting it.
+                _app._clear(key)
+                _GPU_SINCE.pop(key, None)
+                roster.pop(idx, None)
+                continue
+            # Sustained here too: one poll where nvidia-smi timed out under load
+            # is not a missing card.
+            if _sustained(key, True, 120, now):
+                label = f"{host}:GPU {idx}" if host != "local" else f"GPU {idx}"
+                _app._emit(s, key, "critical", f"🔴 {label} has stopped reporting",
+                           f"{host} was reporting GPU {idx} until {gone_for // 60} min ago and no "
+                           f"longer does. A card that falls off the bus usually means a driver "
+                           f"crash (Xid) or a power/riser fault. If you removed it deliberately, "
+                           f"this clears itself after an hour.", rules=rules)
+
+
 def notify_scan():
     import app as _app
     s = _app.get_settings()
@@ -186,6 +438,12 @@ def notify_scan():
                   f"({round(100*mem_used/mem_total)}% used).", rules=rules)
         else:
             _app._clear(key)
+
+    # ── Per-card GPU health across the whole fleet ───────────────────────────
+    try:
+        notify_gpu_cards(s, rules)
+    except Exception as e:
+        print("notify_scan gpu error:", e, flush=True)
 
     # ── Disks crossing the configured threshold ───────────────────────────────
     try: disk_thr = int(s.get("disk_alert_pct") or 90)

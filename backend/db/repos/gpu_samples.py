@@ -157,6 +157,18 @@ def latest(host: str, conn=None) -> list:
         (host, host)).fetchall()
 
 
+def last_seen(host: str, conn=None) -> dict:
+    """{card idx: last sample ts} for a host.
+
+    Distinguishes "this card stopped reporting a minute ago" (an incident) from
+    "this card was removed from the machine last month" (history). Without it,
+    every retired GPU would raise a permanent critical alert.
+    """
+    c = conn or connection()
+    return {r[0]: r[1] for r in c.execute(
+        "SELECT idx, MAX(ts) FROM gpu_samples WHERE host=? GROUP BY idx", (host,)).fetchall()}
+
+
 def min_ts(host: str, conn=None):
     """Earliest raw sample for a host, or None when it has no history yet."""
     c = conn or connection()

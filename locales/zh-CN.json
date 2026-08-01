@@ -844,5 +844,16 @@
   "col.peak_temp": "峰值温度",
   "col.peak_fan": "峰值风扇",
   "col.capped": "限功耗",
-  "col.est_energy": "估算能耗"
+  "col.est_energy": "估算能耗",
+  "gpu.st_retired": "已退役",
+  "gpu.last_seen": "最后上报于 {t}",
+  "set.gpu_group": "显卡",
+  "set.gpu_temp": "温度告警（°C）",
+  "set.gpu_temp_sustain": "…持续时长（秒）",
+  "set.gpu_throttle_sustain": "降频持续时长（秒）",
+  "set.gpu_vram": "单卡显存告警（%）",
+  "set.gpu_overrides": "按主机覆盖温度阈值",
+  "set.gpu_overrides_cap": "JSON，主机名到 °C。采用人为调低功耗上限的机器本来就更热 — 为它单独设置阈值，而不是放宽整个集群。",
+  "set.gpu_fanstall": "当温热显卡的风扇读数为 0% 时告警",
+  "set.gpu_missing": "当显卡停止上报时告警"
 }

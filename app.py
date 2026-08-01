@@ -3673,6 +3673,24 @@ def _poll_one_host(h):
     except Exception as e:
         print(f"host poll error ({h.get('name')}):", e, flush=True)
 
+def fleet_gpu_cards():
+    """[(host, cards, online)] for every host that reports GPUs right now.
+
+    One accessor so the alert scan doesn't need to know that the hub keeps its
+    cards in LATEST while remotes keep theirs in HOST_DATA. Offline hosts are
+    included with online=False so the caller can decide — a stale reading must
+    not be alerted on as if it were current."""
+    out = [("local", list(LATEST.get("gpus") or []), True)]
+    with HOST_DATA_LOCK:
+        items = list(HOST_DATA.items())
+    for name, entry in items:
+        if "data" not in entry:
+            continue
+        cards = ((entry["data"].get("host") or {}).get("gpus")) or []
+        if cards:
+            out.append((name, list(cards), _host_is_online(entry)))
+    return out
+
 def _record_host_sample(name, hostd):
     """Persist one poll's vitals into host_samples(+_1h) — the storage that the
     per-host Costs view (and future per-host history charts) integrate over.
@@ -4073,6 +4091,25 @@ SETTING_DEFAULTS = {
     "webhook_url":         "",
     "alert_min_level":     "warning",  # "warning" or "critical"
     "disk_alert_pct":      "90",       # disk usage % that trips an alert
+    # ── GPU thermal / throttle alerting (the GPU cockpit) ─────────────────────
+    # Every threshold is paired with a SUSTAIN window, because the whole
+    # difference between a useful GPU alert and a noisy one is duration: a card
+    # touching 85 °C for two seconds mid-batch is not an incident, and a tool
+    # that pages for it gets muted within a week.
+    "gpu_temp_alert_c":      "84",     # per-card temperature that trips an alert
+    "gpu_temp_sustain_s":    "180",    # ...only after this many seconds above it
+    "gpu_throttle_sustain_s": "120",   # thermal throttling sustained this long
+    "gpu_vram_alert_pct":    "95",     # per-card VRAM %
+    "gpu_vram_sustain_s":    "300",
+    "gpu_fanstall_alerts":   "1",      # fan reading 0% on a warm card that HAS a fan
+    "gpu_missing_alerts":    "1",      # a card that was reporting stops reporting
+    "gpu_idle_watts":        "",       # blank = off; W drawn while idle before warning
+    "gpu_idle_sustain_s":    "1800",
+    # Per-host temperature overrides as JSON {"host": celsius}. Needed, not
+    # optional: a box whose cards run at a deliberately lowered power limit
+    # lives in the low-to-mid 80s by design, and a single global threshold
+    # would cry wolf there while being too slack for a well-cooled machine.
+    "gpu_temp_overrides":    "",
     "kwh_price":           "",         # electricity price per kWh (day/peak in dual mode); empty hides the cost card (#25)
     "currency":            "$",        # symbol shown next to costs
     # ── dual (day/night) tariff — revamp ──────────────────────────────────────
@@ -4211,6 +4248,51 @@ def _validate_retention_settings(updates):
         return "Retention days must be a whole number."
     if days < 1 or days > 3650:
         return "Retention days must be between 1 and 3650."
+    return None
+
+def _validate_gpu_alert_settings(updates):
+    """Reject malformed GPU alert thresholds before they reach the store.
+
+    The per-host override field takes JSON typed by a human, so it is validated
+    at the door rather than being tolerated at read time: a silently-ignored
+    malformed override means the user believes a host has a raised threshold
+    when it does not, and finds out via a 3am page.
+    """
+    if "gpu_temp_overrides" in updates:
+        raw = (updates["gpu_temp_overrides"] or "").strip()
+        if raw:
+            try:
+                over = json.loads(raw)
+            except ValueError:
+                return "Per-host GPU temperature overrides must be JSON, e.g. {\"vader\": 88}."
+            if not isinstance(over, dict):
+                return "Per-host GPU temperature overrides must be a JSON object of host → °C."
+            for host, val in over.items():
+                if not isinstance(host, str) or not host:
+                    return "Each GPU temperature override needs a host name."
+                try:
+                    c = int(val)
+                except (TypeError, ValueError):
+                    return f"GPU temperature override for '{host}' must be a whole number of °C."
+                if not (50 <= c <= 110):
+                    return f"GPU temperature override for '{host}' must be between 50 and 110 °C."
+    for key, lo, hi, what in (("gpu_temp_alert_c", 50, 110, "GPU temperature alert"),
+                              ("gpu_vram_alert_pct", 50, 100, "GPU VRAM alert"),
+                              ("gpu_temp_sustain_s", 0, 3600, "GPU temperature sustain"),
+                              ("gpu_throttle_sustain_s", 0, 3600, "GPU throttle sustain"),
+                              ("gpu_vram_sustain_s", 0, 3600, "GPU VRAM sustain"),
+                              ("gpu_idle_sustain_s", 0, 86400, "GPU idle sustain")):
+        if key not in updates:
+            continue
+        val = (updates[key] or "").strip()
+        if not val:
+            continue
+        try:
+            n = int(val)
+        except ValueError:
+            return f"{what} must be a whole number."
+        if not (lo <= n <= hi):
+            return f"{what} must be between {lo} and {hi}."
     return None
 
 # ── Uptime checks: HTTP/TCP endpoint monitors ──────────────────────────────

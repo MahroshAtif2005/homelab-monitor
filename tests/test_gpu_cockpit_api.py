@@ -88,6 +88,37 @@ class TestHistoryShape(unittest.TestCase):
         self.assertEqual(d["cards"], [])
 
 
+class TestMissingCards(unittest.TestCase):
+    """A card missing from the live snapshot has two very different causes."""
+
+    def setUp(self):
+        self.c = _client()
+        _wipe()
+
+    def test_a_card_removed_long_ago_is_retired_not_an_incident(self):
+        # Found on the live hub: it still had history for a GPU physically taken
+        # out of the machine weeks earlier. Reporting that as "fell off the bus"
+        # would leave a permanent false critical after any hardware change.
+        old = int(time.time()) - 7 * 86400
+        _seed("vader", [(old + t, [_card(0), _card(1)]) for t in range(0, 300, 10)])
+        d = self.c.get("/api/gpu/history?host=vader&range=all").get_json()
+        self.assertTrue(all(c["status"] == "retired" for c in d["cards"]),
+                        [c["status"] for c in d["cards"]])
+
+    def test_a_card_that_stopped_reporting_just_now_is_gone(self):
+        now = int(time.time())
+        _seed("vader", [(now - t, [_card(0), _card(1)]) for t in range(60, 0, -10)])
+        d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        self.assertTrue(all(c["status"] == "gone" for c in d["cards"]),
+                        [c["status"] for c in d["cards"]])
+
+    def test_last_seen_is_reported_so_the_ui_can_say_when(self):
+        now = int(time.time())
+        _seed("vader", [(now - 100, [_card(0)])])
+        d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        self.assertEqual(d["cards"][0]["last_seen"], now - 100)
+
+
 class TestSupportsMap(unittest.TestCase):
     def setUp(self):
         self.c = _client()
