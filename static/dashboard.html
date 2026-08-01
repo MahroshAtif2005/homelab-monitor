@@ -3836,13 +3836,24 @@ let GPU_SEL_CARD = null;
 function renderGpuMetricChart(d){
   const def = GPU_METRICS[GPU_METRIC];
   const labels = fmtLabels(d.labels);
-  const ds = (d.cards||[]).map((c,i)=>({
-    label: `GPU ${c.idx}`,
-    data: c.series[GPU_METRIC] || [],
-    borderColor: gpuCardColor(i),
-    backgroundColor: gpuCardColor(i)+'22',
-    pointRadius: 0, tension: .25, spanGaps: false, borderWidth: 1.8,
-  })).filter(x=>x.data.some(v=>v!=null));
+  // A card clicked in the small-multiples view is emphasised here: thicker and
+  // fully opaque while the rest fade back. Clicking promises "the full chart for
+  // this card", so arriving at a chart where it's indistinguishable from its
+  // neighbours would not honour that.
+  const sel = GPU_SEL_CARD;
+  const hasSel = sel != null && (d.cards||[]).some(c => c.idx === sel);
+  const ds = (d.cards||[]).map((c,i)=>{
+    const on = !hasSel || c.idx === sel;
+    return {
+      label: `GPU ${c.idx}`,
+      data: c.series[GPU_METRIC] || [],
+      borderColor: gpuCardColor(i) + (on ? '' : '55'),
+      backgroundColor: gpuCardColor(i)+'22',
+      pointRadius: 0, tension: .25, spanGaps: false,
+      borderWidth: on && hasSel ? 2.6 : 1.8,
+      order: on ? 0 : 1,
+    };
+  }).filter(x=>x.data.some(v=>v!=null));
   // Threshold line, only where a threshold means something.
   const ann = (GPU_METRIC==='temp') ? {
     id:'gpuThreshold',
@@ -3884,7 +3895,10 @@ function renderGpuMetricChart(d){
     plugins: ann ? [bands, ann] : [bands]});
   const lg = document.getElementById('gpu-metric-legend');
   if(lg) lg.innerHTML = `<span><span class="band" style="background:var(--crit)"></span> ${I18N.t('gpu.lg_throttle','thermal throttling')}</span>`
-    + (GPU_METRIC==='temp' ? `<span><i style="background:var(--crit)"></i> ${I18N.tf('gpu.lg_thr','{h}°C alert threshold',{h:d.hot_c})}</span>` : '');
+    + (GPU_METRIC==='temp' ? `<span><i style="background:var(--crit)"></i> ${I18N.tf('gpu.lg_thr','{h}°C alert threshold',{h:d.hot_c})}</span>` : '')
+    + (hasSel ? `<span><a href="#" id="gpu-clear-sel">${I18N.tf('gpu.lg_focus','focused on GPU {n} — show all',{n:sel})}</a></span>` : '');
+  const clr = document.getElementById('gpu-clear-sel');
+  if(clr) clr.onclick = e => { e.preventDefault(); GPU_SEL_CARD = null; renderGpuCards(GPUC); };
 }
 
 // The whole box as one unit: VRAM stacked per card against capacity, pooled
@@ -8526,7 +8540,11 @@ document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localSt
 // choice sticks so a user who prefers one doesn't re-pick it on every visit.
 (function(){
   const a=document.getElementById('gpu-view-card'), b=document.getElementById('gpu-view-metric');
-  const set = v => { GPU_VIEW=v; localStorage.setItem('hl_gpuview',v); syncGpuViewButtons(); if(GPUC) renderGpuCards(GPUC); };
+  // Switching views by hand clears any card focus — the focus came from
+  // clicking a specific card, and asking for the whole view means "show me
+  // everything again".
+  const set = v => { GPU_VIEW=v; GPU_SEL_CARD=null; localStorage.setItem('hl_gpuview',v);
+                     syncGpuViewButtons(); if(GPUC) renderGpuCards(GPUC); };
   if(a) a.onclick=()=>set('card');
   if(b) b.onclick=()=>set('metric');
   GPU_VIEW = localStorage.getItem('hl_gpuview') || 'card';

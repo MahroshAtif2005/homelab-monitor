@@ -25,24 +25,40 @@ def _fake_smi(**by_query):
     only the queries it cares about; anything it doesn't declare comes back
     rc=2/empty — exactly how nvidia-smi rejects a field name it doesn't know.
     Without this, one fixed stdout is handed to every query and the enrichment
-    pass happily parses the card CSV as clock/throttle data."""
+    pass happily parses the card CSV as clock/throttle data.
+
+    Matching is LONGEST-KEY-FIRST, which matters for the card query: the
+    fan-inclusive form ends in `temperature.gpu,fan.speed` and the older-driver
+    fallback ends in `temperature.gpu`, so a plain iteration order can answer the
+    fan query with the fallback's data and leave the fallback path untested.
+    Use the `CARDS_FAN` / `CARDS_BASE` constants below rather than hand-written
+    fragments.
+    """
+    keys = sorted(by_query, key=len, reverse=True)
+
     def run(args, **kw):
         q = next((a for a in args if a.startswith("--query")), "")
-        for frag, out in by_query.items():
+        for frag in keys:
             if frag in q:
-                return _smi_result(out)
+                return _smi_result(by_query[frag])
         return _smi_result("", rc=2)
     return run
 
 
+# The two card-query forms, spelled out so a test says which one it is answering.
+CARDS_FAN = "temperature.gpu,fan.speed"      # modern driver
+CARDS_BASE = "power.draw,temperature.gpu"    # matches both; use only as fallback
+
+
 class TestNvidiaCards(unittest.TestCase):
     def test_parses_every_card(self):
-        # No fan column: an older driver that rejects fan.speed falls back to the
-        # original 7-field query and must still report every card, unchanged.
+        # No fan column: an older driver REJECTS fan.speed (rc != 0, no rows), so
+        # only the base query answers. This exercises the real fallback path —
+        # the fan query genuinely returns nothing here.
         out = ("0, NVIDIA GeForce RTX 3090, 12, 20990, 24576, 118.53, 45\n"
                "1, NVIDIA GeForce RTX 3090, 0, 3, 24576, 21.06, 38\n"
                "2, NVIDIA GeForce RTX 3090, 97, 24001, 24576, 279.80, 71\n")
-        with mock.patch("probe.subprocess.run", _fake_smi(**{"temperature.gpu": out})):
+        with mock.patch("probe.subprocess.run", _fake_smi(**{CARDS_FAN: "", CARDS_BASE: out})):
             cards = probe._nvidia_cards()
         self.assertEqual(len(cards), 3)
         self.assertEqual(cards[0], {"idx": 0, "name": "NVIDIA GeForce RTX 3090",
@@ -55,7 +71,7 @@ class TestNvidiaCards(unittest.TestCase):
     def test_fan_speed_is_read_when_reported(self):
         out = ("0, NVIDIA GeForce RTX 3090, 12, 20990, 24576, 118.53, 45, 62\n"
                "1, NVIDIA GeForce RTX 3090, 97, 24001, 24576, 279.80, 86, 100\n")
-        with mock.patch("probe.subprocess.run", _fake_smi(**{"fan.speed": out})):
+        with mock.patch("probe.subprocess.run", _fake_smi(**{CARDS_FAN: out})):
             cards = probe._nvidia_cards()
         self.assertEqual(cards[0]["fan"], 62)
         self.assertEqual(cards[1]["fan"], 100)
@@ -65,14 +81,14 @@ class TestNvidiaCards(unittest.TestCase):
         # would read as a stalled fan and trip the fan-stall alert on hardware
         # that has no fan to stall.
         out = "0, Tesla V100-SXM2-16GB, 40, 8000, 16384, 210.00, 58, [N/A]\n"
-        with mock.patch("probe.subprocess.run", _fake_smi(**{"fan.speed": out})):
+        with mock.patch("probe.subprocess.run", _fake_smi(**{CARDS_FAN: out})):
             cards = probe._nvidia_cards()
         self.assertNotIn("fan", cards[0])
         self.assertEqual(cards[0]["temp"], 58)
 
     def test_na_fields_degrade_to_zero(self):
         out = "0, Quadro P2000, [N/A], 512, 5120, [Not Supported], [N/A]\n"
-        with mock.patch("probe.subprocess.run", _fake_smi(**{"temperature.gpu": out})):
+        with mock.patch("probe.subprocess.run", _fake_smi(**{CARDS_FAN: "", CARDS_BASE: out})):
             cards = probe._nvidia_cards()
         self.assertEqual(cards[0]["util"], 0)
         self.assertEqual(cards[0]["power"], 0)

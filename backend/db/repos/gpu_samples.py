@@ -61,9 +61,11 @@ def record(conn, ts: int, host: str, cards, interval: int = 10):
         # app-clock bits are normal operation and would otherwise report a
         # perfectly healthy idle card as throttling all night.
         secs = interval if (thr & _THERMAL_BITS) else 0
+        fan = g.get("fan")
         roll.append(((ts // 3600) * 3600, host, idx,
                      g.get("util"), g.get("mem_used"), g.get("mem_total"), g.get("power"),
-                     g.get("temp"), g.get("temp"), g.get("fan"), g.get("fan"), secs))
+                     g.get("temp"), g.get("temp"), fan, fan,
+                     1 if fan is not None else 0, secs))
     if not raw:
         return
     conn.executemany(
@@ -71,19 +73,38 @@ def record(conn, ts: int, host: str, cards, interval: int = 10):
         f"VALUES(?,?,?{',?' * len(_COLS)})", raw)
     # Averages are recomputed incrementally from the running count, the same way
     # host_samples_1h does it; MAX columns take the greater of stored and new.
+    # Two things this UPSERT has to get right, both of them the "absent is not
+    # zero" rule surviving into the rollup:
+    #
+    # * A MAX must stay NULL while nothing has reported. `MAX(COALESCE(x,-273),
+    #   COALESCE(excluded.x,-273))` poisons the column to -273 the moment two
+    #   polls without the metric land in the same hour — a fabricated reading,
+    #   which is exactly what this feature refuses to do everywhere else.
+    # * An average must divide by the number of polls that actually REPORTED the
+    #   metric, not by the total poll count. Dividing `fan` by `cnt` drags an
+    #   intermittently-reported fan toward zero — and a fan reading near zero is
+    #   the thing the fan-stall alert fires on.
     conn.executemany(
         "INSERT INTO gpu_samples_1h(ts,host,idx,util,mem_used,mem_total,power,"
-        "temp,temp_max,fan,fan_max,throttle_secs,cnt) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1) "
+        "temp,temp_max,fan,fan_max,fan_cnt,throttle_secs,cnt) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1) "
         "ON CONFLICT(ts,host,idx) DO UPDATE SET "
         "  util=CASE WHEN excluded.util IS NOT NULL THEN (COALESCE(util,0)*cnt+excluded.util)/(cnt+1) ELSE util END,"
         "  mem_used=CASE WHEN excluded.mem_used IS NOT NULL THEN (COALESCE(mem_used,0)*cnt+excluded.mem_used)/(cnt+1) ELSE mem_used END,"
         "  mem_total=COALESCE(excluded.mem_total, mem_total),"
         "  power=CASE WHEN excluded.power IS NOT NULL THEN (COALESCE(power,0)*cnt+excluded.power)/(cnt+1) ELSE power END,"
         "  temp=CASE WHEN excluded.temp IS NOT NULL THEN (COALESCE(temp,0)*cnt+excluded.temp)/(cnt+1) ELSE temp END,"
-        "  temp_max=MAX(COALESCE(temp_max,-273), COALESCE(excluded.temp_max,-273)),"
-        "  fan=CASE WHEN excluded.fan IS NOT NULL THEN (COALESCE(fan,0)*cnt+excluded.fan)/(cnt+1) ELSE fan END,"
-        "  fan_max=MAX(COALESCE(fan_max,-1), COALESCE(excluded.fan_max,-1)),"
+        "  temp_max=CASE WHEN temp_max IS NULL THEN excluded.temp_max "
+        "                WHEN excluded.temp_max IS NULL THEN temp_max "
+        "                ELSE MAX(temp_max, excluded.temp_max) END,"
+        # Averaged over fan_cnt — the polls that reported a fan — not over cnt.
+        "  fan=CASE WHEN excluded.fan IS NULL THEN fan "
+        "           WHEN fan IS NULL THEN excluded.fan "
+        "           ELSE (fan*fan_cnt+excluded.fan)/(fan_cnt+1) END,"
+        "  fan_max=CASE WHEN fan_max IS NULL THEN excluded.fan_max "
+        "               WHEN excluded.fan_max IS NULL THEN fan_max "
+        "               ELSE MAX(fan_max, excluded.fan_max) END,"
+        "  fan_cnt=fan_cnt+excluded.fan_cnt,"
         "  throttle_secs=throttle_secs+excluded.throttle_secs,"
         "  cnt=cnt+1",
         roll)

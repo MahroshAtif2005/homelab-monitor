@@ -119,6 +119,31 @@ class TestRollup(unittest.TestCase):
             "SELECT throttle_secs FROM gpu_samples_1h WHERE host='vader'").fetchone()[0]
         self.assertEqual(secs, 30)
 
+    def test_a_max_stays_null_while_nothing_reports_it(self):
+        # The MAX columns must not be poisoned to a sentinel. Two consecutive
+        # polls with no fan used to leave fan_max = -1, i.e. a fabricated
+        # reading — exactly what this feature refuses to do everywhere else.
+        self.repo.record(self.conn, 0,  "vader", [_card(0)])     # no fan
+        self.repo.record(self.conn, 10, "vader", [_card(0)])     # no fan
+        fan, fan_max = self.conn.execute(
+            "SELECT fan, fan_max FROM gpu_samples_1h WHERE host='vader'").fetchone()
+        self.assertIsNone(fan)
+        self.assertIsNone(fan_max)
+
+    def test_fan_average_ignores_polls_that_reported_no_fan(self):
+        # Dividing by the total poll count drags an intermittently-reported fan
+        # toward zero — and near-zero is what the fan-stall alert fires on.
+        # Three silent polls then two at 80% must average 80, not 32.
+        for ts in (0, 10, 20):
+            self.repo.record(self.conn, ts, "vader", [_card(0)])          # no fan
+        for ts in (30, 40):
+            self.repo.record(self.conn, ts, "vader", [_card(0, fan=80)])
+        fan, fan_cnt, cnt = self.conn.execute(
+            "SELECT fan, fan_cnt, cnt FROM gpu_samples_1h WHERE host='vader'").fetchone()
+        self.assertEqual(cnt, 5)
+        self.assertEqual(fan_cnt, 2)
+        self.assertAlmostEqual(fan, 80.0, places=6)
+
     def test_each_card_rolls_up_separately(self):
         self.repo.record(self.conn, 0, "vader",
                          [_card(0, temp=80), _card(1, temp=86), _card(2, temp=64)])

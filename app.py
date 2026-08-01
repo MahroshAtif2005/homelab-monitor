@@ -175,6 +175,11 @@ CREATE TABLE IF NOT EXISTS gpu_samples_1h(
   ts INTEGER NOT NULL, host TEXT NOT NULL DEFAULT 'local', idx INTEGER NOT NULL,
   util REAL, mem_used REAL, mem_total REAL, power REAL,
   temp REAL, temp_max REAL, fan REAL, fan_max REAL,
+  -- fan_cnt: how many of this hour's polls actually REPORTED a fan speed. The
+  -- fan average divides by this, not by cnt — otherwise a card that reports a
+  -- fan only intermittently has its average dragged toward zero, and near-zero
+  -- is precisely what the fan-stall alert fires on.
+  fan_cnt INTEGER DEFAULT 0,
   throttle_secs INTEGER DEFAULT 0, cnt INTEGER DEFAULT 1,
   PRIMARY KEY(ts, host, idx));
 CREATE INDEX IF NOT EXISTS idx_gpu_1h_host_ts ON gpu_samples_1h(host, ts);
@@ -372,7 +377,8 @@ _PROC_MIGRATIONS = ("host TEXT NOT NULL DEFAULT 'local'",)
 # but silently dropped temperature, so a remote's thermal history simply didn't
 # exist. Both the raw table and the rollup gain it.
 _COLUMN_MIGRATIONS = (("host_samples", "gpu_temp REAL"),
-                      ("host_samples_1h", "gpu_temp REAL"))
+                      ("host_samples_1h", "gpu_temp REAL"),
+                      ("gpu_samples_1h", "fan_cnt INTEGER DEFAULT 0"))
 # Indexes that cover columns added by the migrations above. They cannot live in
 # _DB_SCHEMA: executescript runs BEFORE the ALTERs, so on an existing database
 # the column wouldn't exist yet and the whole script would fail.
