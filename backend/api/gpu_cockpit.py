@@ -33,6 +33,43 @@ bp = Blueprint('gpu_cockpit', __name__)
 HOT_C = 84
 
 
+def _live_services(host):
+    """[{service, mem, by_card}] holding VRAM on `host` right now.
+
+    Computed server-side for both the hub and a remote so the "which service is
+    on which card" rule lives in exactly one place. Duplicating it in JS is how
+    the two drift into disagreeing about the same box.
+    """
+    import app as _app
+    if host == "local":
+        return [dict(p) for p in (_app.LATEST.get("procs") or []) if (p.get("mem") or 0) > 0]
+    with _app.HOST_DATA_LOCK:
+        entry = _app.HOST_DATA.get(host)
+    if not entry or "data" not in entry:
+        return []
+    h = entry["data"].get("host") or {}
+    # Same precedence as the poller's stored attribution: container names first
+    # (a human recognises "ollama", not "llama-server"), bare process names for
+    # whatever VRAM lives outside a container.
+    rows = _app._host_vram_rows(0, host, h)
+    by_pid_card = {}
+    for p in (h.get("gpu_procs") or []):
+        if p.get("by_card"):
+            by_pid_card[str(p.get("name") or "")] = p["by_card"]
+    out = []
+    for _ts, svc, mem, _host in rows:
+        item = {"service": svc, "mem": mem}
+        # A container's per-card split comes from the process it contains; match
+        # on the process name we stored under "host:<name>", else leave it out
+        # rather than guessing.
+        bare = svc[5:] if svc.startswith("host:") else svc
+        if bare in by_pid_card:
+            item["by_card"] = by_pid_card[bare]
+        out.append(item)
+    out.sort(key=lambda x: -(x["mem"] or 0))
+    return out
+
+
 def _live_cards(host):
     """(cards, aggregate, procs, at, online) as most recently seen for `host`.
 
@@ -233,12 +270,55 @@ def api_gpu_history():
         "cards": cards, "combined": combined,
         "capacity_mb": capacity, "power_limit": pooled_limit,
         "hot_c": HOT_C,
+        "now_services": _live_services(host),
+        "now_pooled": _pooled_now(live_cards, live_agg),
         # An empty payload has two very different causes and the UI must not
         # conflate them: a host with no GPU at all, versus a GPU host whose
         # history hasn't accumulated yet.
         "has_gpu": bool(cards),
         "has_history": n > 0,
     })
+
+
+def _pooled_now(cards, agg):
+    """The whole box in one block: VRAM and power summed, utilisation averaged,
+    temperature and fan taken as the MAX across cards.
+
+    Max, not mean, for temp and fan on purpose — the headline number should be
+    the card in trouble. A mean over three cards where one is at 87 °C and two
+    idle at 45 °C reads as a comfortable 59 °C and tells the user nothing.
+    Optionals are contributed only by the cards that measured them, so a
+    passively cooled card can't drag the fan figure toward a value nothing
+    reported.
+    """
+    if not cards:
+        return None
+    fans = [c["fan"] for c in cards if c.get("fan") is not None]
+    caps = [c.get("power_limit") or 0 for c in cards]
+    out = {
+        "count": len(cards),
+        "util": round(sum(c.get("util") or 0 for c in cards) / len(cards)),
+        "mem_used": round(sum(c.get("mem_used") or 0 for c in cards)),
+        "mem_total": round(sum(c.get("mem_total") or 0 for c in cards)),
+        "power": round(sum(c.get("power") or 0 for c in cards)),
+        "temp_max": round(max((c.get("temp") or 0) for c in cards)),
+        "busy": sum(1 for c in cards if (c.get("util") or 0) >= 5),
+    }
+    if fans:
+        out["fan_avg"] = round(sum(fans) / len(fans))
+        out["fan_max"] = max(fans)
+        rpms = [c["fan_rpm"] for c in cards if c.get("fan_rpm") is not None]
+        if rpms:
+            out["fan_rpm_max"] = max(rpms)
+    # Only publish a pooled cap when EVERY card contributed one, else the ratio
+    # would exceed 100% purely because the denominator is missing a card the
+    # numerator includes.
+    if all(caps):
+        out["power_limit"] = round(sum(caps))
+    names = sorted({c.get("name") or "GPU" for c in cards})
+    out["model"] = (f"{len(cards)}× {names[0]}" if len(names) == 1 and len(cards) > 1
+                    else " + ".join(names))
+    return out
 
 
 def _now_block(live):
