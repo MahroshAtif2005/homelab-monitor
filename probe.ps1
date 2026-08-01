@@ -409,6 +409,67 @@ function Read-Services {
     } catch { return @{} }
 }
 
+# ── AI models (Windows parity with probe.py's read_ai_models) ─────────────────
+# Ollama on this host: the resident set from /api/ps (live VRAM) cross-referenced
+# with the on-disk catalogue from /api/tags, so a model shows up whether or not it
+# is currently loaded. Row shape matches probe.py exactly — the hub merges local
+# and remote entries through the same code path. Read-only, 2 s timeouts, silent
+# when ollama is not running here.
+function Read-OllamaModels {
+    $api = 'http://127.0.0.1:11434'
+    $host_name = $env:COMPUTERNAME
+
+    # Resident set first: model name -> live VRAM in MB.
+    $loaded = @{}
+    try {
+        $ps = Invoke-RestMethod -Uri "$api/api/ps" -TimeoutSec 2 -ErrorAction Stop
+        foreach ($m in @($ps.models)) {
+            if (-not $m.name) { continue }
+            $vram = $null
+            if ($m.size_vram) { $vram = [int][math]::Round($m.size_vram / 1MB) }
+            $loaded[$m.name] = $vram
+        }
+    } catch { }
+
+    # Full on-disk catalogue with registry detail. Note the real field names:
+    # `name` already carries the tag, params/quant live under `details`, and the
+    # timestamp is `modified_at`.
+    $out = @()
+    $known = @{}
+    try {
+        $tags = Invoke-RestMethod -Uri "$api/api/tags" -TimeoutSec 2 -ErrorAction Stop
+        foreach ($m in @($tags.models)) {
+            if (-not $m.name) { continue }
+            $known[$m.name] = $true
+            $isLoaded = $loaded.ContainsKey($m.name)
+            $out += [ordered]@{
+                host       = $host_name
+                service    = 'ollama'
+                provider   = 'ollama'
+                model      = $m.name
+                loaded     = $isLoaded
+                vram_mb    = $(if ($isLoaded) { $loaded[$m.name] } else { $null })
+                size_bytes = $m.size
+                family     = $m.details.family
+                param_size = $m.details.parameter_size
+                quant      = $m.details.quantization_level
+                modified   = $m.modified_at
+            }
+        }
+    } catch { }
+
+    # A model can be resident without being on disk (deleted while loaded, pulled
+    # through another path) — keep it visible rather than letting it vanish.
+    foreach ($name in $loaded.Keys) {
+        if ($known.ContainsKey($name)) { continue }
+        $out += [ordered]@{
+            host = $host_name; service = 'ollama'; provider = 'ollama'
+            model = $name; loaded = $true; vram_mb = $loaded[$name]
+        }
+    }
+    return ,$out      # unary comma: keep a 0/1-element result an ARRAY through the pipeline
+}
+
 # ── Assemble + emit ───────────────────────────────────────────────────────────
 # Merge helper-returned hashtables into one host block.
 $merged = @{}
@@ -424,10 +485,12 @@ Merge (Read-Services)
 $merged.disks    = (Read-Disks)
 $merged.hostname = $env:COMPUTERNAME
 
+# Model catalog sits alongside `host`, matching probe.py's payload shape.
 $payload = [ordered]@{
     host          = $merged
+    model_catalog = @(Read-OllamaModels)
     at            = (Epoch (Get-Date))
-    probe_version = 'win-0.1'
+    probe_version = 'win-0.2'
 }
 
 # Single compact JSON line on stdout, nothing else.

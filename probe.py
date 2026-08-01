@@ -371,27 +371,134 @@ def _smi_int(v):
         return 0
 
 
+def _smi_opt(v):
+    """Like _smi_int, but an unsupported field stays ABSENT instead of becoming 0.
+
+    The difference matters: a card that doesn't report fan speed and a card whose
+    fans are stopped are not the same claim, and the cockpit draws "not reported
+    by this driver" for the former and a fan-stall alert for the latter. Mirrors
+    the hub's rule for mem_util (see app._enrich_gpus)."""
+    s = (v or "").strip()
+    if not s or s.startswith("["):
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+# nvidia-smi's throttle bitmask → the reasons a human should act on. Idle,
+# app-clocks, sync-boost and display bits are normal and intentionally ignored.
+# Kept byte-identical to app._THROTTLE_BITS: the hub decodes its own cards with
+# the same table, and a drift here would make `local` and a remote disagree about
+# what "throttling" means.
+_THROTTLE_BITS = [
+    (0x0000000000000004, "Power cap"),    # SW_POWER_CAP
+    (0x0000000000000008, "HW slowdown"),  # HW_SLOWDOWN (thermal/power/other)
+    (0x0000000000000020, "SW thermal"),   # SW_THERMAL_SLOWDOWN
+    (0x0000000000000040, "HW thermal"),   # HW_THERMAL_SLOWDOWN
+    (0x0000000000000080, "Power brake"),  # HW_POWER_BRAKE_SLOWDOWN
+]
+_THERMAL_BITS = 0x0000000000000068         # SW thermal | HW thermal | HW slowdown
+
+
+def _decode_throttle(hexstr):
+    """Throttle bitmask → (mask, [reasons]). (0, []) when unreadable."""
+    try:
+        mask = int(str(hexstr).strip(), 16)
+    except (TypeError, ValueError):
+        return 0, []
+    return mask, [label for bit, label in _THROTTLE_BITS if mask & bit]
+
+
+def _smi_rows(fields, flag="--query-gpu"):
+    """`nvidia-smi <flag>=<fields>` → list of split CSV rows, [] on failure.
+
+    `flag` selects the query family: --query-gpu for per-card telemetry,
+    --query-compute-apps for the process list. Returns [] on a non-zero exit,
+    which is how nvidia-smi rejects a field name the driver doesn't know."""
+    r = subprocess.run(
+        ["nvidia-smi", flag + "=" + fields, "--format=csv,noheader,nounits"],
+        capture_output=True, timeout=3,
+    )
+    if r.returncode != 0:
+        return []
+    return [[x.strip() for x in line.split(",")]
+            for line in r.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+
+
+def _nvidia_enrich(cards):
+    """Attach the deep telemetry the hub has always collected for its own cards —
+    memory-bandwidth utilisation, core/mem clocks, power limit, memory-junction
+    temp, perf state and the throttle reasons — to `cards`, matched by index.
+
+    Runs in its own guard: many consumer cards answer "[N/A]" for half of these
+    and very old drivers don't know some field names at all, so a failure here
+    costs the extra chips, never the core sample. Mutates in place."""
+    by_idx = {c["idx"]: c for c in cards}
+    try:
+        for p in _smi_rows("index,utilization.memory,clocks.current.sm,"
+                           "clocks.current.memory,power.limit,temperature.memory,pstate"):
+            if len(p) < 7:
+                continue
+            g = by_idx.get(_smi_int(p[0]))
+            if g is None:
+                continue
+            for key, raw in (("mem_util", p[1]), ("clk_sm", p[2]), ("clk_mem", p[3]),
+                             ("power_limit", p[4]), ("temp_mem", p[5])):
+                v = _smi_opt(raw)
+                if v is not None:
+                    g[key] = v
+            if p[6] and not p[6].startswith("["):
+                g["pstate"] = p[6]
+    except Exception:
+        pass
+    # The bitmask field was renamed clocks_event_reasons in newer drivers; try the
+    # old name first, fall back, and stop at whichever one actually answers.
+    for field in ("clocks_throttle_reasons.active", "clocks_event_reasons.active"):
+        try:
+            rows = _smi_rows("index," + field)
+        except Exception:
+            continue
+        ok = False
+        for p in rows:
+            if len(p) < 2 or not p[1] or p[1].startswith("["):
+                continue
+            g = by_idx.get(_smi_int(p[0]))
+            if g is None:
+                continue
+            mask, reasons = _decode_throttle(p[1])
+            g["throttle_mask"] = mask
+            g["throttle"] = reasons
+            g["throttled"] = bool(reasons)
+            ok = True
+        if ok:
+            break
+
+
 def _nvidia_cards():
     """Every NVIDIA GPU via nvidia-smi as [{idx,name,util,mem_used,mem_total,
-    power,temp}], [] if no driver / no GPU. Same query and field order as the
-    hub's own collector, so per-card shapes match across the fleet."""
+    power,temp,fan?,...}], [] if no driver / no GPU. Same query and field order as
+    the hub's own collector, so per-card shapes match across the fleet.
+
+    `fan` is optional on purpose: datacentre cards (Tesla/A100) are passively
+    cooled and report no fan at all, and reporting 0% for them would trip the
+    fan-stall alert on hardware that has no fan to stall."""
     try:
-        r = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, timeout=3,
-        )
-        if r.returncode != 0:
-            return []
+        # nvidia-smi rejects the WHOLE query when it doesn't recognise one field
+        # name, so the fan column can't just be appended: on a driver that old,
+        # every card would vanish. Ask for fan first, fall back to the exact
+        # pre-existing 7-field query if that comes back empty.
+        rows = _smi_rows("index,name,utilization.gpu,memory.used,memory.total,"
+                         "power.draw,temperature.gpu,fan.speed")
+        if not rows:
+            rows = _smi_rows("index,name,utilization.gpu,memory.used,memory.total,"
+                             "power.draw,temperature.gpu")
         cards = []
-        for line in r.stdout.decode("utf-8", "replace").splitlines():
-            if not line.strip():
-                continue
-            parts = [p.strip() for p in line.split(",")]
+        for parts in rows:
             if len(parts) < 7:
                 continue
-            cards.append({
+            card = {
                 "idx":       _smi_int(parts[0]),
                 "name":      parts[1] or "GPU %s" % parts[0],
                 "util":      _smi_int(parts[2]),   # %
@@ -400,39 +507,76 @@ def _nvidia_cards():
                 "power":     _smi_int(parts[5]),   # W
                 "temp":      _smi_int(parts[6]),   # °C
                 "vendor":    "nvidia",
-            })
+            }
+            fan = _smi_opt(parts[7]) if len(parts) > 7 else None
+            if fan is not None:
+                card["fan"] = fan                  # % of max
+            cards.append(card)
+        if cards:
+            _nvidia_enrich(cards)
         return cards
     except Exception:
         return []
 
 
-def _nvidia_procs():
-    """GPU compute processes via nvidia-smi as [{pid,name,mem}] (MB), heaviest
-    first, [] when unavailable. process_name is a full path and may contain
-    commas — pid is the first field and used_memory the last, so the middle is
-    rejoined before taking the basename."""
+def _nvidia_uuid_idx():
+    """GPU UUID → card index. --query-compute-apps identifies a process's card by
+    UUID, never by index, so this is the only way to answer "which card is this
+    process on". {} when unavailable — attribution then stays card-agnostic."""
+    out = {}
     try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, timeout=3,
-        )
-        if r.returncode != 0:
-            return []
-        agg = {}
-        for line in r.stdout.decode("utf-8", "replace").splitlines():
-            if not line.strip():
+        for p in _smi_rows("index,uuid"):
+            if len(p) >= 2 and p[1]:
+                out[p[1]] = _smi_int(p[0])
+    except Exception:
+        pass
+    return out
+
+
+def _nvidia_procs():
+    """GPU compute processes via nvidia-smi as [{pid,name,mem,by_card?}] (MB),
+    heaviest first, [] when unavailable. process_name is a full path and may
+    contain commas — pid is the first field and used_memory the last, so the
+    middle is rejoined before taking the basename.
+
+    `mem` stays the pooled total per pid (a process spanning several cards
+    appears once per card), and `by_card` breaks that same total down by index
+    so the cockpit can show which card a service is actually sitting on."""
+    try:
+        uuid_idx = _nvidia_uuid_idx()
+        # Ask for gpu_uuid, then CHECK the answer rather than assuming the query
+        # shape from the fact that rows came back. nvidia-smi UUIDs are always
+        # "GPU-<uuid>" (or "MIG-<uuid>" on a partitioned card), so the leading
+        # field identifies itself. A driver that rejects the field returns no
+        # rows and we fall back; a driver that somehow answers in the old shape
+        # is detected here rather than silently shifting every column by one.
+        rows = _smi_rows("gpu_uuid,pid,process_name,used_memory", "--query-compute-apps")
+        has_uuid = bool(rows) and all(
+            r and (r[0].startswith("GPU-") or r[0].startswith("MIG-")) for r in rows)
+        if not has_uuid:
+            rows = _smi_rows("pid,process_name,used_memory", "--query-compute-apps")
+        agg, cards = {}, {}
+        for parts in rows:
+            if len(parts) < (4 if has_uuid else 3):
                 continue
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
-                continue
+            uuid, parts = (parts[0], parts[1:]) if has_uuid else (None, parts)
             name = ",".join(parts[1:-1]).replace("\\", "/").rsplit("/", 1)[-1]
             pid = _smi_int(parts[0])
-            # nvidia-smi emits one row per (process, GPU) — a process spanning
-            # several cards appears once per card, so pool its VRAM per pid.
+            mem = _smi_int(parts[-1])
             key = (pid, name[:64] or "?")
-            agg[key] = agg.get(key, 0) + _smi_int(parts[-1])
-        procs = [{"pid": k[0], "name": k[1], "mem": v} for k, v in agg.items()]
+            agg[key] = agg.get(key, 0) + mem
+            idx = uuid_idx.get(uuid) if uuid else None
+            if idx is not None:
+                per = cards.setdefault(key, {})
+                per[idx] = per.get(idx, 0) + mem
+        procs = []
+        for k, v in agg.items():
+            p = {"pid": k[0], "name": k[1], "mem": v}
+            if k in cards:
+                # str keys: this crosses a JSON boundary, where int keys become
+                # strings anyway. Being explicit keeps hub and probe agreeing.
+                p["by_card"] = {str(i): m for i, m in sorted(cards[k].items())}
+            procs.append(p)
         procs.sort(key=lambda p: -p["mem"])
         return procs[:20]
     except Exception:
@@ -492,13 +636,33 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
             total, used = vram_total, vram_used
         busy  = _int(os.path.join(dev, "gpu_busy_percent"))      # %
         temp = 0
+        fan_pct = fan_rpm = power_w = power_cap = None
         try:
             hwroot = os.path.join(dev, "hwmon")
             for h in sorted(os.listdir(hwroot)):
-                t = _int(os.path.join(hwroot, h, "temp1_input"))  # millidegrees C
-                if t is not None:
-                    temp = int(round(t / 1000.0))
-                    break
+                hw = os.path.join(hwroot, h)
+                t = _int(os.path.join(hw, "temp1_input"))         # millidegrees C
+                if t is None:
+                    continue
+                temp = int(round(t / 1000.0))
+                # pwm1 is the duty cycle 0-255; fan1_input is the tachometer in
+                # RPM. A card with no fan node (passively cooled, or a laptop
+                # where the EC owns the fan) leaves both None — never 0, which
+                # the cockpit would read as a stalled fan.
+                pwm = _int(os.path.join(hw, "pwm1"))
+                if pwm is not None:
+                    fan_pct = int(round(pwm * 100.0 / 255.0))
+                fan_rpm = _int(os.path.join(hw, "fan1_input"))
+                # power1_average is microwatts; power1_cap is the board limit.
+                pw = _int(os.path.join(hw, "power1_average"))
+                if pw is None:
+                    pw = _int(os.path.join(hw, "power1_input"))
+                if pw is not None:
+                    power_w = int(round(pw / 1000000.0))
+                cap = _int(os.path.join(hw, "power1_cap"))
+                if cap is not None:
+                    power_cap = int(round(cap / 1000000.0))
+                break
         except OSError:
             pass
         name = None
@@ -507,15 +671,25 @@ def _amd_gpu_sysfs(drm_root="/sys/class/drm"):
                 name = f.read().strip() or None
         except OSError:
             pass
-        cards.append({
+        card = {
             "name":      name or "AMD GPU %s" % m.group(1),
             "mem_used":  int(round(used / 1048576.0)) if used is not None else 0,
             "mem_total": int(round(total / 1048576.0)) if total is not None else 0,
             "util":      busy if busy is not None else 0,
-            "power":     0,   # amdgpu sysfs has no cheap universal power counter
+            "power":     power_w if power_w is not None else 0,
             "temp":      temp,
             "vendor":    "amd",
-        })
+        }
+        # Optional per-card fields stay absent when the card doesn't report them,
+        # so the cockpit can say "not reported by this driver" instead of drawing
+        # a confident flat zero (same rule as NVIDIA's fan / mem_util).
+        if fan_pct is not None:
+            card["fan"] = fan_pct
+        if fan_rpm is not None:
+            card["fan_rpm"] = fan_rpm
+        if power_cap is not None:
+            card["power_limit"] = power_cap
+        cards.append(card)
     return cards
 
 
@@ -604,6 +778,14 @@ def read_docker(gpu_procs=None):
                 c = by_id.get(cid)
                 if c is not None:
                     c["vram_mb"] = c.get("vram_mb", 0) + (p.get("mem") or 0)
+                    # Carry the per-card split up to the container too. This
+                    # mapping only exists here — the pid knows which GPU it is
+                    # on and which container it is in, and nothing downstream
+                    # can reconstruct the link from a container name alone
+                    # ("ollama" the container vs "llama-server" the process).
+                    for gidx, mb in (p.get("by_card") or {}).items():
+                        vc = c.setdefault("vram_by_card", {})
+                        vc[str(gidx)] = vc.get(str(gidx), 0) + mb
         running = sum(1 for c in conts if c["state"] == "running")
         if running:
             # One stats pass for RAM/CPU%. `docker stats` blocks ~1.5s to sample;
@@ -671,6 +853,19 @@ def read_gpu():
         "power":     sum(g["power"] for g in gpus),
         "temp":      max(g["temp"] for g in gpus),
     }
+    # Pooled optionals, contributed only by the cards that actually measured them:
+    # one passively-cooled card in the box must not drag the fan average toward a
+    # fan speed nothing reported, and a missing power cap must not produce a
+    # denominator smaller than the draw it's compared against.
+    fans = [g["fan"] for g in gpus if g.get("fan") is not None]
+    if fans:
+        agg["fan"] = int(round(sum(fans) / len(fans)))
+        agg["fan_max"] = max(fans)
+    if all(g.get("power_limit") for g in gpus):
+        agg["power_limit"] = sum(g["power_limit"] for g in gpus)
+    if any(g.get("throttled") for g in gpus):
+        agg["throttled"] = True
+        agg["throttle"] = sorted({r for g in gpus for r in g.get("throttle", [])})
     out = {"gpu": agg, "gpus": gpus}
     if nv:
         procs = _nvidia_procs()
@@ -1524,6 +1719,23 @@ def read_power(dwell=0.3):
     return out
 
 
+def _local_http_json(port, path, timeout=2):
+    """GET a JSON document from a service on this host's loopback. Best-effort:
+    any failure (down, slow, not HTTP, not JSON) is just None."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            status = r.status
+        finally:
+            c.close()
+        return json.loads(body) if status < 400 else None
+    except Exception:
+        return None
+
+
 def read_ollama_models():
     """Detect ollama on this host (#219 fleet-wide, Ollama slice): loaded models
     from /api/ps (with live VRAM), falling back to the on-disk catalogue
@@ -1532,18 +1744,7 @@ def read_ollama_models():
     running here. Shape matches what backend/probes' local model_catalog uses,
     so the hub can merge local + remote entries with the same code path."""
     def _http_json(path, timeout=2):
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", 11434, timeout=timeout)
-            try:
-                c.request("GET", path)
-                r = c.getresponse()
-                body = r.read()
-                status = r.status
-            finally:
-                c.close()
-            return json.loads(body) if status < 400 else None
-        except Exception:
-            return None
+        return _local_http_json(11434, path, timeout)
 
     hostname = socket.gethostname()
     # Resident set first (/api/ps): name -> live VRAM MB.
@@ -1584,8 +1785,66 @@ def read_ollama_models():
     return out
 
 
+# Recognised AI servers by the port they serve on, for hosts other than the hub.
+# Provider ids match backend/probes' PROBES keys so the same server reads the same
+# whether it runs on the hub or on a remote. Every one of these speaks the
+# OpenAI-compatible GET /v1/models; ollama is handled separately above because it
+# reports far more (live VRAM, on-disk size, quant).
+_OPENAI_PORTS = (
+    (8000,  "vllm"),
+    (8080,  "llama.cpp"),
+    (1234,  "lmstudio"),
+    (5000,  "tabbyapi"),
+    (5001,  "koboldcpp"),
+    (9997,  "xinference"),
+    (2242,  "aphrodite"),
+    (30000, "sglang"),
+    (4000,  "litellm"),
+    (7997,  "infinity"),
+    (39281, "cortex"),
+)
+
+
+def read_ai_models(listen=None):
+    """Every AI model server this host is running, for the fleet-wide registry.
+
+    Ollama gets the full treatment (resident set + on-disk catalogue with live
+    VRAM). Every other recognised server is read through the OpenAI-compatible
+    `GET /v1/models` that vLLM, llama.cpp, LM Studio, tabbyAPI, xinference,
+    SGLang, LiteLLM and friends all speak.
+
+    Three deliberate guards keep this cheap and honest:
+      * only ports ALREADY listening (from the `ss` data read_net collects) are
+        touched, so the usual cost is zero extra connections;
+      * an answer counts only when it parses as the documented shape, so an
+        unrelated web server on :8080 is never reported as a model host;
+      * models are reported Idle (loaded=False, vram_mb=None) because /v1/models
+        lists what a server CAN serve -- same semantics the hub applies to its
+        own non-ollama servers, which get their VRAM from nvidia-smi instead.
+    """
+    out = list(read_ollama_models())
+    ports = {s.get("port") for s in (listen or []) if s.get("proto") == "tcp"}
+    if not ports:
+        return out
+    hostname = socket.gethostname()
+    for port, provider in _OPENAI_PORTS:
+        if port not in ports:
+            continue
+        data = (_local_http_json(port, "/v1/models") or {}).get("data")
+        if not isinstance(data, list):
+            continue
+        for m in data:
+            name = m.get("id") if isinstance(m, dict) else None
+            if not name:
+                continue
+            out.append({"host": hostname, "service": provider, "provider": provider,
+                        "model": name, "loaded": False, "vram_mb": None})
+    return out
+
+
 def main():
     gpu_block = read_gpu()
+    net_block = read_net()          # hoisted: its listen list also drives model discovery
     data = {
         "host": {
             **read_cpu(),
@@ -1599,14 +1858,14 @@ def main():
             **read_systemd(),
             **read_os(),
             **read_hw(gpu_agg=gpu_block.get("gpu") or {}),
-            **read_net(),
+            **net_block,
             **read_sec(),
             "disks": read_disks(),
             "hostname": socket.gethostname(),
         },
-        "model_catalog": read_ollama_models(),
+        "model_catalog": read_ai_models((net_block.get("net") or {}).get("listen")),
         "at": int(time.time()),
-        "probe_version": "0.12",
+        "probe_version": "0.13",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
