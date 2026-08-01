@@ -3151,7 +3151,33 @@ function applyIcons(scope){
 const sev = p => p>=90?'var(--crit)':p>=75?'var(--warn)':'var(--ok)';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const ICON={critical:'⛔',warning:'⚠️',ok:'✅',info:'ℹ️'};
-function colorFor(n){ if(n==='system/other')return '#6b7280'; let h=0; for(const c of n) h=(h*31+c.charCodeAt(0))>>>0; return `hsl(${h%360} 62% 56%)`; }
+// Stable per-name colour, returned as HEX rather than hsl(). Several call sites
+// append a two-digit alpha (`colorFor(x)+'cc'`) for chart fills, and
+// "hsl(210 62% 56%)cc" is not a colour — Chart.js parses it as a failure and
+// falls back to opaque black, which is how the VRAM-by-service chart ended up
+// rendering as one solid black block. Hex keeps that idiom valid.
+// FNV-1a + the golden angle, rather than `hash % 360` over a *31 rolling hash.
+// The old pairing put this fleet's two GPU services 6° apart — two nearly
+// identical purples stacked on the same chart, which defeats the point of
+// colouring them at all. FNV mixes far better, and stepping by the golden angle
+// keeps successive hues maximally far apart.
+function colorFor(n){
+  if(n==='system/other') return '#6b7280';
+  let h=0x811c9dc5;
+  for(const c of n){ h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  const hue = ((h >>> 8) * 137.508) % 360;
+  // Alternate lightness a little so two neighbouring hues still separate.
+  return hslHex(hue, 62, (h & 1) ? 62 : 52);
+}
+// HSL → #rrggbb. Same maths the browser does; kept local so colours don't
+// depend on a canvas or computed style being available at call time.
+function hslHex(h, s, l){
+  s/=100; l/=100;
+  const k = n => (n + h/30) % 12;
+  const a = s * Math.min(l, 1-l);
+  const f = n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)))));
+  return '#' + [f(0), f(8), f(4)].map(v=>v.toString(16).padStart(2,'0')).join('');
+}
 function fmtLabels(L){ if(!L.length)return[]; const md=(L[L.length-1]-L[0])>2*86400;
   return L.map(t=>{const d=new Date(t*1000),hm=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   return md?(d.getMonth()+1)+'/'+d.getDate()+' '+hm:hm;});}
