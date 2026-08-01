@@ -3603,20 +3603,28 @@ function gpuSharedRange(cards, metric){
 }
 
 function gpuStatusPill(card){
+  // Classes are the compound `mc-pill mc-pill-<level>` the rest of the dashboard
+  // uses. A bare `mc-pill ok` matches no rule at all and renders neutral — which
+  // would silently strip the colour coding the small-multiples layout depends on
+  // to make the odd card out obvious.
+  //
+  // The calm states (IDLE / RETIRED / NO LIVE DATA) intentionally get the base
+  // `.mc-pill` with no level: there is no `mc-pill-info`, and none of them are
+  // states a user should be drawn to.
   const S = {
-    ok:       ['ok',   I18N.t('gpu.st_ok','OK')],
-    idle:     ['info', I18N.t('gpu.st_idle','IDLE')],
-    busy:     ['ok',   I18N.t('gpu.st_busy','BUSY')],
-    hot:      ['warn', I18N.t('gpu.st_hot','HOT')],
-    throttle: ['crit', I18N.t('gpu.st_throttle','THROTTLING')],
-    gone:     ['crit', I18N.t('gpu.st_gone','NOT PRESENT')],
+    ok:       ['mc-pill-ok',   I18N.t('gpu.st_ok','OK')],
+    idle:     ['',             I18N.t('gpu.st_idle','IDLE')],
+    busy:     ['mc-pill-ok',   I18N.t('gpu.st_busy','BUSY')],
+    hot:      ['mc-pill-warn', I18N.t('gpu.st_hot','HOT')],
+    throttle: ['mc-pill-crit', I18N.t('gpu.st_throttle','THROTTLING')],
+    gone:     ['mc-pill-crit', I18N.t('gpu.st_gone','NOT PRESENT')],
     // A card that hasn't reported in a long time was removed from the machine,
     // not lost from the bus. It keeps its history; it does not raise an alarm.
-    retired:  ['info', I18N.t('gpu.st_retired','RETIRED')],
+    retired:  ['',             I18N.t('gpu.st_retired','RETIRED')],
     // The host isn't reporting cards at all right now (offline, or the hub has
     // just restarted and hasn't polled yet). We don't know — say so.
-    stale:    ['info', I18N.t('gpu.st_stale','NO LIVE DATA')],
-  }[card.status] || ['info', card.status];
+    stale:    ['',             I18N.t('gpu.st_stale','NO LIVE DATA')],
+  }[card.status] || ['', card.status];
   return `<span class="mc-pill ${S[0]}">${S[1]}</span>`;
 }
 
@@ -4100,8 +4108,16 @@ function renderGpuHealth(d){
   }).join('');
   tb.innerHTML = rows || `<tr><td colspan="6" class="muted">${I18N.t('gpu.no_history','No history for this host yet.')}</td></tr>`;
   const cap = document.getElementById('gpu_health_cap');
-  if(cap) cap.textContent = I18N.t('gpu.health_cap',
-    'Throttled counts thermal slowdowns only — a card sitting at a deliberately lowered power limit is working as configured, and is reported under Capped instead.');
+  if(cap){
+    let t = I18N.t('gpu.health_cap',
+      'Throttled counts thermal slowdowns only — a card sitting at a deliberately lowered power limit is working as configured, and is reported under Capped instead.');
+    // Past the raw retention window these come from the hourly rollup. Say so
+    // rather than letting an hour-granular figure read as minute-accurate.
+    if((d.cards||[]).some(c => c.health && c.health.downsampled))
+      t += ' ' + I18N.t('gpu.health_cap_rollup',
+        'Over this range the figures come from hourly history, so Hot is rounded to whole hours and Capped is not available.');
+    cap.textContent = t;
+  }
 }
 
 // Mini-htop card (issue #32): top processes by CPU% and by RAM, from /api/health

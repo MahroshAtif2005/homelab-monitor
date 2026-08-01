@@ -134,33 +134,91 @@ class TestRollup(unittest.TestCase):
         self.assertEqual(rows, [(0, 60), (3600, 90)])
 
 
+class TestRollupIsActuallyRead(unittest.TestCase):
+    """The hourly rollup has to be READ, not just written.
+
+    Raw rows are retention-purged, so a 30-day request answered from the raw
+    table alone would silently show the last two days and call it a month.
+    """
+
+    def setUp(self):
+        self.conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        self.repo = gpu_samples
+
+    def _rollup_only(self, host, hours, temp=70, temp_max=None, throttle_secs=0):
+        """Write rollup rows with NO raw rows — the state after a purge."""
+        for h in range(hours):
+            self.conn.execute(
+                "INSERT INTO gpu_samples_1h(ts,host,idx,util,mem_used,mem_total,power,"
+                "temp,temp_max,fan,fan_max,throttle_secs,cnt) "
+                "VALUES(?,?,0,50,12000,24576,200,?,?,40,60,?,360)",
+                (h * 3600, host, temp, temp_max if temp_max is not None else temp, throttle_secs))
+        self.conn.commit()
+
+    def test_a_long_range_reads_the_rollup_when_raw_is_gone(self):
+        self._rollup_only("vader", 48)
+        rows = self.repo.series("vader", 0, 3600, conn=self.conn)
+        self.assertEqual(len(rows), 48)
+
+    def test_a_short_range_still_reads_raw_for_full_resolution(self):
+        self.repo.record(self.conn, 1000, "vader", [_card(0)])
+        rows = self.repo.series("vader", 0, 60, conn=self.conn)
+        self.assertEqual(len(rows), 1)
+
+    def test_peaks_survive_the_downsample(self):
+        # The whole reason the rollup keeps MAX columns: an hour that peaked at
+        # 91 C must not average away into a comfortable 70.
+        self._rollup_only("vader", 4, temp=70, temp_max=91)
+        rows = self.repo.series("vader", 0, 3600, conn=self.conn)
+        self.assertEqual(max(r[7] for r in rows), 91)
+
+    def test_cards_survive_in_the_rollup_after_raw_is_purged(self):
+        self._rollup_only("vader", 3)
+        self.assertEqual(self.repo.cards_for("vader", conn=self.conn), [0])
+
+    def test_range_all_spans_the_rollup_not_just_raw(self):
+        self._rollup_only("vader", 3)                      # starts at ts=0
+        self.repo.record(self.conn, 100000, "vader", [_card(0)])
+        self.assertEqual(self.repo.min_ts("vader", conn=self.conn), 0)
+
+    def test_health_uses_the_rollup_and_keeps_throttled_seconds_exact(self):
+        # throttle_secs is stored AS seconds, so it stays exact across the
+        # downsample even though "hot" becomes hour-granular.
+        self._rollup_only("vader", 3, temp=70, temp_max=88, throttle_secs=120)
+        h = self.repo.health("vader", 0, hot_c=84, interval=10, conn=self.conn)[0]
+        self.assertEqual(h[5], 360)          # 3 hours x 120 s, exact
+        self.assertEqual(h[3], 88)           # peak temp preserved
+        self.assertEqual(h[6], 3 * 3600)     # hot hours, hour-granular
+
+
 class TestHealthAndSpans(unittest.TestCase):
     def setUp(self):
         self.conn = _fresh_db()
         from backend.db.repos import gpu_samples
         self.repo = gpu_samples
 
-    def test_health_counts_hot_and_throttled_samples_per_card(self):
+    def test_health_reports_hot_and_throttled_seconds_per_card(self):
         for ts in range(0, 50, 10):
             self.repo.record(self.conn, ts, "vader", [
                 _card(0, temp=70),
                 _card(1, temp=86, throttle_mask=0x40),
             ])
-        by_idx = {r[0]: r for r in self.repo.health("vader", 0, conn=self.conn)}
-        self.assertEqual(by_idx[0][3], 70)      # peak temp
-        self.assertEqual(by_idx[0][5], 0)       # throttled samples
-        self.assertEqual(by_idx[0][6], 0)       # samples at/above 84 C
+        by_idx = {r[0]: r for r in self.repo.health("vader", 0, interval=10, conn=self.conn)}
+        self.assertEqual(by_idx[0][3], 70)         # peak temp
+        self.assertEqual(by_idx[0][5], 0)          # throttled seconds
+        self.assertEqual(by_idx[0][6], 0)          # seconds at/above 84 C
         self.assertEqual(by_idx[1][3], 86)
-        self.assertEqual(by_idx[1][5], 5)
-        self.assertEqual(by_idx[1][6], 5)
+        self.assertEqual(by_idx[1][5], 50)         # 5 samples x 10s
+        self.assertEqual(by_idx[1][6], 50)
 
     def test_power_capped_counts_only_against_a_known_limit(self):
         # A card that doesn't report a power limit must not be counted as capped
-        # — the denominator is missing, not zero.
+        # — the denominator is missing, not zero. 1 of 2 samples => 50%.
         self.repo.record(self.conn, 0, "vader", [_card(0, power=280)])
         self.repo.record(self.conn, 10, "vader", [_card(0, power=280, power_limit=280)])
-        capped = self.repo.health("vader", 0, conn=self.conn)[0][7]
-        self.assertEqual(capped, 1)
+        capped_pct = self.repo.health("vader", 0, interval=10, conn=self.conn)[0][7]
+        self.assertEqual(capped_pct, 50.0)
 
     def test_throttle_spans_return_only_thermal_and_power_samples(self):
         self.repo.record(self.conn, 0,  "vader", [_card(0, throttle_mask=0x40)])

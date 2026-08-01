@@ -201,7 +201,7 @@ def api_gpu_history():
 
     with _app.LOCK:
         rows = gpu_repo.series(host, since, bk, conn=_app.DB)
-        health_rows = gpu_repo.health(host, since, hot_c=hot_c, conn=_app.DB)
+        health_rows = gpu_repo.health(host, since, hot_c=hot_c, interval=interval, conn=_app.DB)
         thr_rows = gpu_repo.throttle_spans(host, since, conn=_app.DB)
         stored_idxs = gpu_repo.cards_for(host, conn=_app.DB)
         last_seen = gpu_repo.last_seen(host, conn=_app.DB)
@@ -245,15 +245,20 @@ def api_gpu_history():
     for s in _stitch_spans(thr_rows, interval):
         spans_by_idx.setdefault(s["idx"], []).append(s)
 
+    # Past the raw retention window the numbers come from the hourly rollup, so
+    # "hot" is hour-granular there. Flagged rather than quietly presented as if
+    # it were minute-accurate.
+    downsampled = bool(rows) and bk >= 3600
     health_by_idx = {}
-    for (idx, cnt, avg_t, peak_t, peak_fan, thr_n, hot_n, capped_n) in health_rows:
+    for (idx, window_sec, avg_t, peak_t, peak_fan, thr_sec, hot_sec, capped_pct) in health_rows:
         health_by_idx[idx] = {
-            "idx": idx, "samples": cnt,
+            "idx": idx,
             "avg_temp": _r(avg_t), "peak_temp": _r(peak_t), "peak_fan": _r(peak_fan),
-            "throttled_sec": (thr_n or 0) * interval,
-            "hot_sec": (hot_n or 0) * interval,
-            "capped_pct": round((capped_n or 0) * 100.0 / cnt, 1) if cnt else 0,
-            "window_sec": (cnt or 0) * interval,
+            "throttled_sec": thr_sec,
+            "hot_sec": hot_sec,
+            "capped_pct": capped_pct,
+            "window_sec": window_sec,
+            "downsampled": downsampled,
         }
 
     cards = []

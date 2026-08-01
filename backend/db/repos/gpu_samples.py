@@ -90,10 +90,17 @@ def record(conn, ts: int, host: str, cards, interval: int = 10):
 
 
 def cards_for(host: str, conn=None) -> list:
-    """The card indexes this host has ever reported, ascending."""
+    """The card indexes this host has ever reported, ascending.
+
+    Unions raw and rollup: raw rows are retention-purged, so a card the host
+    stopped reporting months ago survives only in the rollup, and dropping it
+    would make its history unreachable.
+    """
     c = conn or connection()
     return [r[0] for r in c.execute(
-        "SELECT DISTINCT idx FROM gpu_samples WHERE host=? ORDER BY idx", (host,)).fetchall()]
+        "SELECT idx FROM gpu_samples WHERE host=? "
+        "UNION SELECT idx FROM gpu_samples_1h WHERE host=? ORDER BY idx",
+        (host, host)).fetchall()]
 
 
 def series(host: str, since: int, bucket: int, conn=None) -> list:
@@ -101,11 +108,26 @@ def series(host: str, since: int, bucket: int, conn=None) -> list:
 
     Returns (bucket_ts, idx, util, mem_used, mem_total, power, temp, temp_max,
     fan, fan_max, mem_util, clk_sm, throttle_any) ordered by time then card.
-    Reads the RAW table: buckets here are chart pixels, and the raw ring is what
-    holds sub-hour resolution. MAX(temp) rides alongside AVG so a bucket that
-    spans a spike shows both the trend and the peak.
+
+    Reads whichever table can actually answer. Raw rows are retention-purged
+    (48 h by default), so a 7d/30d/all request answered from `gpu_samples` alone
+    would silently show only the last two days and call it a month. Once the
+    bucket is an hour or more the hourly rollup has the same resolution anyway,
+    so anything at or above that switches to `gpu_samples_1h` — which is exactly
+    what that table exists for, and it keeps its own MAX columns so peaks
+    survive the downsample.
     """
     c = conn or connection()
+    # Use the rollup when raw can't answer for this window. The bucket size is
+    # not the trigger — a purged raw ring is — but at hourly buckets and above
+    # the rollup has the same resolution anyway.
+    if _use_rollup(host, since, c):
+        return c.execute(
+            "SELECT (ts/?)*? b, idx, AVG(util), AVG(mem_used), MAX(mem_total), AVG(power), "
+            "       AVG(temp), MAX(temp_max), AVG(fan), MAX(fan_max), NULL, NULL, "
+            "       CASE WHEN SUM(throttle_secs) > 0 THEN ? ELSE 0 END "
+            "FROM gpu_samples_1h WHERE host=? AND ts>=? GROUP BY b, idx ORDER BY b, idx",
+            (bucket, bucket, _THERMAL_BITS, host, since)).fetchall()
     return c.execute(
         "SELECT (ts/?)*? b, idx, AVG(util), AVG(mem_used), MAX(mem_total), AVG(power), "
         "       AVG(temp), MAX(temp), AVG(fan), MAX(fan), AVG(mem_util), AVG(clk_sm), "
@@ -114,26 +136,69 @@ def series(host: str, since: int, bucket: int, conn=None) -> list:
         (bucket, bucket, host, since)).fetchall()
 
 
-def health(host: str, since: int, hot_c: int = 84, conn=None) -> list:
-    """Per-card health rollup since `since`, for the card-health table.
+def health(host: str, since: int, hot_c: int = 84, interval: int = 10, conn=None) -> list:
+    """Per-card health over the window, for the card-health table.
 
-    (idx, samples, avg_temp, peak_temp, peak_fan, throttled_samples,
-     hot_samples, capped_samples). Counts rather than durations — the caller
-     multiplies by the poll interval, which it knows and this doesn't.
+    (idx, window_sec, avg_temp, peak_temp, peak_fan, throttled_sec, hot_sec,
+     capped_pct) — seconds, not sample counts, so the caller doesn't have to
+     know which table answered.
 
     `hot_c` is passed in rather than fixed so the "hot" column counts against
     the same threshold the alerts use, including a per-host override. A table
     that says 0 minutes hot while the notifier is paging about heat would be
     worse than no table.
+
+    Beyond the raw retention window this reads the hourly rollup. Throttled
+    seconds stay exact there (the rollup accumulates them as seconds), peaks
+    stay exact (it keeps MAX columns), but "hot" becomes hour-granular: an hour
+    whose peak crossed the threshold counts as a hot hour. That is an
+    over-estimate for a brief spike, and the caller flags the window as
+    downsampled so the number is never presented as minute-accurate.
     """
     c = conn or connection()
-    return c.execute(
+    if interval <= 0:
+        interval = 10
+    if _use_rollup(host, since, c):
+        rows = c.execute(
+            "SELECT idx, SUM(cnt), AVG(temp), MAX(temp_max), MAX(fan_max), "
+            "       SUM(throttle_secs), "
+            "       SUM(CASE WHEN temp_max >= ? THEN 3600 ELSE 0 END), "
+            "       0 "
+            "FROM gpu_samples_1h WHERE host=? AND ts>=? GROUP BY idx ORDER BY idx",
+            (hot_c, host, since)).fetchall()
+        # cnt is a sample count; turn it into the seconds the window covers.
+        return [(r[0], (r[1] or 0) * interval, r[2], r[3], r[4],
+                 r[5] or 0, r[6] or 0, 0.0) for r in rows]
+    rows = c.execute(
         "SELECT idx, COUNT(*), AVG(temp), MAX(temp), MAX(fan), "
         "       SUM(CASE WHEN COALESCE(throttle,0) & ? THEN 1 ELSE 0 END), "
         "       SUM(CASE WHEN temp >= ? THEN 1 ELSE 0 END), "
         "       SUM(CASE WHEN power_limit > 0 AND power >= power_limit * 0.98 THEN 1 ELSE 0 END) "
         "FROM gpu_samples WHERE host=? AND ts>=? GROUP BY idx ORDER BY idx",
         (_THERMAL_BITS, hot_c, host, since)).fetchall()
+    return [(r[0], (r[1] or 0) * interval, r[2], r[3], r[4],
+             (r[5] or 0) * interval, (r[6] or 0) * interval,
+             round((r[7] or 0) * 100.0 / r[1], 1) if r[1] else 0.0) for r in rows]
+
+
+def _use_rollup(host: str, since: int, conn) -> bool:
+    """True when the raw ring can no longer answer for `since` but the rollup can.
+
+    The test is "does the rollup hold an EARLIER HOUR than the oldest raw sample"
+    — i.e. has retention actually purged raw rows the rollup still remembers.
+    Not simply "does the window start before the oldest raw sample": that is also
+    true for a host that only started collecting five minutes ago, where raw is
+    the complete and correct answer. (And every rollup row is bucketed down to
+    its hour, so its timestamp is always <= the raw sample that produced it —
+    which is why the comparison is hour-to-hour.)
+    """
+    raw = conn.execute("SELECT MIN(ts) FROM gpu_samples WHERE host=?", (host,)).fetchone()[0]
+    roll = conn.execute("SELECT MIN(ts) FROM gpu_samples_1h WHERE host=?", (host,)).fetchone()[0]
+    if roll is None:
+        return False                      # nothing rolled up; raw is all there is
+    if raw is None:
+        return True                       # raw fully purged (or never written)
+    return since < raw and roll < (raw // 3600) * 3600
 
 
 def throttle_spans(host: str, since: int, conn=None) -> list:
@@ -175,9 +240,16 @@ def last_seen(host: str, conn=None) -> dict:
 
 
 def min_ts(host: str, conn=None):
-    """Earliest raw sample for a host, or None when it has no history yet."""
+    """Earliest sample for a host, or None when it has no history yet.
+
+    Considers the rollup too — it is what "range = all" should actually span
+    once raw rows past the retention window have been purged.
+    """
     c = conn or connection()
-    return c.execute("SELECT MIN(ts) FROM gpu_samples WHERE host=?", (host,)).fetchone()[0]
+    raw = c.execute("SELECT MIN(ts) FROM gpu_samples WHERE host=?", (host,)).fetchone()[0]
+    roll = c.execute("SELECT MIN(ts) FROM gpu_samples_1h WHERE host=?", (host,)).fetchone()[0]
+    vals = [v for v in (raw, roll) if v is not None]
+    return min(vals) if vals else None
 
 
 def vram_by_service(host: str, since: int, bucket: int, conn=None) -> list:

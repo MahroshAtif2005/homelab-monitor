@@ -195,9 +195,16 @@ def sample_once():
                 # that rejects the field falls back to the original query and
                 # simply reports no per-card split.
                 uuid_idx = _app._smi_uuid_idx()
-                rows = _app.smi(["--query-compute-apps=gpu_uuid,pid,used_memory",
-                                 "--format=csv,noheader,nounits"]).splitlines()
-                has_uuid = any(line.strip() for line in rows)
+                rows = [l for l in _app.smi(["--query-compute-apps=gpu_uuid,pid,used_memory",
+                                             "--format=csv,noheader,nounits"]).splitlines()
+                        if l.strip()]
+                # CHECK the answer rather than inferring the shape from the fact
+                # that rows came back: nvidia-smi UUIDs are always "GPU-…" (or
+                # "MIG-…" on a partitioned card), so the leading field identifies
+                # itself. Guessing wrong here shifts every column by one. Same
+                # verification probe.py does — the two must not drift.
+                has_uuid = bool(rows) and all(
+                    r.strip().startswith(("GPU-", "MIG-")) for r in rows)
                 if not has_uuid:
                     rows = _app.smi(["--query-compute-apps=pid,used_memory",
                                      "--format=csv,noheader,nounits"]).splitlines()
