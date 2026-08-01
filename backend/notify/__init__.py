@@ -283,19 +283,30 @@ def notify_gpu_cards(s, rules):
                 _app._clear(key)
 
             # ── fan stall ───────────────────────────────────────────────────
-            # `fan is not None` is load-bearing: a passively cooled datacentre
-            # card reports no fan at all, and treating that as 0% would page the
-            # user about hardware that has no fan to stall.
+            # Two guards, both learned the hard way:
+            #
+            # `fan is not None` — a passively cooled datacentre card reports no
+            # fan at all, and treating absent as 0% would page the user about
+            # hardware that has no fan to stall.
+            #
+            # The temperature bar is derived from the alert threshold, not a
+            # fixed 50 °C. Modern cards have zero-RPM idle modes and legitimately
+            # sit in the 50s with their fans completely stopped — a real fleet
+            # box was doing exactly that at 53 °C during testing. By the time a
+            # card is within 10 °C of its alert threshold, every zero-RPM design
+            # has long since spun up, so 0% there genuinely means broken.
             key = f"gpu:fanstall:{host}:{idx}"
             seen_keys.add(key)
             fan = g.get("fan")
+            stall_at = max(60, temp_c - 10)
             if s.get("gpu_fanstall_alerts", "1") == "1" and fan is not None:
-                stalled = fan == 0 and (temp or 0) >= 50
-                if _sustained(key, stalled, 60, now):
+                stalled = fan == 0 and (temp or 0) >= stall_at
+                if _sustained(key, stalled, 120, now):
                     _app._emit(s, key, "critical", f"🔴 {label} fan has stopped",
                                f"{name} on {host} reports a fan speed of 0% while the card "
-                               f"is at {round(temp or 0)} °C. A seized fan or an unplugged "
-                               f"header will cook a GPU under load.", rules=rules)
+                               f"is at {round(temp or 0)} °C (at or above {stall_at} °C, where "
+                               f"any zero-RPM idle mode would have spun up). A seized fan or "
+                               f"an unplugged header will cook a GPU under load.", rules=rules)
                 elif not stalled:
                     _app._clear(key)
 

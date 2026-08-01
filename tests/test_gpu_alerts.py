@@ -101,15 +101,31 @@ class TestFanStall(_GpuAlertCase):
         self.sustain(fleet, 1000, 300)
         self.assertEqual([k for k in self.keys() if "fanstall" in k], [])
 
-    def test_a_genuinely_stopped_fan_on_a_warm_card_alerts(self):
-        fleet = [("vader", [_card(0, temp=75, fan=0)], True)]
-        self.sustain(fleet, 1000, 120)
+    def test_a_genuinely_stopped_fan_on_a_hot_card_alerts(self):
+        fleet = [("vader", [_card(0, temp=80, fan=0)], True)]
+        self.sustain(fleet, 1000, 200)
         self.assertIn("gpu:fanstall:vader:0", self.keys())
 
     def test_a_stopped_fan_on_a_cold_card_is_normal(self):
         # Zero-RPM idle modes are a feature; a cold card with stopped fans is
         # working exactly as designed.
         fleet = [("vader", [_card(0, temp=35, fan=0, util=0)], True)]
+        self.sustain(fleet, 1000, 300)
+        self.assertEqual([k for k in self.keys() if "fanstall" in k], [])
+
+    def test_zero_rpm_idle_in_the_fifties_is_not_a_stall(self):
+        # Caught on the live fleet: a 3090 idling at 53 C with its fan fully
+        # stopped, which is exactly what a zero-RPM cooler is supposed to do.
+        # A flat 50 C bar would have fired a critical on healthy hardware.
+        fleet = [("vader", [_card(0, temp=53, fan=0, util=0, power=40)], True)]
+        self.sustain(fleet, 1000, 600)
+        self.assertEqual([k for k in self.keys() if "fanstall" in k], [])
+
+    def test_the_stall_bar_follows_the_configured_threshold(self):
+        # With a raised threshold the stall bar moves with it, so a host that is
+        # allowed to run hotter doesn't get a stall alert at a normal idle temp.
+        self.settings["gpu_temp_alert_c"] = "95"
+        fleet = [("vader", [_card(0, temp=80, fan=0)], True)]
         self.sustain(fleet, 1000, 300)
         self.assertEqual([k for k in self.keys() if "fanstall" in k], [])
 

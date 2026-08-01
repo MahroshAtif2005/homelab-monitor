@@ -52,19 +52,22 @@ def _live_services(host):
     # (a human recognises "ollama", not "llama-server"), bare process names for
     # whatever VRAM lives outside a container.
     rows = _app._host_vram_rows(0, host, h)
-    by_pid_card = {}
+    # Per-card splits, from whichever side actually knows the link. The probe
+    # resolves it for containers (pid -> cgroup -> container, pid -> GPU uuid),
+    # because nothing downstream can reconstruct it from a container name alone:
+    # the container is "ollama" and the process on the card is "llama-server".
+    by_name = {}
+    for c in ((h.get("docker") or {}).get("containers") or []):
+        if c.get("vram_by_card") and c.get("name"):
+            by_name[c["name"]] = c["vram_by_card"]
     for p in (h.get("gpu_procs") or []):
         if p.get("by_card"):
-            by_pid_card[str(p.get("name") or "")] = p["by_card"]
+            by_name["host:" + str(p.get("name") or "")] = p["by_card"]
     out = []
     for _ts, svc, mem, _host in rows:
         item = {"service": svc, "mem": mem}
-        # A container's per-card split comes from the process it contains; match
-        # on the process name we stored under "host:<name>", else leave it out
-        # rather than guessing.
-        bare = svc[5:] if svc.startswith("host:") else svc
-        if bare in by_pid_card:
-            item["by_card"] = by_pid_card[bare]
+        if svc in by_name:
+            item["by_card"] = by_name[svc]
         out.append(item)
     out.sort(key=lambda x: -(x["mem"] or 0))
     return out

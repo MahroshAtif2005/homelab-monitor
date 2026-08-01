@@ -778,6 +778,14 @@ def read_docker(gpu_procs=None):
                 c = by_id.get(cid)
                 if c is not None:
                     c["vram_mb"] = c.get("vram_mb", 0) + (p.get("mem") or 0)
+                    # Carry the per-card split up to the container too. This
+                    # mapping only exists here — the pid knows which GPU it is
+                    # on and which container it is in, and nothing downstream
+                    # can reconstruct the link from a container name alone
+                    # ("ollama" the container vs "llama-server" the process).
+                    for gidx, mb in (p.get("by_card") or {}).items():
+                        vc = c.setdefault("vram_by_card", {})
+                        vc[str(gidx)] = vc.get(str(gidx), 0) + mb
         running = sum(1 for c in conts if c["state"] == "running")
         if running:
             # One stats pass for RAM/CPU%. `docker stats` blocks ~1.5s to sample;
