@@ -88,8 +88,18 @@ class TestHistoryShape(unittest.TestCase):
         self.assertEqual(d["cards"], [])
 
 
+def _live(host, cards):
+    """Pretend `host` is online and currently reporting `cards`."""
+    import app
+    return mock.patch.dict(
+        app.HOST_DATA,
+        {host: {"data": {"host": {"gpus": cards}}, "at": int(time.time()), "fails": 0}},
+        clear=True)
+
+
 class TestMissingCards(unittest.TestCase):
-    """A card missing from the live snapshot has two very different causes."""
+    """A card missing from the live snapshot has THREE different causes, and
+    conflating any two of them produces a false alarm."""
 
     def setUp(self):
         self.c = _client()
@@ -101,15 +111,30 @@ class TestMissingCards(unittest.TestCase):
         # would leave a permanent false critical after any hardware change.
         old = int(time.time()) - 7 * 86400
         _seed("vader", [(old + t, [_card(0), _card(1)]) for t in range(0, 300, 10)])
-        d = self.c.get("/api/gpu/history?host=vader&range=all").get_json()
-        self.assertTrue(all(c["status"] == "retired" for c in d["cards"]),
-                        [c["status"] for c in d["cards"]])
+        with _live("vader", [_card(0)]):     # host IS reporting, card 1 is not
+            d = self.c.get("/api/gpu/history?host=vader&range=all").get_json()
+        by_idx = {c["idx"]: c["status"] for c in d["cards"]}
+        self.assertEqual(by_idx[1], "retired")
 
     def test_a_card_that_stopped_reporting_just_now_is_gone(self):
         now = int(time.time())
         _seed("vader", [(now - t, [_card(0), _card(1)]) for t in range(60, 0, -10)])
-        d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
-        self.assertTrue(all(c["status"] == "gone" for c in d["cards"]),
+        with _live("vader", [_card(0)]):     # card 1 vanished from a live list
+            d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        by_idx = {c["idx"]: c["status"] for c in d["cards"]}
+        self.assertEqual(by_idx[1], "gone")
+
+    def test_no_live_snapshot_at_all_is_stale_not_a_fleet_of_dead_cards(self):
+        # Found by rendering the real page right after a container restart:
+        # HOST_DATA is empty until the first successful poll, so EVERY card read
+        # as "fell off the bus" and the tab lit up with three criticals. A card
+        # missing from a live list that doesn't exist yet is not an incident.
+        now = int(time.time())
+        _seed("vader", [(now - t, [_card(0), _card(1), _card(2)]) for t in range(60, 0, -10)])
+        import app
+        with mock.patch.dict(app.HOST_DATA, {}, clear=True):
+            d = self.c.get("/api/gpu/history?host=vader&range=1h").get_json()
+        self.assertTrue(all(c["status"] == "stale" for c in d["cards"]),
                         [c["status"] for c in d["cards"]])
 
     def test_last_seen_is_reported_so_the_ui_can_say_when(self):

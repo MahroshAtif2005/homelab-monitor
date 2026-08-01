@@ -151,21 +151,29 @@ def _stitch_spans(rows, interval):
     return sorted(spans, key=lambda s: (s["idx"], s["start"]))
 
 
-def _status_for(live, hot_c, recent=True):
+def _status_for(live, hot_c, recent=True, have_live=True):
     """The status pill: what a human should conclude about this card at a glance.
 
     Ordering matters — a card can be hot AND busy, and "hot" is the fact worth
     surfacing. Power-capping is deliberately NOT a warning state: a box running a
     deliberately lowered power limit sits at its cap by design.
 
-    `recent` separates the two very different reasons a card can be missing from
-    the live snapshot. A card reporting minutes ago and absent now has fallen off
-    the bus — a real incident. A card whose last sample is days old was simply
-    removed from the machine, and calling that critical would mean every hardware
-    change leaves a permanent false alarm on the dashboard.
+    Three different reasons a card can be absent from the live snapshot, and
+    conflating any two of them produces a false alarm:
+
+    * `have_live` false — the HOST isn't reporting any cards at all right now
+      (offline, or the hub restarted and hasn't polled yet). We don't know
+      anything about this card; that is "stale", not an incident. Without this
+      the whole tab lights up red for a minute after every restart.
+    * `recent` false — the card's last sample is old, so it was removed from the
+      machine. History, not a fault.
+    * otherwise — the host is reporting cards and this one isn't among them.
+      That is a card that fell off the bus, and it is worth waking someone for.
     """
     import app as _app
     if live is None:
+        if not have_live:
+            return "stale"
         return "gone" if recent else "retired"
     mask = live.get("throttle_mask") or 0
     if mask & _app._THERMAL_BITS:
@@ -270,7 +278,8 @@ def api_gpu_history():
             "present": live is not None,
             "last_seen": last_seen.get(idx),
             "status": _status_for(live, hot_c,
-                                  recent=(last_seen.get(idx) or 0) >= recent_cutoff),
+                                  recent=(last_seen.get(idx) or 0) >= recent_cutoff,
+                                  have_live=bool(live_by_idx)),
             "now": _now_block(live),
             "supports": supports,
             "series": s,

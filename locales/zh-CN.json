@@ -855,5 +855,6 @@
   "set.gpu_overrides": "按主机覆盖温度阈值",
   "set.gpu_overrides_cap": "JSON，主机名到 °C。采用人为调低功耗上限的机器本来就更热 — 为它单独设置阈值，而不是放宽整个集群。",
   "set.gpu_fanstall": "当温热显卡的风扇读数为 0% 时告警",
-  "set.gpu_missing": "当显卡停止上报时告警"
+  "set.gpu_missing": "当显卡停止上报时告警",
+  "gpu.st_stale": "无实时数据"
 }

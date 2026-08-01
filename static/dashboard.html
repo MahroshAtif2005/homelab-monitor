@@ -340,7 +340,7 @@ th{color:var(--mut);font-weight:600;font-size:12px}.dot{display:inline-block;wid
 .gpu-mini.st-throttle{border-color:var(--crit)}
 .gpu-mini.st-hot{border-color:var(--warn)}
 .gpu-mini.st-gone{border-color:var(--crit);opacity:.72}
-.gpu-mini.st-retired{opacity:.55}
+.gpu-mini.st-retired,.gpu-mini.st-stale{opacity:.55}
 .gpu-mini-h{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .gpu-mini-h b{font-size:13px}
 .gpu-mini-h .nm{font-size:12px;color:var(--mut);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -3582,6 +3582,9 @@ function gpuStatusPill(card){
     // A card that hasn't reported in a long time was removed from the machine,
     // not lost from the bus. It keeps its history; it does not raise an alarm.
     retired:  ['info', I18N.t('gpu.st_retired','RETIRED')],
+    // The host isn't reporting cards at all right now (offline, or the hub has
+    // just restarted and hasn't polled yet). We don't know — say so.
+    stale:    ['info', I18N.t('gpu.st_stale','NO LIVE DATA')],
   }[card.status] || ['info', card.status];
   return `<span class="mc-pill ${S[0]}">${S[1]}</span>`;
 }

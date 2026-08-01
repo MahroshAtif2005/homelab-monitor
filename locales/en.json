@@ -794,5 +794,6 @@
   "set.gpu_overrides": "Per-host temperature overrides",
   "set.gpu_overrides_cap": "JSON, host name to °C. A machine whose cards run at a deliberately lowered power limit lives hotter by design — give it its own threshold instead of loosening the whole fleet's.",
   "set.gpu_fanstall": "Alert when a fan reads 0% on a warm card",
-  "set.gpu_missing": "Alert when a card stops reporting"
+  "set.gpu_missing": "Alert when a card stops reporting",
+  "gpu.st_stale": "NO LIVE DATA"
 }
