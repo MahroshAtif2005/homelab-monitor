@@ -114,6 +114,7 @@ def sample_once():
     gpus = []
     gpu_extra = {}
     procs = {}
+    svc_by_card = {}    # service -> {card idx: MB} — per-card VRAM attribution
     gpu_pids = {}
     gpu_avail = False
     gpu_vendor = None   # "nvidia" | "amd" | "hybrid" — drives the vendor-aware GPU diagnostic
@@ -127,8 +128,17 @@ def sample_once():
         # AMD card on a host without nvidia-smi was never read at all (issue #1).
         nv_gpus = []
         try:
-            rows = _app.smi(["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
-                        "--format=csv,noheader,nounits"]).splitlines()
+            # fan.speed is asked for in the same pass, but nvidia-smi rejects the
+            # WHOLE query on an unrecognised field name — so a driver too old to
+            # know it falls back to the exact previous 7-field query rather than
+            # reporting no cards at all.
+            base_fields = ("index,name,utilization.gpu,memory.used,memory.total,"
+                           "power.draw,temperature.gpu")
+            rows = _app.smi([f"--query-gpu={base_fields},fan.speed",
+                             "--format=csv,noheader,nounits"]).splitlines()
+            if not any(line.strip() for line in rows):
+                rows = _app.smi([f"--query-gpu={base_fields}",
+                                 "--format=csv,noheader,nounits"]).splitlines()
             for line in rows:
                 if not line.strip():
                     continue
@@ -136,8 +146,15 @@ def sample_once():
                 if len(p) < 7:
                     continue
                 u, mu, mt, pw, tp = (_app._gpu_num(x) for x in p[2:7])
-                nv_gpus.append({"idx": int(_app._gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
-                             "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp})
+                card = {"idx": int(_app._gpu_num(p[0])), "name": p[1] or f"GPU {p[0]}",
+                        "util": u, "mem_used": mu, "mem_total": mt, "power": pw, "temp": tp}
+                # Absent, not 0: passively-cooled datacentre cards have no fan to
+                # report, and a 0 here would trip the fan-stall alert on hardware
+                # that has no fan to stall.
+                fan = _app._gpu_opt(p[7]) if len(p) > 7 else None
+                if fan is not None:
+                    card["fan"] = round(fan)   # % of max, integral like the probe's
+                nv_gpus.append(card)
         except Exception:
             nv_gpus = []   # no nvidia-smi / wedged driver — an AMD card may still be present
         # AMD via the amdgpu sysfs back-end — read even when NVIDIA is present, so a
@@ -171,15 +188,37 @@ def sample_once():
                 # Best-effort on its own: a timeout or malformed row in this extra
                 # query must cost this sample's NVIDIA attribution, not the GPU
                 # chips below it nor the AMD fdinfo attribution that follows.
-                for line in _app.smi(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).splitlines():
-                    if line.strip():
-                        pid, mem = (p.strip() for p in line.split(","))
-                        svc = _app.service_for_pid(pid, nm)
-                        procs[svc] = procs.get(svc, 0) + _app._gpu_num(mem)
-                        try:
-                            gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + _app._gpu_num(mem)
-                        except ValueError:
-                            pass
+                #
+                # gpu_uuid comes along so VRAM can be attributed to a *card*, not
+                # just to the pool — "which of the three 3090s is ollama on" is
+                # the question the per-card cockpit exists to answer. A driver
+                # that rejects the field falls back to the original query and
+                # simply reports no per-card split.
+                uuid_idx = _app._smi_uuid_idx()
+                rows = _app.smi(["--query-compute-apps=gpu_uuid,pid,used_memory",
+                                 "--format=csv,noheader,nounits"]).splitlines()
+                has_uuid = any(line.strip() for line in rows)
+                if not has_uuid:
+                    rows = _app.smi(["--query-compute-apps=pid,used_memory",
+                                     "--format=csv,noheader,nounits"]).splitlines()
+                for line in rows:
+                    if not line.strip():
+                        continue
+                    f = [x.strip() for x in line.split(",")]
+                    if len(f) < (3 if has_uuid else 2):
+                        continue
+                    uuid, (pid, mem) = (f[0], f[1:3]) if has_uuid else (None, f[:2])
+                    svc = _app.service_for_pid(pid, nm)
+                    mb = _app._gpu_num(mem)
+                    procs[svc] = procs.get(svc, 0) + mb
+                    idx = uuid_idx.get(uuid) if uuid else None
+                    if idx is not None:
+                        per = svc_by_card.setdefault(svc, {})
+                        per[idx] = per.get(idx, 0) + mb
+                    try:
+                        gpu_pids[int(pid)] = gpu_pids.get(int(pid), 0) + mb
+                    except ValueError:
+                        pass
             except Exception:
                 pass
         # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
@@ -395,7 +434,10 @@ def sample_once():
     _app.LATEST.update(ts=ts, util=util, mem_used=mem_used, mem_total=mem_total, power=power, temp=temp,
                   cpu_power=cpu_power, dram_power=dram_power, rapl=rapl.get("domains"),
                   gpu_avail=gpu_avail, gpu_vendor=gpu_vendor, gpus=gpus, gpu_extra=gpu_extra,
-                  procs=sorted(({"service": s, "mem": round(m)} for s, m in procs.items()), key=lambda x: -x["mem"]),
+                  procs=sorted(({"service": s, "mem": round(m),
+                                 **({"by_card": {str(i): round(v) for i, v in sorted(svc_by_card[s].items())}}
+                                    if s in svc_by_card else {})}
+                                for s, m in procs.items()), key=lambda x: -x["mem"]),
                   models=[{"service": s, "model": m, "vram": v, "ram": r, "ctx_now": c}
                           for s, m, v, r, c in models],
                   model_catalog=model_catalog,

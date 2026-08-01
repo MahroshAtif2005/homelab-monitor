@@ -4932,6 +4932,37 @@ def _gpu_num(x):
     except ValueError:
         return 0.0
 
+def _smi_uuid_idx():
+    """GPU UUID → card index. `--query-compute-apps` identifies a process's card
+    by UUID and never by index, so this map is the only way to answer "which card
+    is this process on". {} when unavailable — attribution then stays pooled, as
+    it was before per-card support. Mirrors probe._nvidia_uuid_idx."""
+    out = {}
+    try:
+        for line in smi(["--query-gpu=index,uuid", "--format=csv,noheader,nounits"]).splitlines():
+            p = [x.strip() for x in line.split(",")]
+            if len(p) >= 2 and p[1]:
+                out[p[1]] = int(_gpu_num(p[0]))
+    except Exception:
+        pass
+    return out
+
+def _gpu_opt(x):
+    """Like _gpu_num, but an unsupported field stays None instead of becoming 0.
+
+    Use this for any metric where "the card can't tell us" and "the measured
+    value is zero" are different claims a human would act on differently — fan
+    speed being the sharp case: 0% means a stalled fan, absent means a passively
+    cooled card. The cockpit renders the two differently and never alerts on the
+    second. Mirrors probe._smi_opt."""
+    s = (x or "").strip()
+    if not s or s.startswith("["):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
 # ── AMD GPU back-end (issue #1) ───────────────────────────────────────────────
 # NVIDIA goes through nvidia-smi (above); AMD has no universally-present CLI, so we
 # read the kernel's amdgpu sysfs directly — available on any host with the in-tree
@@ -5104,6 +5135,15 @@ def amd_gpus(drm_root=None):
             "unified": unified,   # APU/GTT mode — per-process attribution counts GTT too
             "pdev": pdev,
         }
+        # Fan: pwm1 is the duty cycle 0-255, fan1_input the tachometer in RPM.
+        # Both stay absent on a card with no fan node (passively cooled, or a
+        # laptop where the EC owns the fan) rather than reading as a stalled fan.
+        pwm = _amd_hwmon(dev, "pwm1")
+        if pwm is not None:
+            g["fan"] = round(pwm * 100.0 / 255.0)
+        rpm = _amd_hwmon(dev, "fan1_input")
+        if rpm is not None:
+            g["fan_rpm"] = rpm
         _amd_enrich_card(g, dev)   # clocks/perf level/cap — here, while dev is known
         gpus.append(g)
     return gpus
@@ -5367,14 +5407,26 @@ _THROTTLE_BITS = [
     (0x0000000000000080, "Power brake"),  # HW_POWER_BRAKE_SLOWDOWN — external power brake
 ]
 
+# The subset of _THROTTLE_BITS that means "too hot" rather than "at the power
+# cap". A card pinned at its power limit is working as configured (vader's 3090s
+# run that way by design); a card slowing down thermally is a problem. The alert
+# rules treat the two differently, so the distinction lives here, once.
+_THERMAL_BITS = 0x0000000000000068   # SW thermal | HW thermal | HW slowdown
+
 def _decode_throttle(hexstr):
     """nvidia-smi throttle bitmask → list of *meaningful* reasons. Idle / app-clocks
     / sync-boost / display bits are normal and intentionally ignored."""
+    return _decode_throttle_mask(hexstr)[1]
+
+def _decode_throttle_mask(hexstr):
+    """As _decode_throttle, but returns (mask, reasons) — the raw mask is what
+    gets stored per sample, so history can distinguish thermal throttling from
+    power-capping without re-deriving it from the label strings."""
     try:
         mask = int(str(hexstr).strip(), 16)
     except (TypeError, ValueError):
-        return []
-    return [label for bit, label in _THROTTLE_BITS if mask & bit]
+        return 0, []
+    return mask, [label for bit, label in _THROTTLE_BITS if mask & bit]
 
 def _enrich_gpus(gpus):
     """Best-effort: attach mem_util/clocks/power_limit/pstate/temp_mem and throttle
@@ -5415,8 +5467,10 @@ def _enrich_gpus(gpus):
             g = by_idx.get(int(_gpu_num(p[0])))
             if g is None:
                 continue
-            g["throttle"] = _decode_throttle(p[1])
-            g["throttled"] = bool(g["throttle"])
+            mask, reasons = _decode_throttle_mask(p[1])
+            g["throttle_mask"] = mask
+            g["throttle"] = reasons
+            g["throttled"] = bool(reasons)
             ok = True
         if ok:
             break
@@ -5448,6 +5502,14 @@ def _gpu_extra(gpus):
     measured = [g["mem_util"] for g in gpus if "mem_util" in g]
     if measured:
         out["mem_util"] = round(sum(measured) / len(measured))
+    # Fan follows the same "only the cards that measured it" rule: a passively
+    # cooled card in the box must not pull the average toward a speed nothing
+    # reported. fan_max is what the cockpit shows — "is there headroom left?" is
+    # answered by the busiest fan, not by the mean.
+    fans = [g["fan"] for g in gpus if g.get("fan") is not None]
+    if fans:
+        out["fan"] = round(sum(fans) / len(fans))
+        out["fan_max"] = round(max(fans))
     return out
 
 def service_for_pid(pid, nm):
