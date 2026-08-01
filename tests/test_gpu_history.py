@@ -1,0 +1,212 @@
+"""Per-card GPU history storage — the table the GPU cockpit reads for every host.
+
+The point of this storage is that the hub and a remote are the SAME shape: the
+hub writes itself as host='local', so one reader serves both and the dashboard's
+old charts-here / snapshot-there fork has nothing left to stand on. These tests
+pin the parts that are easy to get subtly wrong: max-vs-avg in the rollup,
+absent-vs-zero for unreported sensors, and host isolation.
+"""
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _fresh_db():
+    """A migrated, empty database — schema exactly as a new install gets it."""
+    import app
+    path = tempfile.mktemp(suffix=".db")
+    conn = sqlite3.connect(path)
+    app._apply_schema_migrations(conn)
+    conn.commit()
+    return conn
+
+
+def _card(idx=0, **kw):
+    g = {"idx": idx, "util": 50, "mem_used": 12000, "mem_total": 24576,
+         "power": 200, "temp": 70}
+    g.update(kw)
+    return g
+
+
+class TestRecord(unittest.TestCase):
+    def setUp(self):
+        self.conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        self.repo = gpu_samples
+
+    def test_hub_and_remote_share_one_table(self):
+        self.repo.record(self.conn, 1000, "local", [_card(0)])
+        self.repo.record(self.conn, 1000, "vader", [_card(0), _card(1), _card(2)])
+        self.assertEqual(self.repo.cards_for("local", conn=self.conn), [0])
+        self.assertEqual(self.repo.cards_for("vader", conn=self.conn), [0, 1, 2])
+
+    def test_one_hosts_cards_never_leak_into_another(self):
+        self.repo.record(self.conn, 1000, "local", [_card(0, temp=40)])
+        self.repo.record(self.conn, 1000, "vader", [_card(0, temp=86)])
+        rows = self.repo.series("vader", 0, 3600, conn=self.conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][6], 86)          # avg temp, vader's card only
+
+    def test_unreported_fan_stays_null_not_zero(self):
+        # A passively cooled card reports no fan. Storing 0 would be a claim the
+        # fan is stopped, which is what the fan-stall alert fires on.
+        self.repo.record(self.conn, 1000, "vader", [_card(0)])          # no fan key
+        got = self.conn.execute("SELECT fan FROM gpu_samples").fetchone()[0]
+        self.assertIsNone(got)
+
+    def test_zero_fan_is_stored_as_zero(self):
+        # The other side of the same coin: a card that reports 0% must store 0,
+        # so a genuinely stalled fan is distinguishable from an absent sensor.
+        self.repo.record(self.conn, 1000, "vader", [_card(0, fan=0)])
+        got = self.conn.execute("SELECT fan FROM gpu_samples").fetchone()[0]
+        self.assertEqual(got, 0)
+
+    def test_throttle_mask_is_stored_not_the_reason_labels(self):
+        self.repo.record(self.conn, 1000, "vader",
+                         [_card(0, throttle_mask=0x40, throttle=["HW thermal"], throttled=True)])
+        got = self.conn.execute("SELECT throttle FROM gpu_samples").fetchone()[0]
+        self.assertEqual(got, 0x40)
+
+
+class TestRollup(unittest.TestCase):
+    def setUp(self):
+        self.conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        self.repo = gpu_samples
+
+    def test_temp_keeps_both_average_and_peak(self):
+        # An hour that averaged 71 C while peaking at 87 C is an hour with a
+        # thermal problem. Averaging alone would hide exactly that.
+        for ts, temp in ((0, 60), (10, 66), (20, 87)):
+            self.repo.record(self.conn, ts, "vader", [_card(0, temp=temp)])
+        avg, mx = self.conn.execute(
+            "SELECT temp, temp_max FROM gpu_samples_1h WHERE host='vader'").fetchone()
+        self.assertAlmostEqual(avg, 71.0, places=1)
+        self.assertEqual(mx, 87)
+
+    def test_fan_keeps_both_average_and_peak(self):
+        for ts, fan in ((0, 40), (10, 60), (20, 100)):
+            self.repo.record(self.conn, ts, "vader", [_card(0, fan=fan)])
+        avg, mx = self.conn.execute(
+            "SELECT fan, fan_max FROM gpu_samples_1h WHERE host='vader'").fetchone()
+        self.assertAlmostEqual(avg, 66.67, places=1)
+        self.assertEqual(mx, 100)
+
+    def test_throttled_seconds_count_only_the_actionable_kind(self):
+        # Three things that are NOT a thermal problem must not accumulate:
+        #   0x04 SW_POWER_CAP — a card at a deliberately lowered power limit sits
+        #        here by design; counting it would show a healthy box as
+        #        permanently throttled and train the user to ignore the light.
+        #   0x01 GPU idle     — normal operation.
+        #   0x00 nothing.
+        # Only the 0x40 HW-thermal sample counts, so one interval = 10 s.
+        self.repo.record(self.conn, 0,  "vader", [_card(0, throttle_mask=0x40)], interval=10)
+        self.repo.record(self.conn, 10, "vader", [_card(0, throttle_mask=0x04)], interval=10)
+        self.repo.record(self.conn, 20, "vader", [_card(0, throttle_mask=0x01)], interval=10)
+        self.repo.record(self.conn, 30, "vader", [_card(0, throttle_mask=0)],    interval=10)
+        secs = self.conn.execute(
+            "SELECT throttle_secs FROM gpu_samples_1h WHERE host='vader'").fetchone()[0]
+        self.assertEqual(secs, 10)
+
+    def test_sustained_thermal_throttle_accumulates_across_samples(self):
+        for ts in (0, 10, 20):
+            self.repo.record(self.conn, ts, "vader", [_card(0, throttle_mask=0x20)], interval=10)
+        secs = self.conn.execute(
+            "SELECT throttle_secs FROM gpu_samples_1h WHERE host='vader'").fetchone()[0]
+        self.assertEqual(secs, 30)
+
+    def test_each_card_rolls_up_separately(self):
+        self.repo.record(self.conn, 0, "vader",
+                         [_card(0, temp=80), _card(1, temp=86), _card(2, temp=64)])
+        rows = dict((r[0], r[1]) for r in self.conn.execute(
+            "SELECT idx, temp_max FROM gpu_samples_1h WHERE host='vader'"))
+        self.assertEqual(rows, {0: 80, 1: 86, 2: 64})
+
+    def test_hours_bucket_independently(self):
+        self.repo.record(self.conn, 0,    "vader", [_card(0, temp=60)])
+        self.repo.record(self.conn, 3700, "vader", [_card(0, temp=90)])
+        rows = self.conn.execute(
+            "SELECT ts, temp_max FROM gpu_samples_1h WHERE host='vader' ORDER BY ts").fetchall()
+        self.assertEqual(rows, [(0, 60), (3600, 90)])
+
+
+class TestHealthAndSpans(unittest.TestCase):
+    def setUp(self):
+        self.conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        self.repo = gpu_samples
+
+    def test_health_counts_hot_and_throttled_samples_per_card(self):
+        for ts in range(0, 50, 10):
+            self.repo.record(self.conn, ts, "vader", [
+                _card(0, temp=70),
+                _card(1, temp=86, throttle_mask=0x40),
+            ])
+        by_idx = {r[0]: r for r in self.repo.health("vader", 0, conn=self.conn)}
+        self.assertEqual(by_idx[0][3], 70)      # peak temp
+        self.assertEqual(by_idx[0][5], 0)       # throttled samples
+        self.assertEqual(by_idx[0][6], 0)       # samples at/above 84 C
+        self.assertEqual(by_idx[1][3], 86)
+        self.assertEqual(by_idx[1][5], 5)
+        self.assertEqual(by_idx[1][6], 5)
+
+    def test_power_capped_counts_only_against_a_known_limit(self):
+        # A card that doesn't report a power limit must not be counted as capped
+        # — the denominator is missing, not zero.
+        self.repo.record(self.conn, 0, "vader", [_card(0, power=280)])
+        self.repo.record(self.conn, 10, "vader", [_card(0, power=280, power_limit=280)])
+        capped = self.repo.health("vader", 0, conn=self.conn)[0][7]
+        self.assertEqual(capped, 1)
+
+    def test_throttle_spans_return_only_thermal_and_power_samples(self):
+        self.repo.record(self.conn, 0,  "vader", [_card(0, throttle_mask=0x40)])
+        self.repo.record(self.conn, 10, "vader", [_card(0, throttle_mask=0x01)])
+        self.repo.record(self.conn, 20, "vader", [_card(0, throttle_mask=0)])
+        spans = self.repo.throttle_spans("vader", 0, conn=self.conn)
+        self.assertEqual([s[0] for s in spans], [0])
+
+
+class TestVramAttribution(unittest.TestCase):
+    def setUp(self):
+        self.conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        self.repo = gpu_samples
+
+    def test_per_service_vram_is_scoped_to_its_host(self):
+        # Every box in a fleet runs a service called "ollama"; the series for one
+        # host must not pick up another host's rows.
+        self.conn.executemany("INSERT INTO proc(ts,service,mem,host) VALUES(?,?,?,?)", [
+            (0, "ollama", 60000, "vader"),
+            (0, "ollama", 8000,  "local"),
+        ])
+        rows = self.repo.vram_by_service("vader", 0, 3600, conn=self.conn)
+        self.assertEqual(rows, [(0, "ollama", 60000)])
+
+    def test_legacy_hub_rows_are_readable_as_local(self):
+        # Rows written before the host column existed are the hub's own, and the
+        # migration's DEFAULT must make them queryable under 'local'.
+        self.conn.execute("INSERT INTO proc(ts,service,mem) VALUES(0,'ollama',8000)")
+        rows = self.repo.vram_by_service("local", 0, 3600, conn=self.conn)
+        self.assertEqual(rows, [(0, "ollama", 8000)])
+
+
+class TestLegacyGpuRows(unittest.TestCase):
+    def test_pre_migration_card_history_reads_as_the_hub(self):
+        # The hub has been storing per-card rows for multi-GPU rigs all along
+        # without ever displaying them. After the migration that history belongs
+        # to 'local' and the cockpit can chart it immediately.
+        conn = _fresh_db()
+        from backend.db.repos import gpu_samples
+        conn.execute("INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) "
+                     "VALUES(100,0,50,12000,24576,200,70)")
+        self.assertEqual(gpu_samples.cards_for("local", conn=conn), [0])
+        rows = gpu_samples.series("local", 0, 3600, conn=conn)
+        self.assertEqual(rows[0][6], 70)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -344,6 +344,7 @@ def sample_once():
         return
     from backend.db.repos import system as system_repo
     from backend.db.repos import experiments as exp_repo
+    from backend.db.repos import gpu_samples as gpu_samples_repo
     # Read retention before acquiring LOCK — get_settings() also takes LOCK
     # (non-reentrant), so calling it inside the block would deadlock the thread.
     _retention = _app.get_retention_secs() if ts % 360 < _app.INTERVAL else None
@@ -357,7 +358,8 @@ def sample_once():
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(ts, *gcols, host["cpu"], host["ram_used"],
               host["ram_total"], host["load1"], host["ctemp"], cpu_power, dram_power)])
-        _app.DB.executemany("INSERT INTO proc VALUES(?,?,?)", [(ts, svc, mem) for svc, mem in procs.items()])
+        _app.DB.executemany("INSERT INTO proc(ts,service,mem,host) VALUES(?,?,?,'local')",
+                            [(ts, svc, mem) for svc, mem in procs.items()])
         pp_rows = _app._attribute_power_rows(ts, power, procs, cpu_power, top_cpu)
         if pp_rows:
             _app.DB.executemany("INSERT INTO power_proc(ts,kind,name,watts) VALUES(?,?,?,?)", pp_rows)
@@ -365,12 +367,14 @@ def sample_once():
                             [(ts, svc, mdl, vram, ram) for svc, mdl, vram, ram, _ctx in models if vram is not None])
         _app.DB.executemany("INSERT INTO edges VALUES(?,?,?,?)",
                             [(ts, caller, server, n) for (caller, server), n in edges.items()])
-        # Per-GPU history only when there's more than one card (single-GPU rigs are
-        # already covered by the aggregate `samples` table) — keeps storage lean.
-        if gpu_avail and len(gpus) > 1:
-            _app.DB.executemany(
-                "INSERT INTO gpu_samples(ts,idx,util,mem_used,mem_total,power,temp) VALUES(?,?,?,?,?,?,?)",
-                [(ts, g["idx"], g["util"], g["mem_used"], g["mem_total"], g["power"], g["temp"]) for g in gpus])
+        # Per-card history for the hub's own cards, stored under host='local' so
+        # the GPU cockpit reads them through exactly the same query it uses for a
+        # remote. Written for single-card rigs too, now that the tab charts fan,
+        # memory-bandwidth and throttle state per card — none of which the pooled
+        # `samples` table carries, so "one card means the aggregate covers it" no
+        # longer holds.
+        if gpu_avail and gpus:
+            gpu_samples_repo.record(_app.DB, ts, "local", gpus, interval=_app.INTERVAL)
         _cur_net_rows = list(_app._net_rows(ts, nm))   # host NICs + per-container talkers (#30)
         _app.DB.executemany("INSERT INTO net_samples(ts,iface,bytes_in,bytes_out) VALUES(?,?,?,?)",
                        _cur_net_rows)

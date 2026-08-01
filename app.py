@@ -159,7 +159,23 @@ LOCK = threading.Lock()
 _DB_MAINTENANCE = False   # True during backup/restore — collector skips DB writes
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+-- Per-card GPU history for EVERY host, hub included (the hub stores itself as
+-- host='local'). One table rather than a hub table plus a remote one: the GPU
+-- cockpit renders local and remote through the same reader, and a second table
+-- would let the two drift. Pre-existing rows predate the host column and are
+-- migrated to 'local', which is exactly what they were.
 CREATE TABLE IF NOT EXISTS gpu_samples(ts INTEGER, idx INTEGER, util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL);
+-- Hourly per-card rollup. Rates are averaged, but temp/fan also keep a MAX:
+-- an hour that averaged 71 °C while peaking at 87 °C is an hour with a thermal
+-- problem, and an average would hide exactly the event worth seeing.
+-- throttle_secs counts the seconds the card reported a thermal/power throttle.
+CREATE TABLE IF NOT EXISTS gpu_samples_1h(
+  ts INTEGER NOT NULL, host TEXT NOT NULL DEFAULT 'local', idx INTEGER NOT NULL,
+  util REAL, mem_used REAL, mem_total REAL, power REAL,
+  temp REAL, temp_max REAL, fan REAL, fan_max REAL,
+  throttle_secs INTEGER DEFAULT 0, cnt INTEGER DEFAULT 1,
+  PRIMARY KEY(ts, host, idx));
+CREATE INDEX IF NOT EXISTS idx_gpu_1h_host_ts ON gpu_samples_1h(host, ts);
 CREATE TABLE IF NOT EXISTS net_samples(ts INTEGER, iface TEXT, bytes_in INTEGER, bytes_out INTEGER);
 CREATE TABLE IF NOT EXISTS proc(ts INTEGER, service TEXT, mem REAL);
 CREATE TABLE IF NOT EXISTS models(ts INTEGER, service TEXT, model TEXT, vram REAL, ram REAL);
@@ -290,7 +306,7 @@ CREATE TABLE IF NOT EXISTS host_samples(
   ts INTEGER NOT NULL, host TEXT NOT NULL,
   cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
   gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
-  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL, gpu_temp REAL,
   PRIMARY KEY(ts, host)
 );
 CREATE INDEX IF NOT EXISTS idx_host_samples_host_ts ON host_samples(host, ts);
@@ -298,7 +314,7 @@ CREATE TABLE IF NOT EXISTS host_samples_1h(
   ts INTEGER NOT NULL, host TEXT NOT NULL,
   cpu REAL, ram_used REAL, ram_total REAL, load1 REAL, ctemp REAL,
   gpu_util REAL, gpu_mem_used REAL, gpu_mem_total REAL,
-  gpu_power REAL, cpu_power REAL, dram_power REAL,
+  gpu_power REAL, cpu_power REAL, dram_power REAL, gpu_temp REAL,
   cnt INTEGER DEFAULT 1,
   PRIMARY KEY(ts, host)
 );
@@ -337,6 +353,31 @@ _UPTIME_MIGRATIONS = ("cert_days_remaining INTEGER", "cert_expires_at INTEGER")
 _UPTIME_CHECK_MIGRATIONS = ("public INTEGER NOT NULL DEFAULT 0",)
 # RAM-spill split for loaded models (ollama size - size_vram). NULL = unknown (non-ollama).
 _MODELS_MIGRATIONS = ("ram REAL",)
+# Per-card GPU history for every host (the GPU cockpit). `host` turns what was a
+# hub-only table into a fleet-wide one; existing rows are the hub's, so they
+# default to 'local' and stay valid. The rest is the telemetry the cockpit charts:
+# fan speed, memory-bandwidth utilisation, clocks, the power cap the draw is
+# measured against, memory-junction temp and the raw throttle bitmask (kept as a
+# mask, not as labels, so history can tell thermal throttling from power-capping
+# without re-parsing strings).
+_GPU_SAMPLE_MIGRATIONS = ("host TEXT NOT NULL DEFAULT 'local'", "fan REAL", "mem_util REAL",
+                          "clk_sm REAL", "clk_mem REAL", "power_limit REAL",
+                          "temp_mem REAL", "throttle INTEGER")
+# Same story for per-service VRAM: `proc` was implicitly the hub's own, so its
+# rows are 'local' and remotes now write alongside them.
+_PROC_MIGRATIONS = ("host TEXT NOT NULL DEFAULT 'local'",)
+# GPU temperature per host: host_samples has always pooled GPU util/VRAM/power
+# but silently dropped temperature, so a remote's thermal history simply didn't
+# exist. Both the raw table and the rollup gain it.
+_COLUMN_MIGRATIONS = (("host_samples", "gpu_temp REAL"),
+                      ("host_samples_1h", "gpu_temp REAL"))
+# Indexes that cover columns added by the migrations above. They cannot live in
+# _DB_SCHEMA: executescript runs BEFORE the ALTERs, so on an existing database
+# the column wouldn't exist yet and the whole script would fail.
+_POST_MIGRATION_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_gpus_host_ts ON gpu_samples(host, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_proc_host_ts ON proc(host, ts)",
+)
 
 def _data_dir():
     return os.path.dirname(os.path.abspath(DB_PATH)) or "."
@@ -371,7 +412,11 @@ def _apply_schema_migrations(conn):
                                   _SAMPLE_MIGRATIONS, _HOST_MIGRATIONS,
                                   _RUNS_MIGRATIONS, _UPTIME_MIGRATIONS,
                                   _UPTIME_CHECK_MIGRATIONS,
-                                  models_migrations=_MODELS_MIGRATIONS)
+                                  models_migrations=_MODELS_MIGRATIONS,
+                                  gpu_sample_migrations=_GPU_SAMPLE_MIGRATIONS,
+                                  proc_migrations=_PROC_MIGRATIONS,
+                                  column_migrations=_COLUMN_MIGRATIONS,
+                                  post_migration_indexes=_POST_MIGRATION_INDEXES)
     conn.executescript(_EDGE_STATE_MIGRATION)
 
 def _backfill_rollups(conn):
@@ -3631,22 +3676,67 @@ def _record_host_sample(name, hostd):
     per-host Costs view (and future per-host history charts) integrate over.
     Absent sensors stay NULL (no GPU ≠ zero watts). Runs on the poller's worker
     threads, so the write takes LOCK on its own — never nest under
-    HOST_DATA_LOCK. A storage failure must not break the poll itself."""
+    HOST_DATA_LOCK. A storage failure must not break the poll itself.
+
+    Also stores the host's per-card GPU history and per-service VRAM into the
+    same tables the hub uses for itself (keyed by host name), which is what lets
+    the GPU cockpit render a remote and the hub through one code path instead of
+    a charts-here / snapshot-there fork."""
     from backend.db.repos import host_samples as _hs_repo
+    from backend.db.repos import gpu_samples as _gs_repo
     gpu = hostd.get("gpu") or {}
+    cards = hostd.get("gpus") or []
+    ts = int(time.time())
     try:
         with LOCK:
             _hs_repo.record(
-                DB, int(time.time()), name,
+                DB, ts, name,
                 cpu=hostd.get("cpu"), ram_used=hostd.get("ram_used"),
                 ram_total=hostd.get("ram_total"), load1=hostd.get("load1"),
                 ctemp=hostd.get("ctemp"),
                 gpu_util=gpu.get("util"), gpu_mem_used=gpu.get("mem_used"),
                 gpu_mem_total=gpu.get("mem_total"), gpu_power=gpu.get("power"),
+                gpu_temp=gpu.get("temp"),
                 cpu_power=hostd.get("cpu_power"), dram_power=hostd.get("dram_power"))
+            if cards:
+                _gs_repo.record(DB, ts, name, cards, interval=INTERVAL)
+            rows = _host_vram_rows(ts, name, hostd)
+            if rows:
+                DB.executemany("INSERT INTO proc(ts,service,mem,host) VALUES(?,?,?,?)", rows)
             DB.commit()
     except Exception as e:
         print(f"host sample store error ({name}):", e, flush=True)
+
+def _host_vram_rows(ts, name, hostd):
+    """One (ts, service, mem, host) row per service holding VRAM on `name`.
+
+    Prefers the container attribution the probe already computes (it maps each
+    compute pid through /proc/<pid>/cgroup, so `ollama` reads as the container
+    name a human recognises) and falls back to the bare process name for VRAM
+    held outside a container. Returns [] when the host reports no GPU processes
+    — better an honest gap in the chart than a row of zeros."""
+    procs = hostd.get("gpu_procs") or []
+    if not procs:
+        return []
+    by_svc, claimed = {}, 0
+    for c in ((hostd.get("docker") or {}).get("containers") or []):
+        mb = c.get("vram_mb") or 0
+        if mb > 0 and c.get("name"):
+            by_svc[c["name"]] = by_svc.get(c["name"], 0) + mb
+            claimed += mb
+    # Whatever the containers didn't account for is running on the host itself;
+    # attribute it by process name so it is visible rather than silently lost.
+    total = sum((p.get("mem") or 0) for p in procs)
+    if total - claimed > 0:
+        for p in sorted(procs, key=lambda x: -(x.get("mem") or 0)):
+            if claimed >= total:
+                break
+            take = min(p.get("mem") or 0, total - claimed)
+            if take > 0:
+                nm = "host:" + str(p.get("name") or "?")
+                by_svc[nm] = by_svc.get(nm, 0) + take
+                claimed += take
+    return [(ts, svc, mem, name) for svc, mem in by_svc.items()]
 
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import host_poller

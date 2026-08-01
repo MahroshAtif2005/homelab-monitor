@@ -125,10 +125,15 @@ def power_proc_entity(name: str, ts: int, bk: int, kind: str = None, conn=None) 
 
 
 def max_vram_for_service(name: str, ts: int, conn=None):
-    """Return MAX(mem) from proc for a service since ts."""
+    """Return MAX(mem) from proc for one of the HUB's services since ts.
+
+    Host-scoped: `proc` now holds every host's per-service VRAM, and this feeds
+    the hub's own cost attribution — an unscoped MAX would pick up a same-named
+    service on a remote (every box running `ollama` shares the name).
+    """
     c = conn or connection()
     return c.execute(
-        "SELECT MAX(mem) FROM proc WHERE service=? AND ts>=?", (name, ts)
+        "SELECT MAX(mem) FROM proc WHERE host='local' AND service=? AND ts>=?", (name, ts)
     ).fetchone()[0]
 
 
