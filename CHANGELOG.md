@@ -7,6 +7,12 @@ release notes.
 
 ## [Unreleased] — `next`
 
+## [0.29.1](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.29.1) — 2026-08-07 · **A container stopped for two weeks was reported using 1.25 TB**
+*The fourth fix @andreahaku has landed here — this one found, diagnosed and fixed entirely from the outside, issue and pull request both. The Containers tab was charging a whole shared data directory to whichever container happened to name it.*
+
+**Fixed**
+- **Shared data is no longer billed to one container just because nobody else named the same path.** The check for "more than one container can write this" compared mount sources as strings, so it only ever caught two containers naming the same directory. It missed the nested case: one container mounting `/srv/models` while others mount `/` — which is what toolbox and distrobox do, at `/run/host` — write the same bytes under two different strings, so the entire tree was charged to the single container that named it. On the host that surfaced this, a container **stopped for two weeks** with a **40.9 kB** writable layer was reported at **1.25 TB**. Sharing is now decided by path coverage rather than string equality, and deliberately one-directional: mounting a parent doesn't cost you your data because someone else mounted a subdirectory of yours, so a container with 500 GB under `/srv/media` keeps being billed for it when another mounts only `/srv/media/photos`. Sources are normalised once for both the sharing check and the skip that consumes it — normalising only one side would make the skip miss in silence — and the collector logs a line when a parent mount takes data out of the count, because a disk column that empties itself without explanation is impossible to diagnose in the field. _(contributed by @andreahaku, #264/#265)_
+
 ## [0.29.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.29.0) — 2026-08-01 · **The GPU tab, on every box — per-card history, fan speed, and thermal alerts that ignore power caps**
 *The hub got charts; every other machine got a snapshot. That was a storage limitation, not a UI one — per-card history simply wasn't kept for remotes. It is now, for every host, so one tab serves the whole fleet: a panel per card on a shared scale, fan speed (not collected anywhere in this project before), thermal-throttle windows shaded on the sparkline, and which card each service is sitting on. Alerts are sustained and per card, and a card pinned at a power limit you set yourself doesn't count as throttling.*
 
