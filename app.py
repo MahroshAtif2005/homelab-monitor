@@ -1795,10 +1795,11 @@ def _container_disk(ct, prev=None, shared=frozenset()):
     """A container's real on-disk footprint: writable layer (SizeRw) + every
     read-write volume and bind mount it owns. Read-only mounts (configs, the
     docker socket, our own /rootfs) aren't this container's data, so they're
-    skipped, and so are sources in `shared` — a bind/volume mounted by more than
-    one container (e.g. a common /srv/share) belongs to none of them, and counting
-    it under each both double-counts and makes unrelated rows show the same huge
-    number. Falls back toward SizeRw alone when host paths can't be measured —
+    skipped, and so are sources in `shared` — data reachable read-write from more
+    than one container (e.g. a common /srv/share, or a directory another container
+    covers by mounting its parent) belongs to none of them, and counting it under
+    each both double-counts and makes unrelated rows show the same huge number.
+    Falls back toward SizeRw alone when host paths can't be measured —
     e.g. HOST_ROOT not mounted — which is the old behaviour.
 
     `prev` is this container's last computed total: if a mount's `du` overruns
@@ -1809,8 +1810,8 @@ def _container_disk(ct, prev=None, shared=frozenset()):
     for m in (ct.get("Mounts") or []):
         if not m.get("RW") or m.get("Type") not in ("volume", "bind"):
             continue
-        src = m.get("Source")
-        if not src or not src.startswith("/") or src in shared:
+        src = _norm_src(m.get("Source"))
+        if not src or src in shared:
             continue
         sz = _dir_size(src)
         if sz is None:
@@ -1821,19 +1822,85 @@ def _container_disk(ct, prev=None, shared=frozenset()):
         return max(total, prev)
     return total
 
+def _norm_src(src):
+    """A mount source as a normalised host path, or None when it isn't one.
+
+    Podman reports pseudo-sources (`devpts`, `tmpfs`) for some mounts and
+    `_container_disk` has always skipped anything not absolute; the sharing check
+    has to apply the same rule and the same normalisation, or the two disagree
+    about what a source is and the `src in shared` skip silently misses."""
+    if not src or not src.startswith("/"):
+        return None
+    p = os.path.normpath(src)
+    return p[1:] if p.startswith("//") else p   # POSIX keeps a leading "//" verbatim
+
+def _covers(parent, child):
+    """True when `parent` is a *strict* ancestor directory of `child`.
+
+    Both arguments must already be normalised (see `_norm_src`). Compared per path
+    component, so `/srv` doesn't "contain" `/srvfoo`, and `/` is an ancestor of
+    every other absolute path. Equality is deliberately False: the caller treats
+    "someone mounts the same source" and "someone mounts a directory above mine"
+    as two different cases.
+
+    Purely lexical, so it can't see through symlinks: if `/srv/models` is a link
+    to `/mnt/disk/models` and another container mounts `/mnt/disk`, the sharing
+    goes unnoticed. Resolving that would mean `realpath` against the host rootfs,
+    which isn't always mounted — the pre-existing behaviour, left alone."""
+    if parent == child:
+        return False
+    return True if parent == "/" else child.startswith(parent + "/")
+
+_shared_note = {"seen": frozenset()}
+
 def _shared_mount_sources(sized):
-    """Sources (volume/bind) mounted read-write by more than one container — i.e.
-    shared infrastructure that shouldn't be attributed to any single container."""
-    users = {}
-    for ct in sized:
-        seen = set()
+    """Sources (volume/bind) that shouldn't be attributed to any single container.
+
+    Two ways a source qualifies:
+
+    - **Another container mounts the same source.** The original rule, unchanged.
+    - **Another container mounts a directory above it.** New, and the reason this
+      function was touched: a container mounting `/srv/models` and another mounting
+      `/` (what toolbox and distrobox do, at `/run/host`) write the same bytes, but
+      no two sources match as strings. The whole tree used to be billed to the one
+      container that named it — on the host that prompted this, a container stopped
+      for two weeks with a 40.9 kB writable layer was charged 1.25 TB.
+
+    The check is deliberately **one-directional**: mounting a parent does not make
+    you lose it because someone else mounted a subdirectory of yours. A container
+    with 500 GB under `/srv/media` keeps being billed for it when another mounts
+    only `/srv/media/photos` — the sub-tree stops being double-counted, and the
+    exclusive part doesn't vanish from the report. Nesting between two mounts of
+    the *same* container is not sharing either."""
+    owners = {}                                    # source -> set of container indexes
+    for i, ct in enumerate(sized):
         for m in (ct.get("Mounts") or []):
             if m.get("RW") and m.get("Type") in ("volume", "bind"):
-                src = m.get("Source")
-                if src and src not in seen:        # a container mounting it twice still counts once
-                    seen.add(src)
-                    users[src] = users.get(src, 0) + 1
-    return frozenset(src for src, n in users.items() if n > 1)
+                src = _norm_src(m.get("Source"))
+                if src:
+                    owners.setdefault(src, set()).add(i)   # mounted twice still counts once
+    shared, covered = set(), set()
+    for src, mine in owners.items():
+        if len(mine) > 1:
+            shared.add(src)
+            continue
+        for other, theirs in owners.items():
+            if _covers(other, src) and theirs - mine:
+                shared.add(src)
+                covered.add(src)
+                break
+    # A parent mount can silently empty the disk column for a whole host (one
+    # container with `/` read-write covers everything), so say it once when the
+    # set changes rather than let the numbers disappear without explanation.
+    if covered != _shared_note["seen"]:
+        _shared_note["seen"] = frozenset(covered)
+        if covered:
+            names = sorted(covered)
+            head = ", ".join(names[:3]) + (f" (+{len(names) - 3} more)" if len(names) > 3 else "")
+            print(f"NOTE: not billing {head} to any container — another container mounts a "
+                  f"parent directory read-write, so that data isn't exclusively theirs",
+                  flush=True)
+    return frozenset(shared)
 
 def _refresh_docker_disk():
     """Measure every container's footprint (running or stopped — stopped
