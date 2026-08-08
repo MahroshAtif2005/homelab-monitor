@@ -58,6 +58,23 @@ VERSION      = "0.29.1"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
+# ── The fast lane ────────────────────────────────────────────────────────────
+# INTERVAL is the *storage* cadence, and it must stay that way: every energy and
+# cost figure in this project is `sum(watts) * INTERVAL / 3_600_000`, so a sample
+# that lands in the database at any other spacing is silently mispriced.
+#
+# FAST_INTERVAL is the *screen* cadence. A separate loop re-reads only the cheap
+# values — /proc for CPU/RAM/load/temperature, one nvidia-smi query for the cards
+# already discovered — refreshes them in LATEST and wakes the SSE stream. It never
+# writes a row, so history stays exactly as dense as it was, cost stays exact, and
+# the expensive half of a sample (Docker, model-server probes, caller attribution,
+# per-process VRAM) keeps running once per INTERVAL as before.
+#
+# 0 disables the fast lane entirely and the dashboard falls back to polling.
+FAST_INTERVAL = max(0, int(os.environ.get("FAST_INTERVAL", "2") or 0))
+if FAST_INTERVAL >= INTERVAL:
+    # A fast lane no faster than the sampler buys nothing and doubles the reads.
+    FAST_INTERVAL = 0
 _RETENTION_DAYS_DEFAULT = int(os.environ.get("RETENTION_DAYS", "180"))
 RETENTION    = _RETENTION_DAYS_DEFAULT * 86400
 _DISK_IO_RETENTION = 7 * 86400   # per-device disk-I/O history: dense, 7-day ring
@@ -503,6 +520,73 @@ LATEST = {"ts": 0, "util": 0, "mem_used": 0, "mem_total": 24576, "power": 0, "te
           "cpu_power": None, "dram_power": None,
           "procs": [], "models": [], "callers": [], "host": {}, "gpu_avail": None, "gpu_vendor": None, "gpus": [], "gpu_extra": {},
           "model_meta": {}, "serving": [], "training": [], "devtools": [], "model_catalog": []}
+# ── Live revision: the "something changed" signal the SSE stream rides on ────
+# Bumped by every producer that refreshes LATEST (the sampler, the fast lane) and
+# by the fleet poller. Readers wait on the condition rather than polling it, so an
+# idle stream costs one blocked thread and zero CPU, and a new sample reaches the
+# browser in the time it takes to serialize it.
+#
+# Lock order: LIVE_COND is a leaf. Never acquire LOCK or HOST_DATA_LOCK while
+# holding it — bump_live() touches nothing else for exactly that reason.
+LIVE_REV  = 0
+FLEET_REV = 0
+LIVE_COND = threading.Condition()
+
+def bump_live():
+    """Publish 'LATEST changed' to every waiting SSE stream."""
+    global LIVE_REV
+    with LIVE_COND:
+        LIVE_REV += 1
+        LIVE_COND.notify_all()
+
+def bump_fleet():
+    """Publish 'a remote host's data changed'. Separate from bump_live() so the
+    stream can send the fleet table only when the fleet actually moved, instead
+    of re-shipping every host on every 2 s local tick."""
+    global FLEET_REV
+    with LIVE_COND:
+        FLEET_REV += 1
+        LIVE_COND.notify_all()
+
+def fleet_payload():
+    """Compact per-host summary rows for the All-hosts table: local first, then
+    registered hosts in the order they were added. Served by /api/fleet and
+    pushed on the SSE `fleet` event — one builder, so poll and push can't drift."""
+    rows = [{"name": "local", "label": socket.gethostname() + " (this hub)",
+             "ssh_target": None, "host": enrich_os_upgrade(_local_now_snapshot()),
+             "at": int(time.time()), "online": True, "is_local": True,
+             "last_check": {"summary": {"overall": "ok"}}}]
+    hosts = list_hosts()
+    with HOST_DATA_LOCK:
+        for h in hosts:
+            entry = HOST_DATA.get(h["name"]) or {}
+            data  = entry.get("data") or {}
+            rows.append({
+                "name": h["name"],
+                "label": h["name"],
+                "ssh_target": h["ssh_target"],
+                "host": enrich_os_upgrade(data.get("host")) if data else None,
+                "at": entry.get("at"),
+                "online": _host_is_online(entry),
+                "is_local": False,
+                "last_check": h.get("last_check"),
+                "error": entry.get("error"),
+            })
+    return {"hosts": rows, "interval": INTERVAL, "rev": FLEET_REV}
+
+def live_payload():
+    """The small live-values document: what /api/data returns as `now`, and
+    nothing else. No database work, no LOCK — this is the endpoint that has to
+    stay cheap enough to serve every couple of seconds.
+
+    LATEST is copied before serializing: the sampler updates it without holding
+    LOCK (it always has), so iterating the live dict could otherwise trip over a
+    key being added mid-serialization."""
+    now = dict(LATEST)
+    return {"version": VERSION, "rev": LIVE_REV, "interval": INTERVAL,
+            "fast_interval": FAST_INTERVAL,
+            "mem_total": now.get("mem_total") or 24576, "now": now}
+
 # Where the recognised AI servers live ({name, ip, provider}) — kept OUTSIDE
 # LATEST on purpose: LATEST is served wholesale as /api/data "now", and internal
 # container IPs don't belong in a browser payload. Refreshed each sample.
@@ -515,6 +599,9 @@ SYSTEMD_ADMIN_DIR = "/etc/systemd/system/"   # units here are admin/user-authore
 _ct_cache = {"list": [], "at": 0}
 _scan_since = {}
 _cpu_prev = {"idle": 0, "total": 0}
+# The fast lane's own /proc/stat counters — see _cpu_pct() on why these can't be
+# shared with the sampler's.
+_cpu_prev_fast = {"idle": 0, "total": 0}
 
 # ── Docker API over the unix socket ────────────────────────────────────────────
 def _docker_req(method, path, body=None, timeout=8):
@@ -820,12 +907,22 @@ def ai_models_now():
     return list(models), now
 
 # ── Host metrics (read from /proc, /sys, statvfs — host values via shared kernel)
-def _cpu_pct():
+def _cpu_pct(state=None):
+    """CPU busy % since this caller's previous reading.
+
+    `state` carries the previous counters, and every concurrent caller MUST bring
+    its own. /proc/stat is cumulative, so the figure is entirely a function of the
+    delta between two reads: two loops sharing one state dict each consume the
+    other's interval and both report a window neither of them meant to measure —
+    the 10 s sampler would silently be storing a 2 s figure. The fast lane keeps
+    _cpu_prev_fast for exactly this reason."""
+    if state is None:
+        state = _cpu_prev
     parts = list(map(int, open("/proc/stat").readline().split()[1:]))
     idle, total = parts[3] + parts[4], sum(parts)
-    di, dt = idle - _cpu_prev["idle"], total - _cpu_prev["total"]
-    _cpu_prev.update(idle=idle, total=total)
-    return round(100 * (dt - di) / dt, 1) if dt > 0 and _cpu_prev["total"] else 0.0
+    di, dt = idle - state["idle"], total - state["total"]
+    state.update(idle=idle, total=total)
+    return round(100 * (dt - di) / dt, 1) if dt > 0 and state["total"] else 0.0
 
 def read_disks():
     # Read the *host* mount table (PID 1 lives in the host mount namespace), then
@@ -1110,6 +1207,67 @@ def read_host():
     h["net"] = _cached_inv("net",  60, _local_net)
     h["sec"] = _cached_inv("sec", 300, _local_sec)
     return h
+
+def read_host_fast():
+    """The moving half of read_host(): four /proc reads and the temperature.
+
+    Deliberately does NOT call read_disks() (a statvfs per mounted filesystem) or
+    any of the _cached_inv inventories (OS/hardware/network/security) — those
+    change on the scale of minutes to reboots, and re-reading them every couple of
+    seconds is the entire cost this fast lane exists to avoid. The sampler keeps
+    refreshing them at INTERVAL; the fast lane merges over the top and leaves them
+    in place."""
+    h = {}
+    try: h["cpu"] = _cpu_pct(_cpu_prev_fast)
+    except Exception: pass
+    try:
+        mi = {}
+        for ln in open("/proc/meminfo"):
+            mi[ln.split(":")[0]] = int(ln.split()[1])
+        h["ram_total"] = round(mi["MemTotal"] / 1024)
+        h["ram_used"] = round((mi["MemTotal"] - mi.get("MemAvailable", mi.get("MemFree", 0))) / 1024)
+        h["ram_kernel"] = round((mi.get("SUnreclaim", 0) + mi.get("KernelStack", 0)
+                                 + mi.get("PageTables", 0)) / 1024)
+    except Exception:
+        pass
+    try: h["load1"] = float(open("/proc/loadavg").read().split()[0])
+    except Exception: pass
+    try: h["uptime"] = int(float(open("/proc/uptime").read().split()[0]))
+    except Exception: pass
+    try: h["ctemp"] = _cpu_temp_c()
+    except Exception: pass
+    return h
+
+def gpu_cards_fast():
+    """Refresh util/VRAM/power/temp/fan for the cards the sampler already found.
+
+    One nvidia-smi query, and only the volatile fields — no compute-app
+    attribution, no clock/throttle enrichment, no card discovery. Matching cards
+    by index and updating in place is the point: appearing and disappearing cards
+    are the sampler's business, so the fast lane can never invent a card, renumber
+    the AMD block, or disagree with the per-card history in the database.
+
+    Returns {idx: {field: value}} for the caller to merge. {} on any failure — a
+    wedged driver degrades the refresh rate of the GPU chips, nothing else."""
+    out = {}
+    try:
+        rows = smi(["--query-gpu=index,utilization.gpu,memory.used,power.draw,temperature.gpu",
+                    "--format=csv,noheader,nounits"]).splitlines()
+    except Exception:
+        return {}
+    for line in rows:
+        if not line.strip():
+            continue
+        p = [x.strip() for x in line.split(",")]
+        if len(p) < 5:
+            continue
+        try:
+            idx = int(_gpu_num(p[0]))
+        except (TypeError, ValueError):
+            continue
+        out[idx] = {"util": _gpu_num(p[1]), "mem_used": _gpu_num(p[2]),
+                    "power": _gpu_num(p[3]), "temp": _gpu_num(p[4])}
+    return out
 
 # ── System / Hardware / Network / Security inventory (local hub) ──────────────
 # Mirror of probe.py's read_os/hw/net/sec for the box the hub itself runs on.
@@ -3766,6 +3924,11 @@ def _poll_one_host(h):
                 entry["error_at"] = int(time.time())
                 entry["fails"]    = int(entry.get("fails", 0)) + 1
             HOST_DATA[h["name"]] = entry
+        # Push the fleet the moment a poll lands. A remote's cadence is still the
+        # poller's — its data comes over SSH and making that faster would cost
+        # real network — but the browser no longer waits out its own poll on top
+        # of it, which was up to 15 s of pure queueing latency per host.
+        bump_fleet()
         if data:
             _record_host_sample(h["name"], data.get("host") or {})
     except Exception as e:
@@ -7039,10 +7202,12 @@ def _brief_run_once(now=None):
 # Phase 3.2: moved to backend/collectors/ — re-exported for backward compat
 from backend.collectors import brief_worker
 from backend.collectors import watchdog as _collector_watchdog
+from backend.collectors import fast_sampler, fast_sample_once
 
 
 if "pytest" not in sys.modules:
     threading.Thread(target=collector, daemon=True).start()
+    threading.Thread(target=fast_sampler, daemon=True).start()
     threading.Thread(target=host_poller, daemon=True).start()
     threading.Thread(target=uptime_worker, daemon=True).start()
     threading.Thread(target=brief_worker, daemon=True).start()
