@@ -7,6 +7,9 @@ release notes.
 
 ## [Unreleased] — `next`
 
+## [0.30.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.30.0) — 2026-08-08 · **A dashboard that keeps up, disk scans on every box — and a container that had quietly been running itself twice**
+*Live values went from twenty-five seconds stale to two, and the app asks the server for less than it did before, because the fix was to stop conflating how often something is measured with how often it is stored. Chasing a stream that ticked twice per interval then turned up something older and worse: every container ever shipped has been running two complete copies of the application.*
+
 **Added**
 - **The dashboard moves in real time now — and asks the server for less than it used to.** Screen cadence and storage cadence are separate things at last. `SAMPLE_INTERVAL` still governs what gets written, because every energy and cost figure is integrated as `sum(watts) × INTERVAL` and a denser sample would silently reprice your whole history. Alongside it, a new **`FAST_INTERVAL`** (2s, `0` disables) re-reads only the cheap counters, **writes no rows**, and wakes a server-sent-event stream; the heavy work stays on the sampler. `/api/data` — ~15 bucketed aggregates plus the entire charted series — is now fetched no faster than its own buckets can change. Live values: **~25s worst case → ~2s**. Requests over 65 seconds on a live box: **`/api/data` 4 → 1, `/api/fleet` 4 → 0**, and a backgrounded tab costs nothing at all.
 - **Charts and KPIs refresh in place instead of the page being rebuilt.** Every refresh used to destroy and re-instantiate every chart on the page — which is also why the code had to hand-save and restore which datasets you'd toggled off. They're updated in place now, and count-up animations don't re-run on a live tick, because a number that re-animates every two seconds never settles.
