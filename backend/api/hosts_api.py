@@ -1,7 +1,6 @@
 """backend/api/hosts_api.py — hosts_api routes (Phase 3.4)."""
 from flask import Blueprint, request, jsonify, Response, send_file, send_from_directory, after_this_request, g, abort
 import time
-import socket
 import re
 import shlex
 
@@ -88,34 +87,13 @@ def api_fleet():
     import app as _app
     """Compact summary KPIs for every host in the fleet. Drives the All-hosts
     table. Order: local first, then registered hosts in the order they were
-    added."""
-    hosts = _app.list_hosts()
-    rows  = []
+    added.
 
-    # Local row
-    rows.append({"name": "local", "label": socket.gethostname() + " (this hub)",
-                 "ssh_target": None, "host": _app.enrich_os_upgrade(_app._local_now_snapshot()),
-                 "at": int(time.time()), "online": True, "is_local": True,
-                 "last_check": {"summary": {"overall": "ok"}}})
-
-    with _app.HOST_DATA_LOCK:
-        for h in hosts:
-            entry = _app.HOST_DATA.get(h["name"]) or {}
-            data  = entry.get("data") or {}
-            at    = entry.get("at")
-            online = _app._host_is_online(entry)
-            rows.append({
-                "name": h["name"],
-                "label": h["name"],
-                "ssh_target": h["ssh_target"],
-                "host": _app.enrich_os_upgrade(data.get("host")) if data else None,
-                "at": at,
-                "online": online,
-                "is_local": False,
-                "last_check": h.get("last_check"),
-                "error": entry.get("error"),
-            })
-    return jsonify({"hosts": rows, "interval": _app.INTERVAL})
+    The rows are built in app.fleet_payload() because /api/stream pushes the same
+    document on its `fleet` event — two builders would drift, and the table would
+    then say something different depending on whether it arrived by poll or by
+    push."""
+    return jsonify(_app.fleet_payload())
 
 
 @bp.route("/api/hosts/<name>/test", methods=["POST"])

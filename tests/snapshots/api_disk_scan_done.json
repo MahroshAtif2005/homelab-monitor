@@ -9,6 +9,7 @@
   ],
   "error": null,
   "free": 512,
+  "host": "local",
   "path": "/tmp",
   "state": "done",
   "total": 1024

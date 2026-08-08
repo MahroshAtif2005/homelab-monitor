@@ -3383,11 +3383,22 @@ async function loadHealth(){
 }
 
 // ── Renderers (history-backed tabs) ───────────────────────────────────────────
+// The renderers are split in two because the data behind them moves at two very
+// different speeds.
+//
+//   renderLive()  — everything that reads D.now and nothing else. No fetch, no
+//                   database behind it, cheap enough to run every couple of
+//                   seconds off an SSE frame.
+//   renderData()  — the history-backed half: the insight feed, the cost card
+//                   (which fetches /api/cost), the inventory panels and the
+//                   charts. Runs when a new /api/data lands.
+//
+// Before the split, one 15-second tick repainted the whole page — including
+// charts, which were destroyed and rebuilt from scratch — so nothing could be
+// refreshed quickly without refreshing all of it.
 function renderData(){
   if(!D || !D.now) return;   // a degraded/malformed /api/data (no `now`) must not crash the page
-  const n=D.now, H=n.host||{}, tot=D.mem_total;
   setVer(D.version);
-  document.getElementById('lastup').textContent=I18N.tf('header.updated','updated {t}',{t:new Date().toLocaleTimeString()});
 
   // insights & at-a-glance cards used to live on the old Overview; that tab is
   // now the fleet table. The IDs may no longer exist on the page — guard the
@@ -3396,6 +3407,41 @@ function renderData(){
   if(insEl){ insEl.innerHTML = (D.insights||[]).map(i=>
     `<div class="ins ${i.level}"><div class="ic">${ICON[i.level]||'•'}</div><div><div class="t">${esc(i.title)}</div><div class="d">${esc(i.detail)}</div></div></div>`).join('')
     || '<div class="ins ok"><div class="ic">✅</div><div><div class="t">All good</div><div class="d">No issues detected.</div></div></div>'; }
+
+  renderLive();
+
+  // Panels that are NOT on the live path, and why: renderCost() fetches
+  // /api/cost (a database range query — running it every couple of seconds is
+  // exactly the cost this split avoids), and the inventory panels below read the
+  // /api/health snapshot and server-side caches that only move every 60–300s.
+  if(CURRENT_HOST === 'local'){
+    renderSysInfo();
+    renderTopProcs();
+    renderCost();
+  }
+  // Network/Security read the active host block; re-render them on each data
+  // refresh (and on first load) when one of them is the visible tab.
+  if(TAB==='network')  renderNetwork();
+  if(TAB==='security') renderSecurity();
+
+  buildCharts();
+}
+
+// Set while a repaint is driven by a live stream frame rather than a fresh
+// /api/data. Painters that animate on arrival check it and assign directly —
+// see mcCountUp().
+let LIVE_TICK = false;
+
+// The live half: repaint the values, leave the page structure alone.
+function renderLive(opts){
+  if(!D || !D.now) return;
+  LIVE_TICK = !!(opts && opts.live);
+  try{ paintLive(); } finally { LIVE_TICK = false; }
+}
+
+function paintLive(){
+  const n=D.now, H=n.host||{};
+  document.getElementById('lastup').textContent=I18N.tf('header.updated','updated {t}',{t:new Date().toLocaleTimeString()});
 
   // The GPU tab is host-agnostic and owns its own data (/api/gpu/*), so it is
   // refreshed here rather than populated here — the only GPU panel still fed
@@ -3427,16 +3473,7 @@ function renderData(){
       `<div style="margin-bottom:9px"><div style="display:flex;justify-content:space-between;font-size:13px">
        <span>💾 ${esc(dk.mount)}</span><span class="muted">${dk.used} / ${dk.total} GB · ${dk.pct}%</span></div>
        <div class="dbar"><div style="width:${dk.pct}%;background:${sev(dk.pct)}"></div></div></div>`).join('');
-    renderSysInfo();
-    renderTopProcs();
-    renderCost();
   }
-  // Network/Security read the active host block; re-render them on each data
-  // refresh (and on first load) when one of them is the visible tab.
-  if(TAB==='network')  renderNetwork();
-  if(TAB==='security') renderSecurity();
-
-  buildCharts();
 }
 
 // Per-GPU cards (issue #95): one card per physical GPU with live util/VRAM/power/
@@ -5293,13 +5330,35 @@ function dualOpts(labels,ymax){const grid=cv('--free'),tick=cv('--mut'),leg=cv('
    y:{position:'left',min:0,max:ymax||100,grid:{color:grid},ticks:{color:tick}},
    y1:{position:'right',min:0,grid:{drawOnChartArea:false},ticks:{color:tick}}},
   plugins:{legend:{labels:{color:leg,boxWidth:12}}}};}
+// Refresh a chart in place when its shape hasn't changed — same type, same
+// datasets in the same order — and only fall back to destroy-and-rebuild when it
+// genuinely has (a service appears, a host switch changes the series).
+//
+// Rebuilding on every tick was the single most expensive thing the refresh did:
+// a full canvas teardown and re-instantiation for every chart on the page, which
+// also dropped which datasets the user had toggled off — hence the hand-rolled
+// visibility save/restore below, which an in-place update doesn't need because
+// the chart instance (and its per-dataset state) survives.
+//
+// Options are reassigned rather than kept: they carry the theme colours read at
+// draw time and the y-axis max derived from the data, so a theme switch or a new
+// peak still lands.
 function mk(id,cfg){
+  const c=charts[id];
+  const sameShape = c && c.config.type===cfg.type
+    && c.data.datasets.length===cfg.data.datasets.length
+    && c.data.datasets.every((ds,i)=>ds.label===cfg.data.datasets[i].label);
+  if(sameShape){
+    c.data.labels=cfg.data.labels;
+    cfg.data.datasets.forEach((ds,i)=>Object.assign(c.data.datasets[i],ds));
+    if(cfg.options) c.options=cfg.options;
+    c.update('none');   // no entry animation: this is a refresh, not a redraw
+    return;
+  }
   const hidden={};
-  if(charts[id]){
-    charts[id].data.datasets.forEach((ds,i)=>{
-      hidden[ds.label]=!charts[id].isDatasetVisible(i);
-    });
-    charts[id].destroy();
+  if(c){
+    c.data.datasets.forEach((ds,i)=>{ hidden[ds.label]=!c.isDatasetVisible(i); });
+    c.destroy();
   }
   charts[id]=new Chart(document.getElementById(id),cfg);
   Object.keys(hidden).forEach(label=>{
@@ -6400,9 +6459,21 @@ async function loadFleet(){
   let j;
   try{ j = await(await fetch('/api/fleet')).json(); }
   catch(e){ return; }
+  applyFleet(j);
+}
+// Paint a fleet document, however it arrived — polled from /api/fleet or pushed
+// on the stream's `fleet` event. A remote's data still comes over SSH at the
+// poller's cadence (making *that* faster would cost real network), but the
+// browser no longer waits out its own poll on top of it.
+function applyFleet(j){
+  if(!j || !j.hosts) return;
   FLEET = j;
   renderHostBar();
   if(TAB==='overview'){ renderFleet(); renderMissionControl(); }
+  // The Host tab renders a remote entirely from FLEET, so a push refreshes a
+  // remote box's KPIs as soon as its poll lands. renderGpuTab is deliberately
+  // not here: it fetches, so it stays on the history tick.
+  if(CURRENT_HOST!=='local' && TAB==='host') renderHostTab();
   // A local-only tab viewed for a remote host renders from FLEET — repaint it
   // now that fresh fleet data exists (first paint happens before /api/fleet
   // returns, so without this the GPU tab shows a stale notice until the next
@@ -6444,6 +6515,7 @@ function refreshCurrentTab(){
   if(TAB === 'services')  { renderServicesTab(); return; }
   if(TAB === 'costs')     { renderCosts(true); return; }
   if(TAB === 'gpu')       { renderGpuTab(true); return; }   // host-scoped: refetch for the new host
+  if(TAB === 'disks')     { renderDisksTab(); return; }     // host-scoped since remotes are scannable
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 
@@ -6775,7 +6847,10 @@ async function refreshMcCost(){
 }
 function mcCountUp(el, target, dur, dec){
   if(!el) return; target = (+target)||0; dec = dec==null?2:dec;
-  if(MC_RM){ el.textContent = target.toFixed(dec); return; }
+  // A count-up is an *arrival* animation — it reads as "here is the number" the
+  // first time a panel paints. On a live tick every couple of seconds it reads as
+  // a number that never settles, so live repaints assign straight to the value.
+  if(MC_RM || LIVE_TICK){ el.textContent = target.toFixed(dec); return; }
   MC_RAF.push(true); const tok = MC_RAF.length; const t0 = performance.now();
   (function step(now){
     if(tok!==MC_RAF.length){ el.textContent = target.toFixed(dec); return; }   // canceled by a newer render
@@ -7722,39 +7797,69 @@ function renderRamTree(){
 }
 
 // ── Disks tab: WizTree-style folder treemap per disk (on-demand scan) ─────────
+// Runs on any host in the fleet: the hub reads its own filesystem through the
+// read-only root mount, and a remote is scanned with the same `du` over the SSH
+// channel the fleet is already polled on — no agent, nothing installed.
 const _diskCrumbs = {};   // cardId -> [{name, path}]
-function _dskId(mount){ return 'dsk_'+mount.replace(/[^a-z0-9]/gi,'_'); }
-function renderDisksTab(){
+// The card id carries the host: two machines both mounting "/" would otherwise
+// share a DOM id, and clicking Scan on one would repaint the other's treemap.
+function _dskId(mount, host){
+  return 'dsk_'+String(host||CURRENT_HOST||'local').replace(/[^a-z0-9]/gi,'_')
+        +'_'+mount.replace(/[^a-z0-9]/gi,'_');
+}
+function _dskNotice(root, title, detail){
+  root.dataset.sig='';   // force a rebuild once the host can be scanned again
+  root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'
+    +title+'</div><div class="d">'+detail+'</div></div></div></div>';
+}
+async function renderDisksTab(){
   const root=document.getElementById('disksbody'); if(!root) return;
-  if(CURRENT_HOST!=='local'){
-    root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'+I18N.t('disks.local_only','Local host only')+'</div>'
-      +'<div class="d">'+I18N.t('disks.local_only_d','Disk-content analysis reads the host filesystem directly, so it runs on the hub\'s own machine. Switch the host selector back to <b>Local</b> to use it.')+'</div></div></div></div>';
-    return;
+  const host=CURRENT_HOST, local=host==='local';
+  if(!local){
+    // HOST_DATA is loaded lazily by whichever tab needs it, so arriving here
+    // straight from a host switch can find it empty or still holding the
+    // previous host — which would read as "offline" for a host that is up.
+    if(!HOST_DATA || HOST_DATA.name!==host){
+      await loadHostData(host);
+      if(CURRENT_HOST!==host) return;   // switched again while we were waiting
+    }
+    // A remote can only be scanned while the hub can actually reach it, and the
+    // scan needs POSIX du — so say which of the two is missing rather than
+    // drawing a Scan button that will fail.
+    if(!HOST_DATA || !HOST_DATA.online){
+      _dskNotice(root, I18N.t('disks.host_offline','Host is offline'),
+        I18N.tf('disks.host_offline_d','A disk scan runs live over SSH, so <b>{host}</b> has to be reachable. It will be available again once the host is back.',{host:esc(host)}));
+      return;
+    }
+    const fam=((HOST_DATA.host&&HOST_DATA.host.os&&HOST_DATA.host.os.family)||'').toLowerCase();
+    if(fam==='windows'){
+      _dskNotice(root, I18N.t('disks.win_unsupported','Not available on Windows hosts yet'),
+        I18N.t('disks.win_unsupported_d','Disk-content analysis uses the POSIX <code>du</code>, which Windows hosts don\'t provide. Their disk usage totals still show on the Host tab.'));
+      return;
+    }
   }
   const disks=(currentHostBlock().disks)||[];
   if(!disks.length){ root.innerHTML='<div class="card"><div class="muted">'+I18N.t('disks.none','No disks reported yet.')+'</div></div>'; return; }
-  // Only (re)build the cards if the set of mounts changed — otherwise we'd wipe
-  // an in-progress scan/treemap on every 15s refresh.
-  const sig=disks.map(d=>d.mount).join('|');
+  // Only (re)build the cards if the host or the set of mounts changed — otherwise
+  // we'd wipe an in-progress scan/treemap on every refresh.
+  const sig=host+'::'+disks.map(d=>d.mount).join('|');
   if(root.dataset.sig!==sig){
     root.dataset.sig=sig;
     root.innerHTML=disks.map(d=>{
-      const id=_dskId(d.mount);
+      const id=_dskId(d.mount,host);
       return `<div class="card"><h2>💾 ${esc(d.mount)} <span class="muted" style="font-weight:400;font-size:13px">${I18N.tf('disks.usage','— {used} / {total} GB · {pct}% used',{used:d.used,total:d.total,pct:d.pct})}</span></h2>
         <div class="tm-crumb" id="${id}_crumb"></div>
         <div class="treemap" id="${id}_tm" style="height:300px"><div class="tm-empty muted">${I18N.t('disks.scan_hint','Click <b>Scan contents</b> to see what\'s using this disk.')}</div></div>
         <div class="hstep-actions"><button class="btn-mini" id="${id}_scan">${I18N.t('disks.scan_btn','🔍 Scan contents')}</button>
           <span class="muted" id="${id}_st" style="font-size:12px;align-self:center"></span></div></div>`;
     }).join('');
-    disks.forEach(d=>{ const id=_dskId(d.mount);
-      document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true); });
+    disks.forEach(d=>{ const id=_dskId(d.mount,host);
+      document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true, host); });
     applyIcons(root);   // the per-disk 💾 headings are built here, so iconify them too
-  } else {
-    // mounts unchanged: just refresh the used/total figures in the headers
-    disks.forEach(d=>{ const c=document.querySelector('#'+_dskId(d.mount)+'_crumb'); /* keep state */ });
   }
 }
-async function scanDisk(mount, path, id, rescan){
+async function scanDisk(mount, path, id, rescan, host){
+  host = host || CURRENT_HOST || 'local';
   const tm=document.getElementById(id+'_tm'), st=document.getElementById(id+'_st');
   if(!tm) return;
   tm.innerHTML='<div class="tm-empty muted">'+I18N.tf('disks.scanning','⏳ Scanning <b>{path}</b>… large disks can take a while (cached after the first run).',{path:esc(path)})+'</div>';
@@ -7764,10 +7869,15 @@ async function scanDisk(mount, path, id, rescan){
   const ci=_diskCrumbs[id].findIndex(c=>c.path===path);
   if(ci>=0) _diskCrumbs[id]=_diskCrumbs[id].slice(0,ci+1);
   else _diskCrumbs[id].push({name:(path.split('/').pop()||path), path});
-  renderDiskCrumb(id, mount);
+  renderDiskCrumb(id, mount, host);
   let data=null;
   for(let tries=0; tries<200; tries++){
-    let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)+(rescan&&tries===0?'&rescan=1':''))).json(); }
+    // The host rides on every poll, not just the first: the scan is cached per
+    // (host, path) server-side, so dropping it mid-poll would start reading
+    // another machine's result.
+    let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)
+        +'&host='+encodeURIComponent(host)
+        +(rescan&&tries===0?'&rescan=1':''))).json(); }
     catch(e){ tm.innerHTML='<div class="tm-empty muted">'+I18N.t('disks.scan_failed','Scan request failed: ')+esc(String(e))+'</div>'; return; }
     if(j.state==='done'){ data=j; break; }
     if(j.state==='error'){ tm.innerHTML='<div class="tm-empty muted">⚠️ '+esc(j.error||'scan error')+'</div>'; return; }
@@ -7781,7 +7891,7 @@ async function scanDisk(mount, path, id, rescan){
   // any folder with a real path is click-to-drill-deeper.
   function mk(e){
     const node={ label:e.name, value:e.bytes, title:e.path||e.name,
-      click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false)):null };
+      click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false, host)):null };
     if(e.children&&e.children.length) node.children=e.children.map(mk);
     return node;
   }
@@ -7791,14 +7901,14 @@ async function scanDisk(mount, path, id, rescan){
   renderTreemap(tm, leaves, {height:360, fmt:fmtBytes});
   if(st) st.innerHTML=I18N.tf('disks.scanned','scanned {when} · {size} across {n} folders · <b>click any folder to drill deeper</b>',{when:relTime(data.at),size:fmtBytes(data.total),n:entries.length});
 }
-function renderDiskCrumb(id, mount){
+function renderDiskCrumb(id, mount, host){
   const el=document.getElementById(id+'_crumb'); if(!el) return;
   const cr=_diskCrumbs[id]||[];
   if(cr.length<2){ el.innerHTML=''; return; }
   el.innerHTML=cr.map((c,i)=> i===cr.length-1
     ? `<span class="cur">${esc(c.name)}</span>`
     : `<button data-p="${esc(c.path)}">${esc(c.name)}</button><span class="sep">›</span>`).join('');
-  el.querySelectorAll('button').forEach(b=>b.onclick=()=>scanDisk(mount, b.dataset.p, id, false));
+  el.querySelectorAll('button').forEach(b=>b.onclick=()=>scanDisk(mount, b.dataset.p, id, false, host));
 }
 
 async function renderHostTab(){
@@ -8992,9 +9102,64 @@ document.getElementById('updcopy').onclick = async () => {
 document.getElementById('updnowbtn').onclick = startSelfUpdate;
 showTab(TAB);
 loadData(); loadHealth(); loadFleet();
-setInterval(()=>{
-  if(!document.getElementById('auto').checked) return;
-  loadData(); loadHealth(); loadFleet();
+
+// ── Live values over SSE, history on a timer ─────────────────────────────────
+// Two cadences instead of one. `/api/stream` pushes the live values the moment
+// the server has them (every FAST_INTERVAL, ~2s) and pushes the fleet table when
+// a remote's poll lands. `/api/data` — the expensive one, ~15 bucketed
+// aggregates plus the whole charted series — is fetched only as fast as its own
+// buckets can actually change.
+//
+// Net effect on load: fewer requests than the old flat 15s poll, not more. The
+// stream is one connection that is silent when nothing moves, the history poll
+// got slower, and a backgrounded tab now costs nothing at all instead of
+// fetching the full payload every 15 seconds forever.
+let LIVE_ES=null, LIVE_ON=false, LIVE_REV_SEEN=-1, HIST_TIMER=null;
+
+const autoOn = () => { const el=document.getElementById('auto'); return !el || el.checked; };
+
+function applyLive(j){
+  if(!j || !j.now) return;
+  // Frames can only move forward: a slow /api/data response landing after a
+  // newer push must not put stale numbers back on screen.
+  if(j.rev!=null){ if(j.rev<=LIVE_REV_SEEN) return; LIVE_REV_SEEN=j.rev; }
+  if(!D) return;              // history hasn't landed yet; nothing to merge into
+  D.now = j.now;
+  if(j.mem_total) D.mem_total = j.mem_total;
+  renderLive({live:true});
+}
+
+function openLiveStream(){
+  if(LIVE_ES || !window.EventSource) return;
+  let es;
+  try{ es = new EventSource('/api/stream'); }
+  catch(e){ return; }        // no stream: the history timer keeps the page alive
+  LIVE_ES = es;
+  es.addEventListener('now',   e => { if(autoOn()){ try{ applyLive(JSON.parse(e.data)); }catch(err){} } });
+  es.addEventListener('fleet', e => { if(autoOn()){ try{ applyFleet(JSON.parse(e.data)); }catch(err){} } });
+  es.onopen  = () => { LIVE_ON = true;  scheduleHistory(); };
+  // EventSource reconnects on its own; until it does, LIVE_ON=false pulls the
+  // history timer back to the old 15s cadence so the page keeps updating.
+  es.onerror = () => { LIVE_ON = false; scheduleHistory(); };
+}
+
+function closeLiveStream(){
+  if(LIVE_ES){ LIVE_ES.close(); LIVE_ES=null; }
+  LIVE_ON = false;
+}
+
+// Never poll the history faster than its own buckets. /api/data buckets to
+// max(INTERVAL, span/MAX_POINTS), so on a 6h range a point cannot change more
+// than once a minute — polling every 15s just re-fetches the same numbers.
+function historyPeriod(){
+  if(!LIVE_ON) return 15000;                       // no stream: unchanged cadence
+  const bk = (D && D.bucket_sec) ? D.bucket_sec*1000 : 15000;
+  return Math.max(15000, Math.min(60000, bk));
+}
+
+function refreshHistory(){
+  loadData(); loadHealth();
+  if(!LIVE_ON) loadFleet();   // with a stream open, the fleet arrives on push
   // Re-render host-scoped tabs so cached remote data refreshes too.
   if(TAB==='host')     renderHostTab();
   if(TAB==='network')  renderNetwork();
@@ -9009,7 +9174,28 @@ setInterval(()=>{
   // hid all its cards and repainted the "waiting for per-GPU data" notice on top
   // of a fully populated cockpit — data on screen, gone ~15s later.
   if(LOCAL_ONLY_TABS.has(TAB) && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
-},15000);
+}
+
+function scheduleHistory(){
+  clearTimeout(HIST_TIMER);
+  HIST_TIMER = setTimeout(() => {
+    if(autoOn() && !document.hidden) refreshHistory();
+    scheduleHistory();
+  }, historyPeriod());
+}
+
+// A tab nobody is looking at should cost nothing. The old poll ran flat out in
+// background tabs; now the stream is dropped on hide and everything is caught up
+// in one refresh on the way back.
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden){ closeLiveStream(); return; }
+  openLiveStream();
+  if(autoOn()){ refreshHistory(); loadFleet(); }
+  scheduleHistory();
+});
+
+openLiveStream();
+scheduleHistory();
 // AI-tab fast poll: while the AI Models tab is visible, ride the light
 // /api/ai/now (no DB; server-side throttled re-probe of ollama) every 5s so
 // load/unload/spill/ctx react in seconds instead of the ~25s worst case of
@@ -9017,7 +9203,8 @@ setInterval(()=>{
 // regular cadence. Failures are silent: the 15s /api/data poll still rules.
 let AI_NOW_BUSY=false;
 setInterval(async()=>{
-  if(TAB!=='models' || CURRENT_HOST!=='local' || AI_NOW_BUSY || !D || !document.getElementById('auto').checked) return;
+  // document.hidden: a backgrounded tab must not keep re-probing ollama.
+  if(TAB!=='models' || CURRENT_HOST!=='local' || AI_NOW_BUSY || !D || document.hidden || !document.getElementById('auto').checked) return;
   AI_NOW_BUSY=true;
   try{
     const j=await(await fetch('/api/ai/now')).json();

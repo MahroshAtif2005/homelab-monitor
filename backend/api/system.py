@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify, Response, send_file, send_from_di
 import time
 import os
 import re
+import json
 import shutil
 import tempfile
 import threading
@@ -10,6 +11,74 @@ import threading
 from backend.db.repos import system as system_repo
 
 bp = Blueprint('system', __name__)
+
+# Flask's threaded server gives every open stream its own thread. That is fine for
+# the handful of dashboards a home lab has open, but the count must be bounded —
+# a browser stuck in a reconnect loop would otherwise keep allocating threads.
+_STREAM_MAX = 24
+_stream_n, _stream_lock = 0, threading.Lock()
+
+
+@bp.route("/api/now")
+def api_now():
+    """Live values only — no history, no database, no LOCK.
+
+    The polling counterpart of /api/stream, and the reason a fast refresh doesn't
+    cost anything: /api/data re-runs ~15 bucketed aggregates and re-ships the whole
+    charted series, which is wasted work when all that changed is a utilisation
+    number. Clients that can't hold a stream open poll this instead."""
+    import app as _app
+    return jsonify(_app.live_payload())
+
+
+@bp.route("/api/stream")
+def api_stream():
+    """Server-sent events: one `now` frame whenever the live values change, one
+    `fleet` frame whenever a remote host's poll lands.
+
+    Cheaper than the poll it replaces. An idle stream is a thread blocked on a
+    condition variable — no timers, no queries — and the browser stops paying for
+    a request every 15 seconds whether or not anything moved."""
+    import app as _app
+    global _stream_n
+    with _stream_lock:
+        if _stream_n >= _STREAM_MAX:
+            return jsonify({"error": "too many open streams"}), 503
+        _stream_n += 1
+
+    def gen():
+        global _stream_n
+        last_live = last_fleet = -1
+        try:
+            # Retry hint for the browser's own reconnect logic, then an immediate
+            # first frame so a fresh page paints from the stream instead of
+            # waiting out a whole interval for the next sample.
+            yield "retry: 3000\n\n"
+            while True:
+                with _app.LIVE_COND:
+                    if _app.LIVE_REV == last_live and _app.FLEET_REV == last_fleet:
+                        # Bounded wait so the loop still emits a keepalive through
+                        # proxies that time out idle connections.
+                        _app.LIVE_COND.wait(timeout=20)
+                    live, fleet = _app.LIVE_REV, _app.FLEET_REV
+                if live == last_live and fleet == last_fleet:
+                    yield ": ping\n\n"
+                    continue
+                if live != last_live:
+                    last_live = live
+                    yield "event: now\ndata: " + json.dumps(_app.live_payload()) + "\n\n"
+                if fleet != last_fleet:
+                    last_fleet = fleet
+                    yield "event: fleet\ndata: " + json.dumps(_app.fleet_payload()) + "\n\n"
+        except GeneratorExit:
+            raise
+        finally:
+            with _stream_lock:
+                _stream_n -= 1
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             "Connection": "keep-alive"})
 
 
 @bp.route("/api/data")
@@ -409,23 +478,57 @@ def api_hub_pubkey():
 @bp.route("/api/disk_scan")
 def api_disk_scan():
     import app as _app
-    path = os.path.normpath(request.args.get("path") or "/")
+    """WizTree-style folder scan of `path`, on the hub or on any registered host.
+
+    `host` selects the machine: absent (or "local") reads the hub's own
+    filesystem through the read-only root mount; a registered name runs the same
+    `du` over the SSH channel the fleet is already polled on."""
+    path = _app._safe_scan_path(request.args.get("path") or "/")
+    if not path:
+        return jsonify({"path": request.args.get("path"), "state": "error",
+                        "error": "invalid path"})
+    host = (request.args.get("host") or "local").strip() or "local"
     rescan = request.args.get("rescan") == "1"
-    real = _app._safe_host_dir(path)
-    if not real:
-        return jsonify({"path": path, "state": "error", "error": f"not a readable directory: {path}"})
+    key = _app._disk_scan_key(host, path)
+    is_local = key[0] == "local"
+
+    real = None
+    if is_local:
+        real = _app._safe_host_dir(path)
+        if not real:
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": f"not a readable directory: {path}"})
+    else:
+        # Fail here rather than after a 10-minute SSH attempt: an unregistered
+        # name, or a host the probe has never reached, can't be scanned.
+        h = next((x for x in _app.list_hosts() if x["name"] == host), None)
+        if not h:
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": f"unknown host: {host}"})
+        fam = (((h.get("last_check") or {}).get("os") or {}).get("family") or "linux")
+        if fam == "windows":
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": "Disk-content scanning isn't supported on Windows "
+                                     "hosts yet — it needs the POSIX du."})
+
     with _app._DISK_SCAN_LOCK:
-        ent = _app._DISK_SCAN.get(path)
+        ent = _app._DISK_SCAN.get(key)
         if ent and not rescan:
             if ent["state"] == "scanning":
-                return jsonify({"path": path, "state": "scanning"})
+                return jsonify({"path": path, "host": host, "state": "scanning"})
             if ent["state"] == "done" and time.time() - ent["at"] < _app._DISK_SCAN_TTL:
-                return jsonify({"path": path, **ent})
+                return jsonify({"path": path, "host": host, **ent})
             if ent["state"] == "error" and time.time() - ent["at"] < 20:
-                return jsonify({"path": path, **ent})
-        _app._DISK_SCAN[path] = {"state": "scanning", "at": int(time.time())}
-    threading.Thread(target=_app._disk_scan_worker, args=(path, real), daemon=True).start()
-    return jsonify({"path": path, "state": "scanning"})
+                return jsonify({"path": path, "host": host, **ent})
+        _app._DISK_SCAN[key] = {"state": "scanning", "at": int(time.time())}
+
+    if is_local:
+        threading.Thread(target=_app._disk_scan_worker, args=(path, real, key),
+                         daemon=True).start()
+    else:
+        threading.Thread(target=_app._disk_scan_worker_remote, args=(key, host, path),
+                         daemon=True).start()
+    return jsonify({"path": path, "host": host, "state": "scanning"})
 
 
 @bp.route("/api/backup")

@@ -24,7 +24,9 @@ docker compose up -d
 
 Open `http://<your-host>:9800` and you're done. Full options (from source, GPU toolkit, Windows/WSL2) → [**Install docs**](https://sikamikanikobg.github.io/homelab-monitor/install/).
 
-> 🆕 **v0.26 — the LLM Benchmark Lab.** A new AI tab that measures what your local models *actually* do on your GPUs: generation & prompt tokens/sec, load time, the VRAM↔RAM split, and the largest context that still fits fully in VRAM — per card, priced like everything else in the app, stored so you only re-run when something changes. [Release notes](https://github.com/SikamikanikoBG/homelab-monitor/releases) · [changelog](CHANGELOG.md).
+<!-- Deliberately not pinned to a version number: this line used to name a
+     specific release and was three releases out of date within two months. -->
+> 🆕 **What's new** — every release is written up in full, with the reasoning behind it: [latest release](https://github.com/SikamikanikoBG/homelab-monitor/releases/latest) · [changelog](CHANGELOG.md). The dashboard also shows you the notes once, in-app, after it updates itself.
 
 ## What you get
 
@@ -52,7 +54,8 @@ And the rest of the lab, the way it always was:
 
 - **Containers, honestly** — health plus **RAM and VRAM in separate columns** (real resident RAM, not page cache), and click one to tail its logs in a side drawer.
 - **systemd services** — local or remote, your own units highlighted, failures first.
-- **WizTree-style disk treemaps**, **network I/O with per-container top talkers**, and a **mini-htop** for who's eating CPU and RAM.
+- **WizTree-style disk treemaps — on any box in the fleet.** Click into the folders filling a disk on the hub *or* on any Linux host you've added; a remote is scanned over the same SSH connection everything else uses, so there's still nothing to install on it. Plus **network I/O with per-container top talkers** and a **mini-htop** for who's eating CPU and RAM.
+- **It moves like a live dashboard.** Utilisation, RAM, temperature and power update every couple of seconds over a push stream instead of a fixed poll — and it does that while making *fewer* requests than before, because the expensive history query is fetched only as often as its own chart buckets can change, and a tab you're not looking at stops costing anything at all. Sampling and storage cadence are untouched, so history stays exactly as dense (and costs stay exactly as accurate) as they were.
 - **Multi-machine over SSH** — paste one key per box; Linux, a Pi, even **Windows**. No agents, no installs. The GPU tab works per host too: a remote multi-GPU rig shows **every card's VRAM, utilisation, power and temperature**, and the processes holding the memory.
 - **Uptime monitoring, in the box** — watch any **HTTP endpoint or TCP port** (your services, a NAS, a remote site) straight from the container: heartbeat strip, 24h/7d uptime %, latency, and **smart per-check alerts** — anti-flap confirm, recovery with downtime, and an optional slow-response warning. No extra uptime service to self-host — it's already in the box.
 - **Push alerts** — **Discord**, **ntfy.sh** and **Telegram**, edge-triggered so they don't spam.
@@ -61,7 +64,7 @@ Full tab-by-tab tour → [**Features**](https://sikamikanikobg.github.io/homelab
 
 ## Multi-machine, in two sentences
 
-Open the **Hosts** tab, paste the hub's auto-generated SSH key onto each remote, and the hub starts polling it — no agents, just SSH + Python 3 (PowerShell on Windows). The hub pipes a small self-contained probe over SSH; nothing persists on the remote.
+Open the **Hosts** tab, paste the hub's auto-generated SSH key onto each remote, and the hub starts polling it — no agents, just SSH + Python 3 (PowerShell on Windows). The hub pipes a small self-contained probe over SSH; nothing persists on the remote. The same connection is what lets you open a remote's **GPU cockpit** and **scan its disks** from the hub — still with nothing installed on the far end.
 
 Onboarding, Windows setup, and the security model → [**Multi-machine docs**](https://sikamikanikobg.github.io/homelab-monitor/multi-host/).
 
@@ -71,15 +74,23 @@ Set these under `environment:` in `docker-compose.yml` (all optional):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SAMPLE_INTERVAL` | `10` | Seconds between samples |
+| `SAMPLE_INTERVAL` | `10` | Seconds between stored samples. This is the **storage** cadence — every energy and cost figure is integrated against it, so changing it changes how history is priced |
+| `FAST_INTERVAL` | `2` | Seconds between live-value refreshes on screen. Reads only cheap counters and stores nothing, so it costs no history and no accuracy. `0` turns the push stream off and the dashboard falls back to polling |
 | `RETENTION_DAYS` | `180` | How long history is kept |
 | `PRESSURE_FREE_MB` | `2048` | Free VRAM below this counts as "pressure" |
 | `PORT` | `9800` | Dashboard port |
 | `MCP_PORT` | `9810` | Port for the built-in read-only MCP server |
 | `ENABLE_MCP` | `1` | Set `0` to run the dashboard without the MCP server |
+| `ENABLE_CONTROLS` | `1` | Set `0` to remove the start/stop/restart buttons from the Containers and Services tabs |
+| `ALLOW_SELF_UPDATE` | `1` | Set `0` to disable in-app updating |
 | `WATCH_CONTAINERS` | — | Extra containers to scan for OOM (comma-separated) |
 | `WATCH_SERVICES` | — | systemd units to always show, even vendor ones (comma-separated) |
 | `CHECK_UPDATES` | `true` | Set `false` to disable the daily GitHub-releases check (no outbound calls) |
+| `CHECK_OS_UPDATES` | `true` | Set `false` to stop reporting pending OS package updates |
+| `PUBLIC_STATUS` | — | Set to enable the public status page (also a Settings toggle, which needs no restart) |
+| `DB_PATH` | `/data/gpu.db` | Where history is stored inside the container |
+| `HOST_ROOT` | `/rootfs` | Mount point of the read-only host root |
+| `DOCKER_SOCK` | `/var/run/docker.sock` | Docker socket to read containers from |
 
 History lives in `./data/gpu.db` (a bind mount), so it survives restarts and upgrades. Alerts, the systemd D-Bus mount, and per-server tuning → [**Configuration docs**](https://sikamikanikobg.github.io/homelab-monitor/configuration/).
 
@@ -123,11 +134,15 @@ This is a host monitor: it runs with host access, plus a read-write Docker socke
 
 If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps other home-labbers find it. Thank you!
 
-<a href="https://www.star-history.com/?repos=SikamikanikoBG%2Fhomelab-monitor&type=date&legend=top-left">
+<!-- The repo slug MUST stay lower-case here. api.star-history.com 301-redirects a
+     mixed-case owner to its lower-case form, and GitHub's camo image proxy does not
+     follow the redirect — it caches the empty 301 and the chart renders as a broken
+     image. `SikamikanikoBG` -> 301/0 bytes; `sikamikanikobg` -> 200/59 kB. -->
+<a href="https://www.star-history.com/?repos=sikamikanikobg%2Fhomelab-monitor&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
  </picture>
 </a>
 

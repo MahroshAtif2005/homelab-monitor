@@ -1,4 +1,5 @@
 {
+  "host": "local",
   "path": "/tmp",
   "state": "scanning"
 }

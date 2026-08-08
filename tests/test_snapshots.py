@@ -551,7 +551,8 @@ class TestSnapshots(unittest.TestCase):
 
     def test_api_disk_scan_scanning(self):
         with patch("app._safe_host_dir", return_value="/tmp"), \
-             patch.dict(app._DISK_SCAN, {"/tmp": {"state": "scanning", "at": FROZEN_TS, "path": "/tmp"}}):
+             patch.dict(app._DISK_SCAN, {app._disk_scan_key("local", "/tmp"):
+                                         {"state": "scanning", "at": FROZEN_TS, "path": "/tmp"}}):
             r = self.client.get("/api/disk_scan?path=/tmp")
             data = r.get_json()
         assert_snapshot(self, "api_disk_scan_scanning", data)
@@ -567,7 +568,7 @@ class TestSnapshots(unittest.TestCase):
         }
         with frozen_time(), \
              patch("app._safe_host_dir", return_value="/tmp"), \
-             patch.dict(app._DISK_SCAN, {"/tmp": done_entry}):
+             patch.dict(app._DISK_SCAN, {app._disk_scan_key("local", "/tmp"): done_entry}):
             r = self.client.get("/api/disk_scan?path=/tmp")
             data = r.get_json()
         assert_snapshot(self, "api_disk_scan_done", data)
