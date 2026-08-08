@@ -20,6 +20,26 @@ Adding a new monitor (it's meant to be easy):
 """
 import os, re, sys, glob, time, json, socket, sqlite3, threading, subprocess, smtplib, http.client, urllib.parse, urllib.request, urllib.error, ipaddress, shlex, struct, shutil, tempfile, secrets, hmac, uuid, hashlib, email.message, fnmatch, errno
 from functools import wraps
+
+# ── One module, one copy ──────────────────────────────────────────────────────
+# The container entrypoint starts this file as a script (`python /app/app.py`),
+# which makes it the module "__main__". Everything under backend/ then reaches
+# back for globals with a lazy `import app as _app` — and because "app" was not
+# in sys.modules, that import used to execute this file a SECOND time, in full,
+# as a separate module object.
+#
+# Two copies of app.py in one process means: two SQLite connections, two LOCKs
+# that serialise nothing against each other, two LATEST dicts (the blueprints
+# read one, half the samplers write the other), and — because the worker threads
+# start at module level — two collectors, two host pollers, two notifiers. Every
+# remote was SSH-probed twice per interval, and the append-only tables collected
+# duplicate rows: 268 duplicate (ts, service) groups in `proc` and 10,663 in
+# `net_samples` in a single hour on the release build.
+#
+# Registering this module under "app" before any backend import runs makes that
+# lazy import resolve to the module already executing.
+if __name__ == "__main__":
+    sys.modules.setdefault("app", sys.modules["__main__"])
 try:
     import fcntl                       # Linux-only; used for per-iface IPv4 (SIOCGIFADDR)
 except ImportError:
