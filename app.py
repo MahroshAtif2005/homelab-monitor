@@ -6726,6 +6726,70 @@ def _public_settings():
 
 _DISK_SCAN, _DISK_SCAN_LOCK = {}, threading.Lock()
 _DISK_SCAN_TTL = 900   # reuse a completed scan for 15 min
+_DISK_SCAN_TIMEOUT = 600
+# Two levels at once (folder + its sub-folders) so the treemap can nest. du
+# recurses fully whatever --max-depth says, so asking for depth 2 costs the same
+# as depth 1 and only prints more. --one-file-system keeps a scan of / from
+# wandering into every bind mount and network share on the box.
+_DU_ARGS = ["-b", "--max-depth=2", "--one-file-system"]
+
+def _disk_scan_key(host, path):
+    """Cache key. Keyed by host as well as path, or a scan of /var on one machine
+    would be served as a scan of /var on the next one you clicked."""
+    return ("local" if not host or host == "local" else host, path)
+
+def _safe_scan_path(path):
+    """Normalise a client-supplied absolute path, or None if it isn't one we are
+    willing to hand to a remote shell. Absolute, no '..' traversal, and no shell
+    metacharacters or control bytes — the value is shell-quoted at the call site
+    too, so this is the belt to that suspenders."""
+    if not path or not isinstance(path, str) or not path.startswith("/"):
+        return None
+    if "\x00" in path or any(ord(c) < 32 for c in path):
+        return None
+    norm = os.path.normpath(path)
+    if ".." in norm.split("/"):
+        return None
+    return norm
+
+def _parse_du(stdout, root, hostp=lambda p: p):
+    """Turn `du -b --max-depth=2` output into the nested {total, entries} the
+    treemap draws. Shared by the local and remote scanners so the two can't drift
+    into rendering the same filesystem differently."""
+    sizes = {}
+    for ln in (stdout or "").splitlines():
+        parts = ln.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            sizes[os.path.normpath(parts[1])] = int(parts[0])
+        except ValueError:
+            continue
+    root = os.path.normpath(root)
+    total = sizes.get(root, 0)
+    by_parent = {}
+    for p, b in sizes.items():
+        if p == root:
+            continue
+        by_parent.setdefault(os.path.dirname(p), []).append((p, b))
+    TOP_N, KID_N = 32, 26
+    def build(p, b, depth):
+        node = {"name": os.path.basename(p) or hostp(p), "path": hostp(p), "bytes": b}
+        kids = sorted(by_parent.get(p, []), key=lambda x: -x[1])
+        if kids and depth < 2:
+            shown = kids[:KID_N]
+            cnodes = [build(cp, cb, depth + 1) for cp, cb in shown]
+            rest = b - sum(cb for _, cb in shown)
+            if rest > max(10 * 1024 * 1024, int(b * 0.02)):
+                cnodes.append({"name": "(other)", "path": None, "bytes": rest})
+            node["children"] = cnodes
+        return node
+    tops = sorted(by_parent.get(root, []), key=lambda x: -x[1])[:TOP_N]
+    return total, [build(p, b, 1) for p, b in tops]
+
+def _disk_scan_store(key, **fields):
+    with _DISK_SCAN_LOCK:
+        _DISK_SCAN[key] = {"at": int(time.time()), **fields}
 
 def _safe_host_dir(path):
     """Map a requested absolute HOST path to its location under HOST_ROOT, only
@@ -6739,63 +6803,89 @@ def _safe_host_dir(path):
     real = (base + norm) if base else norm
     return real if os.path.isdir(real) else None
 
-def _disk_scan_worker(path, real):
+def _disk_scan_worker(path, real, key=None):
+    key = key or _disk_scan_key("local", path)
     base = HOST_ROOT.rstrip("/") if os.path.isdir(HOST_ROOT) else ""
     def hostp(p):
         return (p[len(base):] or "/") if base and p.startswith(base) else p
     try:
-        # --max-depth=2 gives two levels at once (folder + its sub-folders) for a
-        # nested treemap. du recurses fully regardless of --max-depth, so this is
-        # no costlier than depth 1 — it only prints more.
         # `--` ends option parsing so a path can never be read as a du flag.
         # `real` always starts with "/" already, so this is belt-and-suspenders.
-        r = subprocess.run(["du", "-b", "--max-depth=2", "--one-file-system", "--", real],
-                           capture_output=True, text=True, timeout=600)
-        sizes = {}
-        for ln in (r.stdout or "").splitlines():
-            parts = ln.split("\t", 1)
-            if len(parts) != 2:
-                continue
-            try:
-                sizes[os.path.normpath(parts[1])] = int(parts[0])
-            except ValueError:
-                continue
-        root = os.path.normpath(real)
-        total = sizes.get(root, 0)
-        by_parent = {}
-        for p, b in sizes.items():
-            if p == root:
-                continue
-            by_parent.setdefault(os.path.dirname(p), []).append((p, b))
-        TOP_N, KID_N = 32, 26
-        def build(p, b, depth):
-            node = {"name": os.path.basename(p) or hostp(p), "path": hostp(p), "bytes": b}
-            kids = sorted(by_parent.get(p, []), key=lambda x: -x[1])
-            if kids and depth < 2:
-                shown = kids[:KID_N]
-                cnodes = [build(cp, cb, depth + 1) for cp, cb in shown]
-                rest = b - sum(cb for _, cb in shown)
-                if rest > max(10 * 1024 * 1024, int(b * 0.02)):
-                    cnodes.append({"name": "(other)", "path": None, "bytes": rest})
-                node["children"] = cnodes
-            return node
-        tops = sorted(by_parent.get(root, []), key=lambda x: -x[1])[:TOP_N]
-        entries = [build(p, b, 1) for p, b in tops]
+        r = subprocess.run(["du", *_DU_ARGS, "--", real],
+                           capture_output=True, text=True, timeout=_DISK_SCAN_TIMEOUT)
+        total, entries = _parse_du(r.stdout, real, hostp)
         free = None
         try:
             s = os.statvfs(real); free = s.f_bavail * s.f_frsize
-        except Exception:
-            pass
-        with _DISK_SCAN_LOCK:
-            _DISK_SCAN[path] = {"state": "done", "at": int(time.time()),
-                                "total": total, "entries": entries, "free": free, "error": None}
+        except OSError as e:
+            print(f"disk scan statvfs({real}) failed: {e}", flush=True)
+        _disk_scan_store(key, state="done", total=total, entries=entries,
+                         free=free, error=None)
     except subprocess.TimeoutExpired:
-        with _DISK_SCAN_LOCK:
-            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()),
-                                "error": "scan timed out — folder too large"}
+        _disk_scan_store(key, state="error", error="scan timed out — folder too large")
     except Exception as e:
-        with _DISK_SCAN_LOCK:
-            _DISK_SCAN[path] = {"state": "error", "at": int(time.time()), "error": str(e)[:200]}
+        _disk_scan_store(key, state="error", error=str(e)[:200])
+
+
+# Remotes are scanned the same way the rest of this project reads them: one ssh
+# call, no agent, nothing installed or left behind. `du` and `df` are in coreutils
+# on every Linux box the probe already supports.
+def _remote_scan_cmd(path):
+    q = shlex.quote(path)
+    # One round trip for both answers, with a sentinel between them so a `df`
+    # that fails can't be misread as du output (or vice versa).
+    return (f"du {' '.join(_DU_ARGS)} -- {q} 2>/dev/null; "
+            f"echo '---HLM-DF---'; "
+            f"df -P -B1 -- {q} 2>/dev/null | tail -1")
+
+def _parse_remote_free(block):
+    """Available bytes out of a `df -P -B1` line. POSIX -P guarantees one line
+    per filesystem with Available in the 4th column, which is what stops a long
+    device name from wrapping and shifting every field."""
+    for ln in (block or "").splitlines():
+        cols = ln.split()
+        if len(cols) >= 4:
+            try:
+                return int(cols[3])
+            except ValueError:
+                continue
+    return None
+
+def _disk_scan_worker_remote(key, name, path):
+    """Scan `path` on a registered remote over the existing SSH channel."""
+    try:
+        h = next((x for x in list_hosts() if x["name"] == name), None)
+        if not h:
+            _disk_scan_store(key, state="error", error=f"unknown host: {name}")
+            return
+        parsed = _parse_ssh_target(h.get("ssh_target"))
+        if not parsed:
+            _disk_scan_store(key, state="error", error="host has no usable SSH target")
+            return
+        u, host, port = parsed
+        rc, out, err, _ms = _ssh(u, host, port, _remote_scan_cmd(path),
+                                 timeout=_DISK_SCAN_TIMEOUT)
+        if rc != 0 and not out:
+            # du exits non-zero on any unreadable subdirectory, so a non-zero rc
+            # with output is a partial scan worth showing — only an empty one is
+            # a real failure.
+            _disk_scan_store(key, state="error",
+                             error=(err or f"ssh exited {rc}")[:200])
+            return
+        du_block, _, df_block = (out or "").partition("---HLM-DF---")
+        total, entries = _parse_du(du_block, path)
+        if not entries and not total:
+            # An empty result is ambiguous — an unreadable directory and an empty
+            # one look identical here — so say so rather than drawing a blank
+            # treemap that looks like a finished scan of nothing.
+            _disk_scan_store(key, state="error",
+                             error=f"no readable directories under {path} "
+                                   f"(the SSH user may not have permission)")
+            return
+        _disk_scan_store(key, state="done", total=total, entries=entries,
+                         free=_parse_remote_free(df_block), error=None)
+    except Exception as e:
+        _disk_scan_store(key, state="error", error=str(e)[:200])
 
 
 _BRIEF_PALETTE = {

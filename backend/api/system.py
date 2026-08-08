@@ -478,23 +478,57 @@ def api_hub_pubkey():
 @bp.route("/api/disk_scan")
 def api_disk_scan():
     import app as _app
-    path = os.path.normpath(request.args.get("path") or "/")
+    """WizTree-style folder scan of `path`, on the hub or on any registered host.
+
+    `host` selects the machine: absent (or "local") reads the hub's own
+    filesystem through the read-only root mount; a registered name runs the same
+    `du` over the SSH channel the fleet is already polled on."""
+    path = _app._safe_scan_path(request.args.get("path") or "/")
+    if not path:
+        return jsonify({"path": request.args.get("path"), "state": "error",
+                        "error": "invalid path"})
+    host = (request.args.get("host") or "local").strip() or "local"
     rescan = request.args.get("rescan") == "1"
-    real = _app._safe_host_dir(path)
-    if not real:
-        return jsonify({"path": path, "state": "error", "error": f"not a readable directory: {path}"})
+    key = _app._disk_scan_key(host, path)
+    is_local = key[0] == "local"
+
+    real = None
+    if is_local:
+        real = _app._safe_host_dir(path)
+        if not real:
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": f"not a readable directory: {path}"})
+    else:
+        # Fail here rather than after a 10-minute SSH attempt: an unregistered
+        # name, or a host the probe has never reached, can't be scanned.
+        h = next((x for x in _app.list_hosts() if x["name"] == host), None)
+        if not h:
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": f"unknown host: {host}"})
+        fam = (((h.get("last_check") or {}).get("os") or {}).get("family") or "linux")
+        if fam == "windows":
+            return jsonify({"path": path, "host": host, "state": "error",
+                            "error": "Disk-content scanning isn't supported on Windows "
+                                     "hosts yet — it needs the POSIX du."})
+
     with _app._DISK_SCAN_LOCK:
-        ent = _app._DISK_SCAN.get(path)
+        ent = _app._DISK_SCAN.get(key)
         if ent and not rescan:
             if ent["state"] == "scanning":
-                return jsonify({"path": path, "state": "scanning"})
+                return jsonify({"path": path, "host": host, "state": "scanning"})
             if ent["state"] == "done" and time.time() - ent["at"] < _app._DISK_SCAN_TTL:
-                return jsonify({"path": path, **ent})
+                return jsonify({"path": path, "host": host, **ent})
             if ent["state"] == "error" and time.time() - ent["at"] < 20:
-                return jsonify({"path": path, **ent})
-        _app._DISK_SCAN[path] = {"state": "scanning", "at": int(time.time())}
-    threading.Thread(target=_app._disk_scan_worker, args=(path, real), daemon=True).start()
-    return jsonify({"path": path, "state": "scanning"})
+                return jsonify({"path": path, "host": host, **ent})
+        _app._DISK_SCAN[key] = {"state": "scanning", "at": int(time.time())}
+
+    if is_local:
+        threading.Thread(target=_app._disk_scan_worker, args=(path, real, key),
+                         daemon=True).start()
+    else:
+        threading.Thread(target=_app._disk_scan_worker_remote, args=(key, host, path),
+                         daemon=True).start()
+    return jsonify({"path": path, "host": host, "state": "scanning"})
 
 
 @bp.route("/api/backup")

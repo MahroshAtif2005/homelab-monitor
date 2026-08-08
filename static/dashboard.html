@@ -6515,6 +6515,7 @@ function refreshCurrentTab(){
   if(TAB === 'services')  { renderServicesTab(); return; }
   if(TAB === 'costs')     { renderCosts(true); return; }
   if(TAB === 'gpu')       { renderGpuTab(true); return; }   // host-scoped: refetch for the new host
+  if(TAB === 'disks')     { renderDisksTab(); return; }     // host-scoped since remotes are scannable
   if(LOCAL_ONLY_TABS.has(TAB)) renderLocalOnlyNotice(TAB);
 }
 
@@ -7796,39 +7797,69 @@ function renderRamTree(){
 }
 
 // ── Disks tab: WizTree-style folder treemap per disk (on-demand scan) ─────────
+// Runs on any host in the fleet: the hub reads its own filesystem through the
+// read-only root mount, and a remote is scanned with the same `du` over the SSH
+// channel the fleet is already polled on — no agent, nothing installed.
 const _diskCrumbs = {};   // cardId -> [{name, path}]
-function _dskId(mount){ return 'dsk_'+mount.replace(/[^a-z0-9]/gi,'_'); }
-function renderDisksTab(){
+// The card id carries the host: two machines both mounting "/" would otherwise
+// share a DOM id, and clicking Scan on one would repaint the other's treemap.
+function _dskId(mount, host){
+  return 'dsk_'+String(host||CURRENT_HOST||'local').replace(/[^a-z0-9]/gi,'_')
+        +'_'+mount.replace(/[^a-z0-9]/gi,'_');
+}
+function _dskNotice(root, title, detail){
+  root.dataset.sig='';   // force a rebuild once the host can be scanned again
+  root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'
+    +title+'</div><div class="d">'+detail+'</div></div></div></div>';
+}
+async function renderDisksTab(){
   const root=document.getElementById('disksbody'); if(!root) return;
-  if(CURRENT_HOST!=='local'){
-    root.innerHTML='<div class="card"><div class="ins info"><div class="ic">ℹ️</div><div><div class="t">'+I18N.t('disks.local_only','Local host only')+'</div>'
-      +'<div class="d">'+I18N.t('disks.local_only_d','Disk-content analysis reads the host filesystem directly, so it runs on the hub\'s own machine. Switch the host selector back to <b>Local</b> to use it.')+'</div></div></div></div>';
-    return;
+  const host=CURRENT_HOST, local=host==='local';
+  if(!local){
+    // HOST_DATA is loaded lazily by whichever tab needs it, so arriving here
+    // straight from a host switch can find it empty or still holding the
+    // previous host — which would read as "offline" for a host that is up.
+    if(!HOST_DATA || HOST_DATA.name!==host){
+      await loadHostData(host);
+      if(CURRENT_HOST!==host) return;   // switched again while we were waiting
+    }
+    // A remote can only be scanned while the hub can actually reach it, and the
+    // scan needs POSIX du — so say which of the two is missing rather than
+    // drawing a Scan button that will fail.
+    if(!HOST_DATA || !HOST_DATA.online){
+      _dskNotice(root, I18N.t('disks.host_offline','Host is offline'),
+        I18N.tf('disks.host_offline_d','A disk scan runs live over SSH, so <b>{host}</b> has to be reachable. It will be available again once the host is back.',{host:esc(host)}));
+      return;
+    }
+    const fam=((HOST_DATA.host&&HOST_DATA.host.os&&HOST_DATA.host.os.family)||'').toLowerCase();
+    if(fam==='windows'){
+      _dskNotice(root, I18N.t('disks.win_unsupported','Not available on Windows hosts yet'),
+        I18N.t('disks.win_unsupported_d','Disk-content analysis uses the POSIX <code>du</code>, which Windows hosts don\'t provide. Their disk usage totals still show on the Host tab.'));
+      return;
+    }
   }
   const disks=(currentHostBlock().disks)||[];
   if(!disks.length){ root.innerHTML='<div class="card"><div class="muted">'+I18N.t('disks.none','No disks reported yet.')+'</div></div>'; return; }
-  // Only (re)build the cards if the set of mounts changed — otherwise we'd wipe
-  // an in-progress scan/treemap on every 15s refresh.
-  const sig=disks.map(d=>d.mount).join('|');
+  // Only (re)build the cards if the host or the set of mounts changed — otherwise
+  // we'd wipe an in-progress scan/treemap on every refresh.
+  const sig=host+'::'+disks.map(d=>d.mount).join('|');
   if(root.dataset.sig!==sig){
     root.dataset.sig=sig;
     root.innerHTML=disks.map(d=>{
-      const id=_dskId(d.mount);
+      const id=_dskId(d.mount,host);
       return `<div class="card"><h2>💾 ${esc(d.mount)} <span class="muted" style="font-weight:400;font-size:13px">${I18N.tf('disks.usage','— {used} / {total} GB · {pct}% used',{used:d.used,total:d.total,pct:d.pct})}</span></h2>
         <div class="tm-crumb" id="${id}_crumb"></div>
         <div class="treemap" id="${id}_tm" style="height:300px"><div class="tm-empty muted">${I18N.t('disks.scan_hint','Click <b>Scan contents</b> to see what\'s using this disk.')}</div></div>
         <div class="hstep-actions"><button class="btn-mini" id="${id}_scan">${I18N.t('disks.scan_btn','🔍 Scan contents')}</button>
           <span class="muted" id="${id}_st" style="font-size:12px;align-self:center"></span></div></div>`;
     }).join('');
-    disks.forEach(d=>{ const id=_dskId(d.mount);
-      document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true); });
+    disks.forEach(d=>{ const id=_dskId(d.mount,host);
+      document.getElementById(id+'_scan').onclick=()=>scanDisk(d.mount, d.mount, id, true, host); });
     applyIcons(root);   // the per-disk 💾 headings are built here, so iconify them too
-  } else {
-    // mounts unchanged: just refresh the used/total figures in the headers
-    disks.forEach(d=>{ const c=document.querySelector('#'+_dskId(d.mount)+'_crumb'); /* keep state */ });
   }
 }
-async function scanDisk(mount, path, id, rescan){
+async function scanDisk(mount, path, id, rescan, host){
+  host = host || CURRENT_HOST || 'local';
   const tm=document.getElementById(id+'_tm'), st=document.getElementById(id+'_st');
   if(!tm) return;
   tm.innerHTML='<div class="tm-empty muted">'+I18N.tf('disks.scanning','⏳ Scanning <b>{path}</b>… large disks can take a while (cached after the first run).',{path:esc(path)})+'</div>';
@@ -7838,10 +7869,15 @@ async function scanDisk(mount, path, id, rescan){
   const ci=_diskCrumbs[id].findIndex(c=>c.path===path);
   if(ci>=0) _diskCrumbs[id]=_diskCrumbs[id].slice(0,ci+1);
   else _diskCrumbs[id].push({name:(path.split('/').pop()||path), path});
-  renderDiskCrumb(id, mount);
+  renderDiskCrumb(id, mount, host);
   let data=null;
   for(let tries=0; tries<200; tries++){
-    let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)+(rescan&&tries===0?'&rescan=1':''))).json(); }
+    // The host rides on every poll, not just the first: the scan is cached per
+    // (host, path) server-side, so dropping it mid-poll would start reading
+    // another machine's result.
+    let j; try{ j=await(await fetch('/api/disk_scan?path='+encodeURIComponent(path)
+        +'&host='+encodeURIComponent(host)
+        +(rescan&&tries===0?'&rescan=1':''))).json(); }
     catch(e){ tm.innerHTML='<div class="tm-empty muted">'+I18N.t('disks.scan_failed','Scan request failed: ')+esc(String(e))+'</div>'; return; }
     if(j.state==='done'){ data=j; break; }
     if(j.state==='error'){ tm.innerHTML='<div class="tm-empty muted">⚠️ '+esc(j.error||'scan error')+'</div>'; return; }
@@ -7855,7 +7891,7 @@ async function scanDisk(mount, path, id, rescan){
   // any folder with a real path is click-to-drill-deeper.
   function mk(e){
     const node={ label:e.name, value:e.bytes, title:e.path||e.name,
-      click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false)):null };
+      click:(e.path&&e.path!==path)?(()=>scanDisk(mount, e.path, id, false, host)):null };
     if(e.children&&e.children.length) node.children=e.children.map(mk);
     return node;
   }
@@ -7865,14 +7901,14 @@ async function scanDisk(mount, path, id, rescan){
   renderTreemap(tm, leaves, {height:360, fmt:fmtBytes});
   if(st) st.innerHTML=I18N.tf('disks.scanned','scanned {when} · {size} across {n} folders · <b>click any folder to drill deeper</b>',{when:relTime(data.at),size:fmtBytes(data.total),n:entries.length});
 }
-function renderDiskCrumb(id, mount){
+function renderDiskCrumb(id, mount, host){
   const el=document.getElementById(id+'_crumb'); if(!el) return;
   const cr=_diskCrumbs[id]||[];
   if(cr.length<2){ el.innerHTML=''; return; }
   el.innerHTML=cr.map((c,i)=> i===cr.length-1
     ? `<span class="cur">${esc(c.name)}</span>`
     : `<button data-p="${esc(c.path)}">${esc(c.name)}</button><span class="sep">›</span>`).join('');
-  el.querySelectorAll('button').forEach(b=>b.onclick=()=>scanDisk(mount, b.dataset.p, id, false));
+  el.querySelectorAll('button').forEach(b=>b.onclick=()=>scanDisk(mount, b.dataset.p, id, false, host));
 }
 
 async function renderHostTab(){

@@ -27,6 +27,10 @@
       "cost.rnone_t",
       "cost.rnone_d",
       "models.ctx",
+      "disks.host_offline",
+      "disks.host_offline_d",
+      "disks.win_unsupported",
+      "disks.win_unsupported_d",
       "net.sub_dns",
       "sec.selinux",
       "sec.apparmor",
@@ -65,7 +69,7 @@
       "registry.allhosts",
       "gpu.on_card"
     ],
-    "coverage": 0.9255
+    "coverage": 0.9207
   },
   "nav.group.monitoring": "监控",
   "nav.group.ai": "AI",
@@ -464,9 +468,11 @@
   "fleet.meta": "{n} 台主机 · 每 {i} 秒轮询 · 点击某行可在其他标签页聚焦该主机。",
   "host.no_data": "暂无数据",
   "host.probe_wait": "<div class=\"muted\" style=\"padding:12px 2px\">⏳ <b>{host}</b> — {err}。探测每 {i} 秒运行一次；新主机需一个周期才会有数据。</div>",
-  "disks.local_only": "仅限本机",
-  "disks.local_only_d": "磁盘内容分析直接读取主机文件系统，因此在 hub 本机上运行。将主机选择器切回 <b>本机</b> 即可使用。",
   "disks.none": "尚未报告任何磁盘。",
+  "disks.host_offline": "Host is offline",
+  "disks.host_offline_d": "A disk scan runs live over SSH, so <b>{host}</b> has to be reachable. It will be available again once the host is back.",
+  "disks.win_unsupported": "Not available on Windows hosts yet",
+  "disks.win_unsupported_d": "Disk-content analysis uses the POSIX <code>du</code>, which Windows hosts don't provide. Their disk usage totals still show on the Host tab.",
   "disks.usage": "— {used} / {total} GB · 已用 {pct}%",
   "disks.scan_hint": "点击 <b>扫描内容</b> 查看此磁盘的占用情况。",
   "disks.scan_btn": "🔍 扫描内容",
