@@ -455,6 +455,71 @@ def sample_once():
                   model_meta=model_meta, serving=serving, training=training, devtools=devtools,
                   callers=sorted(({"caller": c, "server": s, "conns": n} for (c, s), n in edges.items()),
                                  key=lambda x: -x["conns"]), host=host)
+    # Wake the SSE streams: the slow sample carries everything the fast lane
+    # can't (containers, models, VRAM attribution, callers), so a browser must
+    # not have to wait for the next fast tick to see it.
+    _app.bump_live()
+
+
+def fast_sample_once():
+    """Refresh the values a human watches move, and nothing else.
+
+    Writes no database rows on purpose. Everything priced in this project is
+    integrated from `samples` at INTERVAL spacing, so an extra row here would be
+    counted as a full interval of energy and inflate every cost figure on the
+    page — the fast lane exists to make the screen quicker, not the history
+    denser."""
+    import app as _app
+    host = _app.read_host_fast()
+    if host:
+        # Merge, never replace: read_host_fast() deliberately omits disks and the
+        # OS/hardware/network/security inventories, and assigning a fresh dict
+        # here would blank those panels between slow samples.
+        cur = dict(_app.LATEST.get("host") or {})
+        cur.update(host)
+        _app.LATEST["host"] = cur
+    # Only touch the GPU once the sampler has confirmed there is one, and only for
+    # NVIDIA: a GPU-less box must not spawn nvidia-smi every couple of seconds
+    # forever, and AMD's sysfs cards are refreshed by the sampler itself.
+    if _app.LATEST.get("gpu_avail") and (_app.LATEST.get("gpu_vendor") in ("nvidia", "hybrid")):
+        fresh = _app.gpu_cards_fast()
+        if fresh:
+            cards = _app.LATEST.get("gpus") or []
+            for c in cards:
+                upd = fresh.get(c.get("idx"))
+                if upd:
+                    c.update(upd)
+            # Re-pool the aggregates from the cards so the headline GPU numbers and
+            # the per-card panels can never disagree mid-interval. Same reductions
+            # sample_once uses — average utilisation, hottest card, summed watts.
+            if cards:
+                _app.LATEST["util"] = round(sum(c.get("util") or 0 for c in cards) / len(cards))
+                _app.LATEST["mem_used"] = sum(c.get("mem_used") or 0 for c in cards)
+                _app.LATEST["power"] = sum(c.get("power") or 0 for c in cards)
+                _app.LATEST["temp"] = max(c.get("temp") or 0 for c in cards)
+    _app.LATEST["fast_ts"] = int(time.time())
+    _app.bump_live()
+
+
+def fast_sampler():
+    import app as _app
+    """Loop the cheap re-read at FAST_INTERVAL. Inert when FAST_INTERVAL is 0."""
+    if not _app.FAST_INTERVAL:
+        return
+    # Prime the CPU delta before the first published reading, otherwise that
+    # reading is an average stretching back to boot rather than a live figure.
+    try:
+        _app.read_host_fast()
+    except Exception as e:
+        print("fast_sampler prime error:", e, flush=True)
+    time.sleep(_app.FAST_INTERVAL)
+    while True:
+        _heartbeat("fast_sampler", _app.FAST_INTERVAL)
+        try:
+            fast_sample_once()
+        except Exception as e:
+            print("fast_sampler error:", e, flush=True)
+        time.sleep(_app.FAST_INTERVAL)
 
 
 def collector():

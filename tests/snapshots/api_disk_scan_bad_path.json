@@ -1,5 +1,6 @@
 {
   "error": "not a readable directory: /no/such/dir",
+  "host": "local",
   "path": "/no/such/dir",
   "state": "error"
 }
