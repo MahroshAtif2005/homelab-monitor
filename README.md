@@ -123,11 +123,15 @@ This is a host monitor: it runs with host access, plus a read-write Docker socke
 
 If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps other home-labbers find it. Thank you!
 
-<a href="https://www.star-history.com/?repos=SikamikanikoBG%2Fhomelab-monitor&type=date&legend=top-left">
+<!-- The repo slug MUST stay lower-case here. api.star-history.com 301-redirects a
+     mixed-case owner to its lower-case form, and GitHub's camo image proxy does not
+     follow the redirect — it caches the empty 301 and the chart renders as a broken
+     image. `SikamikanikoBG` -> 301/0 bytes; `sikamikanikobg` -> 200/59 kB. -->
+<a href="https://www.star-history.com/?repos=sikamikanikobg%2Fhomelab-monitor&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SikamikanikoBG/homelab-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
  </picture>
 </a>
 
