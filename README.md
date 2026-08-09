@@ -134,15 +134,18 @@ This is a host monitor: it runs with host access, plus a read-write Docker socke
 
 If HomeLab Monitor saves you a browser tab or two, a ⭐ on GitHub genuinely helps other home-labbers find it. Thank you!
 
-<!-- The repo slug MUST stay lower-case here. api.star-history.com 301-redirects a
-     mixed-case owner to its lower-case form, and GitHub's camo image proxy does not
-     follow the redirect — it caches the empty 301 and the chart renders as a broken
-     image. `SikamikanikoBG` -> 301/0 bytes; `sikamikanikobg` -> 200/59 kB. -->
-<a href="https://www.star-history.com/?repos=sikamikanikobg%2Fhomelab-monitor&type=date&legend=top-left">
+<!-- Rendered by .github/workflows/star-history.yml from our own stargazer data and
+     committed to the repo — not fetched from star-history.com. GitHub restricted the
+     stargazers API on 2026-06-30 to a repo's own admins and collaborators, so their
+     servers can no longer build this chart for anyone; the embed returned a 200 whose
+     entire content was "GitHub restricted access to star data". Their fix is to embed
+     a token with Contents:read-write in the README, which would give a third party
+     push access to this repo. We render it ourselves instead. -->
+<a href="https://github.com/SikamikanikoBG/homelab-monitor/stargazers">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sikamikanikobg/homelab-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="docs/star-history-dark.svg" />
+   <source media="(prefers-color-scheme: light)" srcset="docs/star-history-light.svg" />
+   <img alt="Star history — cumulative stars over time" src="docs/star-history-light.svg" width="800" />
  </picture>
 </a>
 

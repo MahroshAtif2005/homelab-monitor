@@ -1,0 +1,63 @@
+name: Update star history chart
+
+# GitHub restricted the stargazers endpoint on 2026-06-30 to a repository's own
+# admins and collaborators. star-history.com's servers are neither, so the chart
+# we used to embed now returns a 200 whose whole content is the sentence "GitHub
+# restricted access to star data".
+#
+# Their workaround is to put a token in the README so their servers can read the
+# repo as us — and the token they ask for needs `Contents: read and write`, i.e.
+# a third party holding a credential that can push to this repository. No.
+#
+# We are the repo's owner, so we can read our own stargazers: this renders the
+# chart here, commits two SVGs, and the README points at those. No third party,
+# no token to leak, and it survives whatever star-history.com does next.
+
+on:
+  schedule:
+    - cron: '41 5 * * *'        # daily at 05:41 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/star-history.yml'
+      - 'scripts/star_history.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: star-history
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Render the chart
+        env:
+          # STATS_PAT first for the same reason stats.yml prefers it — it is
+          # already configured with repo-scoped read. GITHUB_TOKEN acts as the
+          # repository itself and should also satisfy the new restriction; the
+          # fallback means a fork or a revoked PAT degrades rather than breaks.
+          GH_TOKEN: ${{ secrets.STATS_PAT || secrets.GITHUB_TOKEN }}
+        run: python scripts/star_history.py --out-dir docs
+
+      - name: Commit if the chart moved
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- docs/star-history-light.svg docs/star-history-dark.svg; then
+            echo "no change — nobody starred since the last run"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/star-history-light.svg docs/star-history-dark.svg
+          git commit -m "chore(readme): refresh the star-history chart [skip ci]"
+          git push
