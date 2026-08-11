@@ -7,11 +7,9 @@ release notes.
 
 ## [Unreleased] — `next`
 
-**Added**
-- **The System tab's chart now draws the host you selected.** Per-host CPU, RAM and load were already being stored in `host_samples` on every poll, but nothing ever read them back for a chart, so the panel stayed hardwired to the hub's own series. A new `/api/host_history?host=&range=` serves them, falling back to the hourly rollup once raw retention expires. A host with no history yet says so next to the canvas instead of drawing an empty chart, which is indistinguishable from a chart of zeroes.
-
 **Fixed**
 - **Switching to a remote host left the hub's data on screen.** Only the System card changed; **Top processes**, **Power & cost** and the **CPU/RAM/load chart** kept the hub's numbers under the remote machine's name. The bug had a peculiar shape: `renderTopProcs()` and `renderCost()` each open with a correct guard that hides them on a remote — and their only caller wrapped them in *the same condition*, so on a remote they were never called, the guard never ran, and the last local paint stayed. The chart had no guard at all; it plotted `/api/data`, which is always the hub. This only surfaced on the local → remote *switch*, never on a fresh load, which is how it survived. The hub-only cards now hide the moment the host changes rather than on the next 15-second tick.
+- **The System tab's chart now draws the host you selected.** Per-host CPU, RAM and load were already being stored in `host_samples` on every poll, but nothing ever read them back, so the panel stayed hardwired to the hub's own series — fixing the chart meant adding the reader it never had. `/api/host_history?host=&range=` serves those rows, falling back to the hourly rollup once raw retention expires. A host with no history yet says so next to the canvas instead of drawing an empty chart, which is indistinguishable from a chart of zeroes.
 
 ## [0.30.0](https://github.com/SikamikanikoBG/homelab-monitor/releases/tag/v0.30.0) — 2026-08-08 · **A dashboard that keeps up, disk scans on every box — and a container that had quietly been running itself twice**
 *Live values went from twenty-five seconds stale to two, and the app asks the server for less than it did before, because the fix was to stop conflating how often something is measured with how often it is stored. Chasing a stream that ticked twice per interval then turned up something older and worse: every container ever shipped has been running two complete copies of the application.*
