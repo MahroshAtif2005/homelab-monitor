@@ -235,6 +235,7 @@
   "tp.by_ram": "By RAM",
   "common.no_data": "No data yet.",
   "tp.cap": "Grouped by command across {n} cores · CPU% is per-core · refreshes every 15s",
+  "tp.cap_remote": "Grouped by command across {n} cores · CPU% is per-core, sampled over {w}s on each poll · RAM is exact",
   "sys.os": "OS",
   "sys.kernel": "Kernel",
   "sys.init_virt": "Init / virt",
