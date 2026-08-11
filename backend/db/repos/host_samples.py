@@ -60,15 +60,24 @@ def min_ts(host: str, conn=None):
 
 
 def _use_rollup(host: str, since: int, conn) -> bool:
-    """True when the raw table can't honestly answer for this window.
+    """True when the raw ring can no longer answer for `since` but the rollup can.
 
-    Same rule as gpu_samples: if the oldest raw row is newer than the window
-    start, raw would answer a 30d question with 2d of data and label it 30d.
+    Same rule as gpu_samples._use_rollup, and for the same reason: the test is
+    "does the rollup hold an EARLIER HOUR than the oldest raw sample" — i.e. has
+    retention actually purged raw rows the rollup still remembers. Not simply
+    "does the window start before the oldest raw sample", which is also true for
+    a host added twenty minutes ago, where raw is the complete and correct
+    answer and switching to the rollup would hand back a four-point chart of a
+    machine that has fine-grained data for its whole life. (Rollup rows are
+    bucketed down to the hour, so the comparison is hour-to-hour.)
     """
-    oldest = conn.execute(
-        "SELECT MIN(ts) FROM host_samples WHERE host=?", (host,)
-    ).fetchone()[0]
-    return oldest is None or oldest > since
+    raw = conn.execute("SELECT MIN(ts) FROM host_samples WHERE host=?", (host,)).fetchone()[0]
+    roll = min_ts_1h(host, conn=conn)
+    if roll is None:
+        return False                      # nothing rolled up; raw is all there is
+    if raw is None:
+        return True                       # raw fully purged (or never written)
+    return since < raw and roll < (raw // 3600) * 3600
 
 
 def vitals_series(host: str, since: int, bucket: int, conn=None) -> list:
