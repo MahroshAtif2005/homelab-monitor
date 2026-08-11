@@ -82,6 +82,50 @@ def api_host_data(name):
                     "error": entry.get("error")})
 
 
+@bp.route("/api/host_history")
+def api_host_history():
+    """CPU / RAM / load history for one host — the System tab's chart feed.
+
+    `host=local` is the hub, served from its own `samples` series via /api/data;
+    everything else comes out of `host_samples`, which the poller has been
+    filling with each remote's vitals all along. There is deliberately no
+    "remote history" endpoint separate from this one: the System tab used to
+    chart the hub and then keep charting the hub after you switched machines,
+    and the only reason that bug could exist is that nothing here read the
+    per-host rows.
+
+    Shaped like the slice of /api/data the chart consumes — {labels, cpu,
+    ram_used, ram_total, load1, ctemp} — so the same drawing code serves both.
+    """
+    import app as _app
+    from backend.db.repos import host_samples as hs_repo
+
+    name = request.args.get("host", "local")
+    rng = request.args.get("range", "6h")
+    span = _app.RANGES.get(rng, 21600)
+    now = int(time.time())
+    with _app.LOCK:
+        if span is None:
+            since = hs_repo.min_ts(name, conn=_app.DB) or now
+        else:
+            since = now - span
+        bk = max(_app.INTERVAL, round(max(1, now - since) / _app.MAX_POINTS))
+        rows = hs_repo.vitals_series(name, since, bk, conn=_app.DB)
+
+    return jsonify({
+        "host": name, "range": rng, "bucket_sec": bk,
+        "labels":    [int(r[0]) for r in rows],
+        # None, not 0, for a sensor the host never reported: Chart.js leaves a
+        # gap where there is no reading, which is the honest drawing. A zeroed
+        # point would render as a machine that was genuinely idle.
+        "cpu":       [r[1] for r in rows],
+        "ram_used":  [r[2] for r in rows],
+        "ram_total": [r[3] for r in rows],
+        "load1":     [r[4] for r in rows],
+        "ctemp":     [r[5] for r in rows],
+    })
+
+
 @bp.route("/api/fleet")
 def api_fleet():
     import app as _app

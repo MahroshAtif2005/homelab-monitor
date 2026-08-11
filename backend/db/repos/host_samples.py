@@ -45,6 +45,53 @@ def min_ts_1h(host: str, conn=None):
     ).fetchone()[0]
 
 
+def min_ts(host: str, conn=None):
+    """Earliest sample for a host across raw and rollup, or None.
+
+    What `range=all` should actually span: raw rows are retention-purged, so
+    asking `host_samples` alone would shrink a host's "all" window to the last
+    couple of days the moment the purge runs.
+    """
+    c = conn or connection()
+    raw = c.execute("SELECT MIN(ts) FROM host_samples WHERE host=?", (host,)).fetchone()[0]
+    roll = min_ts_1h(host, conn=c)
+    vals = [v for v in (raw, roll) if v is not None]
+    return min(vals) if vals else None
+
+
+def _use_rollup(host: str, since: int, conn) -> bool:
+    """True when the raw table can't honestly answer for this window.
+
+    Same rule as gpu_samples: if the oldest raw row is newer than the window
+    start, raw would answer a 30d question with 2d of data and label it 30d.
+    """
+    oldest = conn.execute(
+        "SELECT MIN(ts) FROM host_samples WHERE host=?", (host,)
+    ).fetchone()[0]
+    return oldest is None or oldest > since
+
+
+def vitals_series(host: str, since: int, bucket: int, conn=None) -> list:
+    """Bucketed CPU / RAM / load / temperature for one host since `since`.
+
+    Returns (bucket_ts, avg_cpu, avg_ram_used, max_ram_total, avg_load1,
+    avg_ctemp) ordered by time — the per-host counterpart of the hub's own
+    `D.total` series, so the System tab's chart has one shape to draw whichever
+    machine is selected.
+
+    `ram_total` takes MAX rather than AVG: it is a capacity, not a rate, and
+    averaging it across a bucket where one poll missed the value would drag the
+    denominator of every RAM percentage down with it.
+    """
+    c = conn or connection()
+    table = "host_samples_1h" if _use_rollup(host, since, c) else "host_samples"
+    return c.execute(
+        "SELECT (ts/?)*? b, AVG(cpu), AVG(ram_used), MAX(ram_total), AVG(load1), AVG(ctemp) "
+        f"FROM {table} WHERE host=? AND ts>=? GROUP BY b ORDER BY b",
+        (bucket, bucket, host, since)
+    ).fetchall()
+
+
 def comp_bucketed(host: str, ts: int, bk: int, conn=None) -> list:
     """(bucket, avg_gpu_power, avg_cpu_power, avg_dram_power) since ts."""
     c = conn or connection()
