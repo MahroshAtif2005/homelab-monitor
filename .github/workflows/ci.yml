@@ -61,6 +61,15 @@ jobs:
       - name: Byte-compile the app
         run: python -m py_compile app.py probe.py
 
+      # Structural guards on the dashboard's refresh loop. Pure stdlib (re +
+      # pathlib over static/dashboard.html), so pytest is the only dependency —
+      # the snapshot job's flask/prometheus stack isn't needed here.
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Dashboard refresh-loop invariants
+        run: python -m pytest tests/test_dashboard_refresh_invariants.py -q
+
       # The dashboard is one HTML file with no build step, so there is no npm
       # project here and nothing to install: this lifts the refresh-loop and
       # live-tail functions straight out of static/dashboard.html and runs them

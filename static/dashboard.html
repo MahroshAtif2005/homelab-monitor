@@ -9237,6 +9237,19 @@ function mergeLiveTail(n){
   const keys=['util','mem','mempk','power','temp','cpu','ram_used','ram_total','load1','ctemp'];
   const arrs=keys.map(k=>t[k]).filter(Array.isArray);
   if(!arrs.length) return false;
+  // D.total is not the only thing indexed against D.labels. The per-service
+  // memory series, the "other" remainder and every per-device disk-I/O series
+  // are the same length and read with the same indices (_dioSpark draws them
+  // against D.labels), so they have to slide on a bucket rollover too — else
+  // the Disk I/O sparklines sit one bucket out of step until the next poll.
+  // Nothing live is folded into them: they take the null tail the server itself
+  // writes for a bucket it has not sampled yet.
+  if(Array.isArray(D.other)) arrs.push(D.other);
+  Object.keys(D.services||{}).forEach(k=>{ if(Array.isArray(D.services[k])) arrs.push(D.services[k]); });
+  Object.keys(D.disk_io||{}).forEach(dev=>{
+    const s=D.disk_io[dev]||{};
+    ['read_mb_s','write_mb_s','util_pct'].forEach(k=>{ if(Array.isArray(s[k])) arrs.push(s[k]); });
+  });
   const i=_tailSlot(D.labels, arrs, D.bucket_sec, ts, LIVE_TAIL, D.interval);
   if(i<0) return false;
   const c=LIVE_TAIL.n, H=n.host||{};
@@ -9302,7 +9315,14 @@ function mergeGpuTail(n){
 // one to redraw and shows nobody anything, and showTab() rebuilds on the way in.
 function paintLiveCharts(){
   try{
-    if(TAB==='host'){ buildCharts(); return; }         // overview repaints via renderMissionControl()
+    // Hub-only, and guarded here rather than trusting buildCharts() to do it.
+    // D is always this hub's own series, so driving the System chart from a live
+    // frame while a remote machine is selected animates the hub's CPU/RAM/load
+    // convincingly under the remote's name — a wrong answer that now moves every
+    // two seconds instead of sitting still. mergeGpuTail() scopes itself the same
+    // way. Keeping the check in this function means the branch is correct on its
+    // own, whatever buildCharts() does or doesn't guard.
+    if(TAB==='host'){ if(CURRENT_HOST==='local') buildCharts(); return; }   // overview repaints via renderMissionControl()
     if(TAB==='gpu' && GPUC && GPUC.has_gpu){
       if(GPU_VIEW!=='card') renderGpuMetricChart(GPUC);   // small multiples stay on the history cadence
       renderGpuCombined(GPUC);

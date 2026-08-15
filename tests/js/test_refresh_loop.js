@@ -35,17 +35,25 @@ const SRC = fs.readFileSync(DASH, 'utf8');
 // Top-level declarations in dashboard.html start at column 0 and a function's
 // closing brace is the next `}` at column 0. That is enough structure to slice
 // out exactly the definitions under test without parsing the whole file.
+function missing(what) {
+  return new Error(
+    `${what} was not found in ${DASH}.\n` +
+    '       Either the page predates the chart-refresh fix (nothing to test — these\n' +
+    '       functions arrived with it), or the definition was renamed and this\n' +
+    '       extractor needs updating to match.');
+}
+
 function takeFunction(name) {
   const start = SRC.indexOf(`\nfunction ${name}(`);
-  if (start < 0) throw new Error(`could not find function ${name}() in dashboard.html`);
+  if (start < 0) throw missing(`function ${name}()`);
   const end = SRC.indexOf('\n}', start);
-  if (end < 0) throw new Error(`could not find the end of ${name}()`);
+  if (end < 0) throw new Error(`could not find the end of ${name}() — is it still a top-level function?`);
   return SRC.slice(start + 1, end + 2);
 }
 
 function takeLine(re, what) {
   const m = SRC.match(re);
-  if (!m) throw new Error(`could not find ${what} in dashboard.html`);
+  if (!m) throw missing(what);
   return m[0];
 }
 
@@ -54,6 +62,11 @@ let NOW = 1700000000000, SEQ = 0;
 const timers = new Map();
 const setTimeout_ = (fn, ms) => { const id = ++SEQ; timers.set(id, { at: NOW + ms, fn }); return id; };
 const clearTimeout_ = (id) => { timers.delete(id); };
+// Throws that escape a timer callback are recorded rather than propagated. An
+// escape IS a failure — it is exactly the v0.30.0 bug — but letting it kill the
+// node process turns a regression into a stack trace with no indication of which
+// invariant broke. The R2 suite asserts on `escaped` and reports it as a FAIL.
+let escaped = [];
 function advance(ms) {
   const end = NOW + ms;
   for (;;) {
@@ -62,7 +75,8 @@ function advance(ms) {
     if (!next) break;
     NOW = next.t.at;
     timers.delete(next.id);
-    next.t.fn();          // deliberately unguarded: an escaping throw is a failure
+    try { next.t.fn(); }
+    catch (e) { escaped.push(`${e.constructor.name}: ${e.message}`); }
   }
   NOW = end;
 }
@@ -83,9 +97,11 @@ function build(opts = {}) {
     GPU_TAIL: { b: null, n: 0 },
     TAB: opts.tab || 'overview',
     CURRENT_HOST: opts.host || 'local',
+    GPU_VIEW: opts.gpuView || 'card',
     LOCAL_ONLY_TABS: new Set(['models', 'experiments', 'containers']),
     // counters
     loadDataCalls: 0, loadFleetCalls: 0, loadHealthCalls: 0, openStreamCalls: 0,
+    buildChartsCalls: 0, gpuChartCalls: 0,
     // environment
     Math, JSON, Set, Array, Object,
     Date: { now: () => NOW },
@@ -109,6 +125,10 @@ function build(opts = {}) {
   ctx.renderDiskIo = () => {
     if (opts.diskIoThrows) throw new TypeError("Cannot read properties of undefined (reading 'items')");
   };
+  ctx.buildCharts = () => { ctx.buildChartsCalls++; };
+  ctx.renderGpuMetricChart = () => { ctx.gpuChartCalls++; };
+  ctx.renderGpuCombined = () => { ctx.gpuChartCalls++; };
+  ctx.renderGpuKpis = () => {};
   vm.createContext(ctx);
   vm.runInContext([
     takeFunction('liveStale'),
@@ -121,6 +141,7 @@ function build(opts = {}) {
     takeFunction('_tailSlot'),
     takeFunction('mergeLiveTail'),
     takeFunction('mergeGpuTail'),
+    takeFunction('paintLiveCharts'),
   ].join('\n\n'), ctx);
   return ctx;
 }
@@ -135,7 +156,7 @@ function check(label, cond, detail) {
 }
 function suite(name) { console.log(`\n${name}`); }
 
-function reset() { NOW = 1700000000000; timers.clear(); }
+function reset() { NOW = 1700000000000; timers.clear(); escaped = []; }
 
 // ── R2: a throwing renderer must not kill the chain ──────────────────────────
 suite('R2  a sync throw inside refreshHistory() must not stop the loop');
@@ -153,6 +174,8 @@ suite('R2  a sync throw inside refreshHistory() must not stop the loop');
   check('the failure was logged, not swallowed',
     c.errors.length > 0 && c.errors[0].includes('refreshHistory failed'),
     `errors=${JSON.stringify(c.errors.slice(0, 1))}`);
+  check('no throw escaped the timer callback', escaped.length === 0,
+    `escaped=${JSON.stringify(escaped.slice(0, 2))} — the reschedule is not protected`);
 }
 
 // ── R3: reconnect flapping must not starve the timer ─────────────────────────
@@ -211,6 +234,24 @@ suite('R4  a stream that stops delivering must be demoted');
   check('LIVE_ON demoted to false', c.LIVE_ON === false);
   check('period fell back to 15s', c.historyPeriod() === 15000, `period=${c.historyPeriod()}`);
   check('fleet polling resumed', c.loadFleetCalls === 1, `loadFleet=${c.loadFleetCalls}`);
+}
+
+// ── R4a: historyPeriod() must consult the watchdog on its own ────────────────
+// Without this the `|| liveStale()` clause is dead code as far as the suite is
+// concerned: every other R4 check goes through refreshHistory(), which demotes
+// LIVE_ON first, so historyPeriod() answers via its `!LIVE_ON` branch and the
+// staleness clause is never exercised. Assert it directly, LIVE_ON still true.
+suite('R4a historyPeriod() alone must fall back on a stale stream');
+{
+  reset();
+  const c = build({ liveOn: true, D: { bucket_sec: 60, fast_interval: 2 } });
+  c.noteLiveFrame();
+  check('slow cadence while frames are arriving', c.historyPeriod() === 60000,
+    `period=${c.historyPeriod()}`);
+  advance(120000);                            // two minutes of silence
+  check('LIVE_ON is still true (nothing demoted it)', c.LIVE_ON === true);
+  check('but the period already fell back to 15s', c.historyPeriod() === 15000,
+    `period=${c.historyPeriod()} — historyPeriod() is not consulting liveStale()`);
 }
 
 // ── R4b: a live stream must not be demoted ───────────────────────────────────
@@ -357,6 +398,67 @@ suite('tail  the GPU tab rides the same fold');
     `temp_max=${GPUC.combined.temp_max[4]}`);
   check('KPI tiles were refreshed from the frame', GPUC.now_pooled.util === 95,
     `util=${GPUC.now_pooled.util}`);
+}
+
+// ── host scope: the live repaint is hub-only ─────────────────────────────────
+// D is always this hub's own series. Driving the System chart from a live frame
+// while a remote machine is selected animates the hub's CPU/RAM/load under the
+// remote's name — and now it would do so every two seconds instead of sitting
+// still, which reads as authoritative rather than obviously stale.
+suite('scope  the live repaint must not paint hub data under a remote host');
+{
+  reset();
+  const c = build({ tab: 'host', host: 'local' });
+  c.paintLiveCharts();
+  check('the hub repaints its own System chart', c.buildChartsCalls === 1,
+    `buildCharts=${c.buildChartsCalls}`);
+
+  const c2 = build({ tab: 'host', host: 'vader' });
+  c2.paintLiveCharts();
+  check('a remote host does not repaint from the hub frame', c2.buildChartsCalls === 0,
+    `buildCharts=${c2.buildChartsCalls} — the hub's series would animate under the remote's name`);
+}
+
+// ── tail: everything indexed against D.labels slides together ────────────────
+// D.total is not the only thing the length of D.labels. The per-service memory
+// series, the "other" remainder and every per-device disk-I/O series are read
+// with the same indices, so a rollover that slides only D.total leaves them one
+// bucket out of step until the next authoritative poll.
+suite('tail  sibling series slide with the window on a bucket rollover');
+{
+  reset();
+  const bk = 60, last = 1786788000;
+  const five = v => [v, v, v, v, v];
+  const D = {
+    bucket_sec: bk, interval: 10,
+    labels: [last - 4 * bk, last - 3 * bk, last - 2 * bk, last - bk, last],
+    total: { cpu: five(3), ram_used: five(8000), ram_total: five(16000), load1: five(1) },
+    services: { 'ollama-embed': five(500) },
+    other: five(200),
+    disk_io: { md0: { read_mb_s: five(1), write_mb_s: five(2), util_pct: five(3) } },
+  };
+  const c = build({ D, host: 'local' });
+  // A frame in the NEXT bucket forces the window to slide.
+  const ok = c.mergeLiveTail({ fast_ts: last + bk + 5, host: { cpu: 40 } });
+  check('merge reported success', ok === true);
+  check('the window still holds five buckets', D.labels.length === 5,
+    `labels=${D.labels.length}`);
+  check('labels slid to the new bucket', D.labels[4] === last + bk,
+    `last label=${D.labels[4]}`);
+  check('D.total slid with the labels', D.total.cpu.length === 5 && D.total.cpu[4] === 40,
+    `cpu=${JSON.stringify(D.total.cpu)}`);
+  check('the per-service series slid too',
+    D.services['ollama-embed'].length === 5 && D.services['ollama-embed'][4] === null,
+    `svc=${JSON.stringify(D.services['ollama-embed'])}`);
+  check('the "other" remainder slid too',
+    D.other.length === 5 && D.other[4] === null, `other=${JSON.stringify(D.other)}`);
+  check('every disk-I/O series slid too',
+    D.disk_io.md0.read_mb_s.length === 5 && D.disk_io.md0.write_mb_s.length === 5
+      && D.disk_io.md0.util_pct.length === 5 && D.disk_io.md0.read_mb_s[4] === null,
+    `read=${JSON.stringify(D.disk_io.md0.read_mb_s)}`);
+  check('the oldest bucket was dropped, not kept',
+    D.services['ollama-embed'][0] === 500 && D.labels[0] === last - 3 * bk,
+    `first label=${D.labels[0]}`);
 }
 
 // ── result ───────────────────────────────────────────────────────────────────
