@@ -61,6 +61,13 @@ jobs:
       - name: Byte-compile the app
         run: python -m py_compile app.py probe.py
 
+      # The dashboard is one HTML file with no build step, so there is no npm
+      # project here and nothing to install: this lifts the refresh-loop and
+      # live-tail functions straight out of static/dashboard.html and runs them
+      # against a fake clock on the runner's preinstalled Node.
+      - name: Dashboard refresh-loop behaviour
+        run: node tests/js/test_refresh_loop.js
+
       - name: Build the image
         run: docker build -t homelab-monitor:ci .
 
