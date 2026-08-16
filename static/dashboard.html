@@ -3365,6 +3365,7 @@ function showTab(id){
 async function loadData(){
   try{ D = await(await fetch('/api/data?range='+R)).json(); }
   catch(e){ document.getElementById('lastup').textContent='offline'; return; }
+  LIVE_TAIL={b:null,n:0};   // fresh authoritative series: start folding again from it
   renderData();
   if(TAB==='disks') renderDisksTab();   // populate/refresh disk cards (sig-guarded; won't wipe a scan)
 }
@@ -3571,6 +3572,10 @@ function renderGpuSpill(n){
 let GPUC = null;               // last /api/gpu/history payload
 let GPUC_ATTR = null;          // last /api/gpu/attribution payload
 let GPUC_HOST = null, GPUC_RANGE = null, GPUC_INFLIGHT = null;
+// Live-tail bookkeeping (bucket start + how many samples are folded into it).
+// Declared up here, not next to the merge code far below, so the loaders that
+// reset it can never run against a name that isn't initialised yet.
+let LIVE_TAIL={b:null,n:0}, GPU_TAIL={b:null,n:0};
 let GPU_VIEW = 'card';         // 'card' small multiples | 'metric' one metric, all cards
 let GPU_METRIC = 'temp';
 
@@ -3689,7 +3694,7 @@ function gpuStatusPill(card){
 }
 
 // One small-multiple panel per card.
-function gpuMiniCard(card, d, ranges){
+function gpuMiniCardBody(card, d, ranges){
   const now = card.now || {};
   const spans = spansToIdx(card.throttle_spans, d.labels);
   const rows = GPU_SPARK_ROWS.map(m=>{
@@ -3740,14 +3745,52 @@ function gpuMiniCard(card, d, ranges){
     now.temp!=null ? Math.round(now.temp)+'°C' : null,
   ].filter(Boolean).join(' · ');
 
-  return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
-       aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">
-    <div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
+  return `<div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
     <div class="gpu-mini-now">${stats || (card.status==='retired' && card.last_seen
         ? I18N.tf('gpu.last_seen','last reported {t}',{t:relTime(card.last_seen)})
         : I18N.t('gpu.no_live','no live reading'))}</div>
-    ${rows}${attrib}
-  </div>`;
+    ${rows}${attrib}`;
+}
+
+// The wrapper carries the click/keyboard handlers, the focus ring and the status
+// class; the body is everything that changes as the card runs. Keeping them
+// separate is what lets the live path refresh the numbers and sparklines every
+// couple of seconds without rebuilding the element under the pointer.
+function gpuMiniCard(card, d, ranges){
+  return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
+       aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">${gpuMiniCardBody(card, d, ranges)}</div>`;
+}
+
+// Refresh the small multiples in place off a live frame.
+//
+// The old path only ever repainted these on the 60s history fetch, because the
+// full render replaces #pergpu wholesale and re-binds every handler — doing that
+// twice a second would fight the pointer and drop focus mid-keyboard-nav. But
+// per-card temp/watts/util are the fastest-moving numbers on the page, so on the
+// small-multiples view the whole grid sat still while the detail chart behind it
+// (a Chart.js in-place update) tracked live. Same data, two different answers.
+//
+// Writing only each card's body leaves the wrapper — and therefore its handlers,
+// its focus and its tabindex — untouched. Anything structural (a card appearing,
+// retiring, changing status) still goes through the full render.
+function updateGpuCardsLive(d){
+  const box = document.getElementById('pergpu');
+  if(!box || box.hidden || GPU_VIEW !== 'card' || !d || !d.has_gpu) return false;
+  const els = box.querySelectorAll('.gpu-mini');
+  const cards = d.cards || [];
+  if(!els.length || els.length !== cards.length) return false;   // structure changed: let the full render own it
+  const ranges = {};
+  GPU_SPARK_ROWS.forEach(m=>{ ranges[m] = gpuSharedRange(cards, m) || {}; });
+  let painted = 0;
+  els.forEach(el=>{
+    const card = cards.find(c=>String(c.idx) === el.dataset.idx);
+    if(!card) return;
+    const cls = 'gpu-mini st-' + card.status;
+    if(el.className !== cls) el.className = cls;
+    el.innerHTML = gpuMiniCardBody(card, d, ranges);
+    painted++;
+  });
+  return painted > 0;
 }
 
 // Fetch + paint the whole GPU tab for whichever host is selected.
@@ -3777,6 +3820,7 @@ async function renderGpuTab(force){
   finally{ if(GPUC_INFLIGHT === host+'|'+range) GPUC_INFLIGHT = null; }
   if(host !== CURRENT_HOST || range !== R) return;   // user moved on; don't paint
   GPUC = hist; GPUC_ATTR = attr; GPUC_HOST = host; GPUC_RANGE = range;
+  GPU_TAIL={b:null,n:0};   // fresh authoritative series: start folding again from it
   paintGpuTab(false);
 }
 
@@ -3825,8 +3869,33 @@ function paintGpuTab(loading){
   if(title) title.innerHTML = `${sic('gpu')} ${I18N.tf('gpu.pooled_title','GPU on {host}',{host:esc(d.host)})}`
     + (p.model ? ` <span class="muted" style="font-weight:400;font-size:13px">· ${esc(p.model)}</span>` : '');
 
-  // Pooled KPIs, each with its own sparkline: the snapshot and the trend in one
-  // eye movement. The sub-line is the fleet-relevant fact, not the number again.
+  renderGpuKpis(d);
+
+  const pcap = document.getElementById('gpu-pooled-cap');
+  if(pcap){
+    pcap.textContent = d.online
+      ? I18N.tf('gpu.pooled_cap','Live · updated {t} · history every {i}s',{t:relTime(d.at), i:d.interval})
+      : I18N.tf('gpu.pooled_cap_off','Host offline — showing the last snapshot from {t}',{t:relTime(d.at)});
+  }
+
+  renderGpuDetail(gpuPooledExtra(d), p.power);
+  renderGpuAlertStrip(d);
+  renderGpuHealth(d);
+  renderGpuCards(d);
+  renderGpuCombined(d);
+  renderGpuAttribution(d, GPUC_ATTR);
+  renderGpuNow(d);
+}
+
+// Pooled KPIs, each with its own sparkline: the snapshot and the trend in one
+// eye movement. The sub-line is the fleet-relevant fact, not the number again.
+// Split out of paintGpuTab() so the live path can refresh just these tiles every
+// couple of seconds — they read now_pooled, which the stream already carries,
+// and used to sit still until the next 60s history fetch.
+function renderGpuKpis(d){
+  const box = document.getElementById('gpukpis');
+  if(!box || !d || !d.has_gpu) return;
+  const p = d.now_pooled || {};
   const C = d.combined || {};
   const memPct = p.mem_total ? Math.round(p.mem_used/p.mem_total*100) : 0;
   const hotN = (d.cards||[]).filter(c=>(c.now&&c.now.temp||0) >= d.hot_c).length;
@@ -3852,21 +3921,6 @@ function paintGpuTab(loading){
                            min: GPU_METRICS[t.m] && GPU_METRICS[t.m].max===100 ? 0 : null}) : '';
     return `<div class="kpi"><div class="v">${t.v}</div><div class="l">${t.l}</div>${sp}<div class="s">${t.s||''}</div></div>`;
   }).join('');
-
-  const pcap = document.getElementById('gpu-pooled-cap');
-  if(pcap){
-    pcap.textContent = d.online
-      ? I18N.tf('gpu.pooled_cap','Live · updated {t} · history every {i}s',{t:relTime(d.at), i:d.interval})
-      : I18N.tf('gpu.pooled_cap_off','Host offline — showing the last snapshot from {t}',{t:relTime(d.at)});
-  }
-
-  renderGpuDetail(gpuPooledExtra(d), p.power);
-  renderGpuAlertStrip(d);
-  renderGpuHealth(d);
-  renderGpuCards(d);
-  renderGpuCombined(d);
-  renderGpuAttribution(d, GPUC_ATTR);
-  renderGpuNow(d);
 }
 
 // Small multiples, or the by-metric chart — same data, two questions.
@@ -5377,13 +5431,27 @@ function dualOpts(labels,ymax){const grid=cv('--free'),tick=cv('--mut'),leg=cv('
 // peak still lands.
 function mk(id,cfg){
   const c=charts[id];
+  // Inline plugins are part of the shape. They are closures over the payload
+  // they were built from — the GPU throttle bands close over d.cards, the
+  // threshold line over d.hot_c, the VRAM capacity line over d.capacity_mb — and
+  // a chart keeps the plugin objects it was constructed with. Ignoring them here
+  // meant the bands and the cap line stayed frozen at page-load state for the
+  // life of the tab while the lines underneath them moved.
+  const curP = (c && c.config.plugins) || [];
+  const newP = cfg.plugins || [];
+  const samePlugins = curP.length===newP.length
+    && curP.every((p,i)=>p && newP[i] && p.id===newP[i].id);
   const sameShape = c && c.config.type===cfg.type
     && c.data.datasets.length===cfg.data.datasets.length
-    && c.data.datasets.every((ds,i)=>ds.label===cfg.data.datasets[i].label);
+    && c.data.datasets.every((ds,i)=>ds.label===cfg.data.datasets[i].label)
+    && samePlugins;
   if(sameShape){
     c.data.labels=cfg.data.labels;
     cfg.data.datasets.forEach((ds,i)=>Object.assign(c.data.datasets[i],ds));
     if(cfg.options) c.options=cfg.options;
+    // Copy the fresh hooks onto the objects Chart.js already holds, rather than
+    // swapping the array — the chart's plugin list is read once at construction.
+    newP.forEach((p,i)=>Object.assign(curP[i],p));
     c.update('none');   // no entry animation: this is a refresh, not a redraw
     return;
   }
@@ -7339,7 +7407,14 @@ function renderMcChart(){
   const hasGpu=!!(HH&&HH.now&&HH.now.gpu&&HH.now.gpu.available);
   const useGpu=(MC_HEROMODE!=='fcpu') && hasGpu && (t.util&&t.util.length);
   const rng=(typeof R!=='undefined'&&R)||'6h';
-  const sig=(useGpu?'g':'c')+'_'+D.labels.length+'_'+(D.labels[D.labels.length-1]||0)+'_'+rng+'_'+(document.documentElement.getAttribute('data-theme')||'');
+  // The signature has to include the values, not just the bucket labels. The
+  // newest bucket keeps being re-averaged (and, between polls, updated from the
+  // live stream) under a label that does not change until the bucket closes —
+  // a label-only signature held this chart still for a whole bucket at a time
+  // while every tile around it moved.
+  const tl=a=>{ const v=(a&&a.length)?a[a.length-1]:null; return v==null?'-':(+v).toFixed(2); };
+  const sig=(useGpu?'g':'c')+'_'+D.labels.length+'_'+(D.labels[D.labels.length-1]||0)+'_'+rng+'_'+(document.documentElement.getAttribute('data-theme')||'')
+    +'_'+(useGpu ? tl(t.util)+tl(t.power)+tl(t.temp) : tl(t.cpu)+tl(t.ram_used)+tl(t.load1));
   const titleEl=document.getElementById('mc-chart-title'), tagEl=document.getElementById('mc-chart-tag');
   if(titleEl) titleEl.textContent = useGpu ? I18N.t('mc.chart_gpu','GPU · util, power & temp') : I18N.t('mc.chart_cpu','CPU, RAM & load');
   if(tagEl) tagEl.textContent = I18N.tf('mc.last_range','last {r}',{r:rng});
@@ -8789,7 +8864,12 @@ document.addEventListener('lang:changed', ()=>{
   if(TAB==='disks')       safe(()=>{ const r=document.getElementById('disksbody'); if(r) r.dataset.sig=''; renderDisksTab(); });
 });
 document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localStorage.setItem('hl_range',R);
-  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
+  document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));
+  // Re-arm after the new range lands, not before: the poll period is derived
+  // from D.bucket_sec, so re-arming synchronously would just re-apply the old
+  // range's period. Switching 24h -> 1h otherwise left the page waiting out the
+  // remains of a 60s tick before it started refreshing at the new range's pace.
+  loadData().then(()=>scheduleHistory(true)).catch(()=>scheduleHistory(true));
   if(TAB==='experiments') renderExperiments(true);
   if(TAB==='costs') renderCosts(true);
   if(TAB==='gpu') renderGpuTab(true);
@@ -9245,8 +9325,180 @@ loadData(); loadHealth(); loadFleet();
 // got slower, and a backgrounded tab now costs nothing at all instead of
 // fetching the full payload every 15 seconds forever.
 let LIVE_ES=null, LIVE_ON=false, LIVE_REV_SEEN=-1, HIST_TIMER=null;
+// When the last `now`/`fleet` frame landed. A stream can stop delivering without
+// ever firing onerror (a dead TCP connection the browser hasn't noticed yet), and
+// LIVE_ON only ever tracked connection *events* — so the page could sit forever
+// believing it was live: history pinned to the slow cadence and, because
+// refreshHistory() gates the fleet poll on !LIVE_ON, the fleet never polled at all.
+let LIVE_LAST_FRAME=0;
 
 const autoOn = () => { const el=document.getElementById('auto'); return !el || el.checked; };
+
+// A stream that has gone quiet for far longer than its own frame interval is not
+// live, whatever the connection says. The server pushes `now` every
+// FAST_INTERVAL (~2s) and a keepalive comment at worst every 20s — but comments
+// don't surface as events, so the threshold has to clear that keepalive.
+function liveStale(){
+  if(!LIVE_LAST_FRAME) return false;                  // nothing has arrived yet
+  const iv = ((D && D.fast_interval) || 2) * 1000;
+  return (Date.now() - LIVE_LAST_FRAME) > Math.max(6*iv, 45000);
+}
+
+// Note a frame arriving, and recover if the watchdog had written the stream off.
+function noteLiveFrame(){
+  LIVE_LAST_FRAME = Date.now();
+  if(!LIVE_ON){ LIVE_ON = true; scheduleHistory(); }
+}
+
+// ── Live tail ────────────────────────────────────────────────────────────────
+// /api/data and /api/gpu/history bucket their series — 60s on the default 6h
+// range, 240s on 24h — so the newest point only moves when a whole bucket
+// closes, while the tiles above it move every 2s off the stream. That gap is
+// what made the charts look stuck: on 6h a new point took up to ~120s to appear.
+//
+// The stream already carries every value the newest bucket is made of, so fold
+// each frame into that bucket on the client instead of asking the server again.
+// Within a bucket we keep a running mean, which converges on the AVG() the
+// server will send, so the next authoritative /api/data barely moves the point
+// instead of snapping it. VRAM is the exception: it is a step metric, and
+// averaging it is exactly what hid a model load, so it carries the latest value.
+// (LIVE_TAIL / GPU_TAIL are declared with the chart state further up.)
+
+// Running mean of `n` samples, given the previous mean.
+const _tailMean=(prev,v,n)=>(prev==null||n<=1)?v:prev+(v-prev)/n;
+
+// Slide the window: append a bucket and drop the oldest, so the arrays keep the
+// length the server sent and the x-axis scrolls instead of growing.
+function _tailPush(labels, arrs, bucket){
+  labels.push(bucket); labels.shift();
+  arrs.forEach(a=>{ a.push(null); a.shift(); });
+}
+
+// Fold one live frame into the newest bucket of a labelled series set.
+// Returns the index to write at, or -1 when the frame doesn't belong.
+//
+// Picking the sample count back up matters. A fresh poll lands with the server's
+// own average of however many samples are already in the open bucket; resuming
+// at n=1 would let the very next frame slam the instantaneous value straight
+// over it, which is the jitter this is meant to avoid. So when we start tracking
+// a bucket we haven't been folding into, seed the count from how far into the
+// bucket we are — the live value then nudges the average instead of replacing it.
+function _tailSlot(labels, arrs, bucketSec, ts, state, intervalSec){
+  if(!Array.isArray(labels) || labels.length<2 || !bucketSec || !ts) return -1;
+  const bucket = Math.floor(ts/bucketSec)*bucketSec;
+  const last = labels[labels.length-1];
+  if(bucket < last) return -1;                       // frame older than the series
+  if(bucket > last){
+    _tailPush(labels, arrs, bucket);
+    state.b=bucket; state.n=0;                       // genuinely empty bucket
+  } else if(state.b !== bucket){
+    state.b=bucket;
+    state.n=Math.max(0, Math.floor((ts-bucket)/Math.max(1, intervalSec||10)));
+  }
+  state.n++;
+  return labels.length-1;
+}
+
+function mergeLiveTail(n){
+  if(!D || !D.total || !n) return false;
+  const t=D.total, ts=n.fast_ts||n.ts;
+  const keys=['util','mem','mempk','power','temp','cpu','ram_used','ram_total','load1','ctemp'];
+  const arrs=keys.map(k=>t[k]).filter(Array.isArray);
+  if(!arrs.length) return false;
+  // D.total is not the only thing indexed against D.labels. The per-service
+  // memory series, the "other" remainder and every per-device disk-I/O series
+  // are the same length and read with the same indices (_dioSpark draws them
+  // against D.labels), so they have to slide on a bucket rollover too — else
+  // the Disk I/O sparklines sit one bucket out of step until the next poll.
+  // Nothing live is folded into them: they take the null tail the server itself
+  // writes for a bucket it has not sampled yet.
+  if(Array.isArray(D.other)) arrs.push(D.other);
+  Object.keys(D.services||{}).forEach(k=>{ if(Array.isArray(D.services[k])) arrs.push(D.services[k]); });
+  Object.keys(D.disk_io||{}).forEach(dev=>{
+    const s=D.disk_io[dev]||{};
+    ['read_mb_s','write_mb_s','util_pct'].forEach(k=>{ if(Array.isArray(s[k])) arrs.push(s[k]); });
+  });
+  const i=_tailSlot(D.labels, arrs, D.bucket_sec, ts, LIVE_TAIL, D.interval);
+  if(i<0) return false;
+  const c=LIVE_TAIL.n, H=n.host||{};
+  const set=(k,v,mode)=>{ const a=t[k]; if(!Array.isArray(a)||v==null) return;
+    a[i] = mode==='last' ? v
+         : mode==='max'  ? Math.max(a[i]==null?v:a[i], v)
+         : _tailMean(a[i], v, c); };
+  set('cpu',H.cpu); set('ram_used',H.ram_used); set('ram_total',H.ram_total);
+  set('load1',H.load1); set('ctemp',H.ctemp);
+  // The sampler stores NULL in the GPU columns when there is no GPU, so history
+  // skips the gap instead of drawing a fake zero. Don't invent one here either.
+  if(n.gpu_avail){
+    set('util',n.util); set('power',n.power); set('temp',n.temp);
+    set('mem',n.mem_used,'last'); set('mempk',n.mem_used,'max');
+  }
+  return true;
+}
+
+// Same fold for the GPU tab, whose charts read /api/gpu/history rather than
+// /api/data. Hub-scoped: the live frame is this box's, so a remote's cockpit
+// must keep its own polled series.
+function mergeGpuTail(n){
+  if(!GPUC || !GPUC.has_gpu || !n || !n.gpu_avail) return false;
+  if(CURRENT_HOST!=='local' || GPUC.host!=='local') return false;
+  const C=GPUC.combined||{}, ts=n.fast_ts||n.ts;
+  const arrs=[];
+  ['util','vram','vram_total','power','temp_max','fan_max'].forEach(k=>{ if(Array.isArray(C[k])) arrs.push(C[k]); });
+  (GPUC.cards||[]).forEach(cd=>Object.keys(cd.series||{}).forEach(k=>{ if(Array.isArray(cd.series[k])) arrs.push(cd.series[k]); }));
+  if(!arrs.length) return false;
+  const i=_tailSlot(GPUC.labels, arrs, GPUC.bucket_sec, ts, GPU_TAIL, GPUC.interval);
+  if(i<0) return false;
+  const c=GPU_TAIL.n, live=n.gpus||[];
+  const put=(a,v,mode)=>{ if(!Array.isArray(a)||v==null) return;
+    a[i] = mode==='last' ? v
+         : mode==='max'  ? Math.max(a[i]==null?v:a[i], v)
+         : _tailMean(a[i], v, c); };
+  put(C.util,n.util); put(C.power,n.power); put(C.temp_max,n.temp,'max');
+  put(C.vram,n.mem_used,'last'); put(C.vram_total,n.mem_total,'last');
+  const fanMax=live.reduce((m,g)=>(g.fan!=null?Math.max(m==null?g.fan:m,g.fan):m), null);
+  put(C.fan_max,fanMax,'max');
+  (GPUC.cards||[]).forEach(cd=>{
+    const g=live.find(x=>x.idx===cd.idx), s=cd.series;
+    if(!g||!s) return;
+    put(s.util,g.util); put(s.power,g.power); put(s.temp,g.temp); put(s.temp_max,g.temp,'max');
+    put(s.vram,g.mem_used,'last'); put(s.vram_total,g.mem_total,'last');
+    put(s.fan,g.fan); put(s.fan_max,g.fan,'max'); put(s.mem_util,g.mem_util); put(s.clk_sm,g.clk_sm);
+    if(cd.now) Object.assign(cd.now,{util:g.util,mem_used:g.mem_used,mem_total:g.mem_total,
+      power:g.power,temp:g.temp,fan:g.fan,mem_util:g.mem_util,clk_sm:g.clk_sm,pstate:g.pstate});
+  });
+  // The pooled KPI tiles read now_pooled, which otherwise only moved on the 60s
+  // history fetch even though the stream had the numbers all along.
+  const P=GPUC.now_pooled;
+  if(P){
+    P.util=n.util; P.mem_used=n.mem_used; P.mem_total=n.mem_total;
+    P.power=Math.round(n.power||0); P.temp_max=n.temp;
+    if(fanMax!=null){ P.fan_max=fanMax; }
+    P.busy=live.filter(g=>(g.util||0)>0).length;
+  }
+  return true;
+}
+
+// Repaint only what is on screen. A hidden canvas costs the same as a visible
+// one to redraw and shows nobody anything, and showTab() rebuilds on the way in.
+function paintLiveCharts(){
+  try{
+    // Hub-only, and guarded here rather than trusting buildCharts() to do it.
+    // D is always this hub's own series, so driving the System chart from a live
+    // frame while a remote machine is selected animates the hub's CPU/RAM/load
+    // convincingly under the remote's name — a wrong answer that now moves every
+    // two seconds instead of sitting still. mergeGpuTail() scopes itself the same
+    // way. Keeping the check in this function means the branch is correct on its
+    // own, whatever buildCharts() does or doesn't guard.
+    if(TAB==='host'){ if(CURRENT_HOST==='local') buildCharts(); return; }   // overview repaints via renderMissionControl()
+    if(TAB==='gpu' && GPUC && GPUC.has_gpu){
+      if(GPU_VIEW!=='card') renderGpuMetricChart(GPUC);
+      else                  updateGpuCardsLive(GPUC);   // in place: never rebuild the grid under the pointer
+      renderGpuCombined(GPUC);
+      renderGpuKpis(GPUC);
+    }
+  }catch(e){ console.error('live chart repaint failed', e); }
+}
 
 function applyLive(j){
   if(!j || !j.now) return;
@@ -9256,7 +9508,14 @@ function applyLive(j){
   if(!D) return;              // history hasn't landed yet; nothing to merge into
   D.now = j.now;
   if(j.mem_total) D.mem_total = j.mem_total;
+  if(j.fast_interval) D.fast_interval = j.fast_interval;
+  // /api/data doesn't carry the sampler interval but the live frame does, and the
+  // tail needs it to judge how much of the open bucket the server already averaged.
+  if(j.interval) D.interval = j.interval;
+  mergeLiveTail(j.now);
+  mergeGpuTail(j.now);
   renderLive({live:true});
+  paintLiveCharts();
 }
 
 function openLiveStream(){
@@ -9265,12 +9524,24 @@ function openLiveStream(){
   try{ es = new EventSource('/api/stream'); }
   catch(e){ return; }        // no stream: the history timer keeps the page alive
   LIVE_ES = es;
-  es.addEventListener('now',   e => { if(autoOn()){ try{ applyLive(JSON.parse(e.data)); }catch(err){} } });
-  es.addEventListener('fleet', e => { if(autoOn()){ try{ applyFleet(JSON.parse(e.data)); }catch(err){} } });
-  es.onopen  = () => { LIVE_ON = true;  scheduleHistory(); };
+  // Frames are stamped even when a handler throws: arrival is what proves the
+  // stream is alive, and a parse failure shouldn't make the watchdog declare a
+  // healthy connection dead. Handler errors are logged, not swallowed — a silent
+  // catch here is how a broken live path looks exactly like a quiet homelab.
+  es.addEventListener('now',   e => { noteLiveFrame(); if(autoOn()){ try{ applyLive(JSON.parse(e.data)); }catch(err){ console.error('live frame failed', err); } } });
+  es.addEventListener('fleet', e => { noteLiveFrame(); if(autoOn()){ try{ applyFleet(JSON.parse(e.data)); }catch(err){ console.error('fleet frame failed', err); } } });
+  es.onopen  = () => { LIVE_ON = true; LIVE_LAST_FRAME = Date.now(); scheduleHistory(); };
   // EventSource reconnects on its own; until it does, LIVE_ON=false pulls the
   // history timer back to the old 15s cadence so the page keeps updating.
-  es.onerror = () => { LIVE_ON = false; scheduleHistory(); };
+  es.onerror = () => {
+    LIVE_ON = false;
+    // A CLOSED EventSource is terminal — the spec stops reconnecting on a non-200
+    // (the stream cap answers 503), and openLiveStream() guards on LIVE_ES being
+    // set. Without dropping the reference the page could never open a stream
+    // again for the rest of its life. refreshHistory() retries the open.
+    if(es.readyState === 2 && LIVE_ES === es) LIVE_ES = null;
+    scheduleHistory();
+  };
 }
 
 function closeLiveStream(){
@@ -9282,12 +9553,17 @@ function closeLiveStream(){
 // max(INTERVAL, span/MAX_POINTS), so on a 6h range a point cannot change more
 // than once a minute — polling every 15s just re-fetches the same numbers.
 function historyPeriod(){
-  if(!LIVE_ON) return 15000;                       // no stream: unchanged cadence
+  if(!LIVE_ON || liveStale()) return 15000;        // no stream: unchanged cadence
   const bk = (D && D.bucket_sec) ? D.bucket_sec*1000 : 15000;
   return Math.max(15000, Math.min(60000, bk));
 }
 
 function refreshHistory(){
+  // A stream that stopped delivering is not a stream. Demote it before anything
+  // reads LIVE_ON below, so the cadence returns to 15s and the fleet poll — which
+  // is gated on !LIVE_ON — starts running again instead of silently never firing.
+  if(LIVE_ON && liveStale()) LIVE_ON = false;
+  if(!LIVE_ES) openLiveStream();   // self-heal a stream that failed terminally
   loadData(); loadHealth();
   if(!LIVE_ON) loadFleet();   // with a stream open, the fleet arrives on push
   // Re-render host-scoped tabs so cached remote data refreshes too.
@@ -9306,12 +9582,31 @@ function refreshHistory(){
   if(LOCAL_ONLY_TABS.has(TAB) && CURRENT_HOST!=='local') renderLocalOnlyNotice(TAB);
 }
 
-function scheduleHistory(){
+// When the pending history tick is due, so a re-arm can tell "sooner" from
+// "same or later". Every stream connect/disconnect calls scheduleHistory(), and
+// the old version opened with an unconditional clearTimeout: a stream flapping
+// on its 3s retry hint reset the 15s timer forever, so it could never fire and
+// the whole page stopped refreshing while looking perfectly connected.
+let HIST_NEXT_AT = 0;
+
+function scheduleHistory(force){
+  const period = historyPeriod();
+  const want = Date.now() + period;
+  // Keep whatever is already pending unless the new period genuinely fires
+  // sooner. A reconnect must never be able to push the next refresh further out.
+  if(!force && HIST_TIMER && HIST_NEXT_AT && want >= HIST_NEXT_AT - 250) return;
   clearTimeout(HIST_TIMER);
+  HIST_NEXT_AT = want;
   HIST_TIMER = setTimeout(() => {
-    if(autoOn() && !document.hidden) refreshHistory();
-    scheduleHistory();
-  }, historyPeriod());
+    HIST_TIMER = null; HIST_NEXT_AT = 0;
+    // The reschedule lives in `finally`. It used to sit after the call, so one
+    // throw out of a synchronous renderer (renderDiskIo, renderLocalOnlyNotice)
+    // killed the refresh chain for the life of the page — silently, because the
+    // header shows a clock time rather than an age.
+    try{ if(autoOn() && !document.hidden) refreshHistory(); }
+    catch(e){ console.error('refreshHistory failed', e); }
+    finally{ scheduleHistory(); }
+  }, period);
 }
 
 // A tab nobody is looking at should cost nothing. The old poll ran flat out in
@@ -9320,8 +9615,9 @@ function scheduleHistory(){
 document.addEventListener('visibilitychange', () => {
   if(document.hidden){ closeLiveStream(); return; }
   openLiveStream();
-  if(autoOn()){ refreshHistory(); loadFleet(); }
-  scheduleHistory();
+  try{ if(autoOn()){ refreshHistory(); loadFleet(); } }
+  catch(e){ console.error('catch-up refresh failed', e); }
+  finally{ scheduleHistory(true); }   // coming back into view always re-arms
 });
 
 openLiveStream();
