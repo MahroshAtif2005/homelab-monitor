@@ -66,20 +66,119 @@ def _cpu_snapshot():
     return sum(vals), idle
 
 
-def read_cpu():
-    """Sample twice with a short pause, return delta % busy."""
+def _cpu_pct(t1, i1, t2, i2):
+    """Aggregate % busy between two /proc/stat snapshots."""
+    td = t2 - t1
+    idd = i2 - i1
+    if td <= 0:
+        return {}
+    pct = max(0.0, min(100.0, (td - idd) * 100.0 / td))
+    return {"cpu": round(pct, 1), "cores": os.cpu_count() or 1}
+
+
+try:
+    _PAGE_KB = os.sysconf("SC_PAGE_SIZE") // 1024
+except (ValueError, AttributeError, OSError):
+    _PAGE_KB = 4
+
+
+def _proc_sample(with_rss=False):
+    """{pid: (comm, utime+stime, starttime, rss_kb)} for every readable process.
+
+    `starttime` is carried so a pid reused between the two samples is dropped
+    rather than charged the difference between two unrelated processes. RSS is
+    read only on the pass that needs it — skipping /proc/<pid>/statm on the
+    first pass halves the file reads for a sample nobody uses it from.
+    """
+    out = {}
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        try:
+            with open("/proc/" + pid + "/stat") as f:
+                stat = f.read()
+            rp = stat.rfind(")")            # comm can contain spaces and parens
+            comm = stat[stat.find("(") + 1:rp]
+            rest = stat[rp + 2:].split()    # fields from 'state' onward
+            jiff = int(rest[11]) + int(rest[12])    # utime + stime
+            start = rest[19]                        # field 22: start time
+            rss_kb = 0
+            if with_rss:
+                with open("/proc/" + pid + "/statm") as f:
+                    rss_kb = int(f.read().split()[1]) * _PAGE_KB
+        except (OSError, ValueError, IndexError):
+            continue                        # process exited mid-walk; skip it
+        out[pid] = (comm, jiff, start, rss_kb)
+    return out
+
+
+def read_cpu_and_procs(top_n=10):
+    """Aggregate CPU% plus the top processes by CPU and by RAM.
+
+    Both come out of the *same* short dwell the aggregate CPU reading already
+    pays for, so a remote gains a process table without its poll taking any
+    longer than it did before. The maths
+    mirrors app.collect_top_processes() line for line — aggregate by command,
+    CPU as a share of one core — because a number that means "percent of one
+    core" on the hub and something else on a remote is worse than no number.
+
+    The window is short (0.4s), so this resolves busy processes well and idle
+    ones coarsely; that is the right trade for a *top*-N card. RAM is a
+    straight read of the second sample and is exact.
+    """
     try:
         t1, i1 = _cpu_snapshot()
-        time.sleep(0.4)
-        t2, i2 = _cpu_snapshot()
-        td = t2 - t1
-        idd = i2 - i1
-        if td <= 0:
-            return {}
-        pct = max(0.0, min(100.0, (td - idd) * 100.0 / td))
-        return {"cpu": round(pct, 1), "cores": os.cpu_count() or 1}
     except Exception:
         return {}
+    p1 = _proc_sample()
+    time.sleep(0.4)
+    try:
+        t2, i2 = _cpu_snapshot()
+    except Exception:
+        return {}
+    p2 = _proc_sample(with_rss=True)
+    out = _cpu_pct(t1, i1, t2, i2)
+    span = t2 - t1
+    if not p2 or span <= 0:
+        return out
+    ncpu = os.cpu_count() or 1
+    agg = {}
+    for pid, (comm, jiff, start, rss_kb) in p2.items():
+        prev = p1.get(pid)
+        # Only a pid present in BOTH samples, still the same process, has a
+        # meaningful delta. A process that started during the dwell has no
+        # baseline, and charging it its whole lifetime would put a freshly
+        # spawned command at the top of the list.
+        dcpu = max(0, jiff - prev[1]) if (prev and prev[2] == start) else 0
+        a = agg.setdefault(comm, {"mem_kb": 0, "dcpu": 0, "count": 0})
+        a["mem_kb"] += rss_kb
+        a["dcpu"] += dcpu
+        a["count"] += 1
+    rows = []
+    for comm, a in agg.items():
+        rows.append({"name": comm,
+                     "cpu_pct": round(100.0 * a["dcpu"] / span * ncpu, 1),
+                     "mem_mb": int(round(a["mem_kb"] / 1024.0)),
+                     "count": a["count"]})
+    # Tie-break on the other metric. Over a short window most commands accrue
+    # zero jiffies, so sorting on CPU alone leaves a large tie that falls back
+    # to /proc order — lowest pid first, which is kernel threads. An idle box
+    # then reports its top consumers as kthreadd and a column of kworkers. RAM
+    # as the tiebreak sinks them (they hold no RSS) without suppressing them: a
+    # kswapd genuinely burning CPU still sorts on its CPU number.
+    out["processes"] = {
+        "by_cpu": sorted(rows, key=lambda r: (-r["cpu_pct"], -r["mem_mb"]))[:top_n],
+        "by_mem": sorted(rows, key=lambda r: (-r["mem_mb"], -r["cpu_pct"]))[:top_n],
+        "ncpu": ncpu,
+        # Per-process disk I/O needs /proc/<pid>/io, which is root-only on most
+        # distributions. Say so rather than shipping an empty table the UI would
+        # have to guess the meaning of.
+        "io": {"available": False},
+        "window_s": 0.4,
+    }
+    return out
 
 
 # hwmon drivers that expose the actual CPU die/core sensors (Intel/AMD/ARM).
@@ -1642,7 +1741,7 @@ def read_sec():
 # ── CPU package power via RAPL (Intel/AMD powercap) ──────────────────────────
 # app.py keeps cross-call state to derive watts; the probe runs once per poll
 # over SSH and can't, so it reads the cumulative energy counter twice around a
-# short dwell (same trick read_cpu uses) and derives instantaneous watts.
+# short dwell (same trick read_cpu_and_procs uses) and derives instantaneous watts.
 # Package-only, MEASURED — not wall power. Degrades to {} when RAPL is absent.
 RAPL_ROOT = os.environ.get("RAPL_ROOT", "/sys/class/powercap")
 
@@ -1847,7 +1946,7 @@ def main():
     net_block = read_net()          # hoisted: its listen list also drives model discovery
     data = {
         "host": {
-            **read_cpu(),
+            **read_cpu_and_procs(),
             **read_power(),
             **read_meminfo(),
             **read_loadavg(),
@@ -1865,7 +1964,7 @@ def main():
         },
         "model_catalog": read_ai_models((net_block.get("net") or {}).get("listen")),
         "at": int(time.time()),
-        "probe_version": "0.13",
+        "probe_version": "0.14",
     }
     json.dump(data, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")

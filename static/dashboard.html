@@ -4214,19 +4214,25 @@ function renderGpuHealth(d){
   }
 }
 
-// Mini-htop card (issue #32): top processes by CPU% and by RAM, from /api/health
-// (HH.processes), aggregated by command on the hub. Local hub only — /proc is
-// the hub's; remote hosts don't ship process tables yet, so the card hides.
+// Mini-htop card (issue #32): top processes by CPU% and by RAM, aggregated by
+// command. The hub reads its own /proc into HH.processes; a remote ships the
+// same block from probe.py, computed over the dwell its CPU reading already
+// takes. Both sides run the identical maths, so "12%" means percent-of-one-core
+// on every machine in the fleet. A host too old to send the block (or a Windows
+// remote, which has no /proc) simply hides the card.
 function renderTopProcs(){
   const card = document.getElementById('topproc-card');
   const box  = document.getElementById('topproc');
   if(!card || !box) return;
-  const p = HH && HH.processes;
+  const local = CURRENT_HOST === 'local';
+  const hostBlock = local ? null : currentHostBlock();
+  const p = local ? (HH && HH.processes) : (hostBlock && hostBlock.processes);
   const cpu = (p && p.by_cpu) || [], mem = (p && p.by_mem) || [];
-  if(CURRENT_HOST !== 'local' || !p || (!cpu.length && !mem.length)){ card.hidden = true; return; }
+  if(!p || (!cpu.length && !mem.length)){ card.hidden = true; return; }
   card.hidden = false;
   const ncpu = p.ncpu || 1;
-  const ramTotal = (HH.now && HH.now.host && HH.now.host.ram_total) || 0;
+  const ramTotal = (local ? ((HH.now && HH.now.host && HH.now.host.ram_total) || 0)
+                          : (hostBlock.ram_total || 0));
   const tint = v => v>70 ? '#f85149' : v>35 ? '#d29922' : '#3fb950';
   const row = (r, isCpu) => {
     const pct   = isCpu ? Math.min(100, (r.cpu_pct||0)/ncpu)
@@ -4244,7 +4250,14 @@ function renderTopProcs(){
     + '</div>';
   box.innerHTML = col(I18N.t('tp.by_cpu','By CPU'), cpu, true) + col(I18N.t('tp.by_ram','By RAM'), mem, false);
   const cap = document.getElementById('topproc_cap');
-  if(cap) cap.textContent = I18N.tf('tp.cap','Grouped by command across {n} cores · CPU% is per-core · refreshes every 15s',{n:ncpu});
+  // The two sides measure CPU over different windows — the hub across its whole
+  // refresh, a remote across the sub-second dwell its probe takes — and a short
+  // window reads busy processes well and idle ones coarsely. Say which one you
+  // are looking at rather than letting the same-looking number imply otherwise.
+  if(cap) cap.textContent = local
+    ? I18N.tf('tp.cap','Grouped by command across {n} cores · CPU% is per-core · refreshes every 15s',{n:ncpu})
+    : I18N.tf('tp.cap_remote','Grouped by command across {n} cores · CPU% is per-core, sampled over {w}s on each poll · RAM is exact',
+              {n:ncpu, w:(p.window_s||0.4)});
 }
 
 // Power & cost card (issue #25): turns the GPU power history into kWh -> money.
@@ -7963,12 +7976,13 @@ async function renderHostTab(){
     renderHostChart();   // clears any remote's "no history yet" note
     return;
   }
-  // Hub-only cards on this tab, hidden the moment the host changes rather than
-  // on the next /api/data tick — 15 seconds of the hub's process table sitting
-  // under a remote's name is 15 seconds of a wrong answer. Both return
-  // immediately (no fetch) once CURRENT_HOST isn't local.
-  renderTopProcs();
-  renderCost();
+  // Blank the per-host cards for the duration of the fetch. HOST_DATA still
+  // holds the PREVIOUS host until loadHostData() resolves, so rendering them
+  // now would show one machine's processes under another's name — a smaller
+  // version of the bug this tab was fixed for. A card that is briefly absent is
+  // honest; a card that is briefly wrong is not.
+  document.getElementById('topproc-card').hidden = true;
+  renderCost();          // hub-only; returns immediately (no fetch) on a remote
   await loadHostData(CURRENT_HOST);
   const h = (HOST_DATA && HOST_DATA.host) || {};
   const hk = document.getElementById('hostkpis');
@@ -7994,6 +8008,7 @@ async function renderHostTab(){
      <div class="dbar"><div style="width:${dkk.pct}%;background:${sev(dkk.pct)}"></div></div></div>`).join('');
   renderSysInfo();
   renderRamTree();
+  renderTopProcs();      // now that HOST_DATA is this host's
   renderHostChart();
 }
 

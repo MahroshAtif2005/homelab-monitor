@@ -54,7 +54,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.30.1"
+VERSION      = "0.31.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -3268,8 +3268,11 @@ def collect_top_processes(top_n=10):
         proc_io = collect_proc_disk_io(list(cand.values()))
     except Exception:
         proc_io = {"available": False}
-    return {"by_cpu": sorted(rows, key=lambda r: -r["cpu_pct"])[:top_n],
-            "by_mem": sorted(rows, key=lambda r: -r["mem_mb"])[:top_n],
+    # Tie-break on the other metric — see probe.read_cpu_and_procs(), which
+    # sorts identically. Idle commands all sit at 0.0% and would otherwise fall
+    # back to /proc order (lowest pid first, i.e. kernel threads).
+    return {"by_cpu": sorted(rows, key=lambda r: (-r["cpu_pct"], -r["mem_mb"]))[:top_n],
+            "by_mem": sorted(rows, key=lambda r: (-r["mem_mb"], -r["cpu_pct"]))[:top_n],
             "ncpu": ncpu, "io": proc_io}
 
 # ── Experiments: training-run detection + GPU activity sessions ────────────────
