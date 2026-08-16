@@ -3675,7 +3675,7 @@ function gpuStatusPill(card){
 }
 
 // One small-multiple panel per card.
-function gpuMiniCard(card, d, ranges){
+function gpuMiniCardBody(card, d, ranges){
   const now = card.now || {};
   const spans = spansToIdx(card.throttle_spans, d.labels);
   const rows = GPU_SPARK_ROWS.map(m=>{
@@ -3726,14 +3726,52 @@ function gpuMiniCard(card, d, ranges){
     now.temp!=null ? Math.round(now.temp)+'°C' : null,
   ].filter(Boolean).join(' · ');
 
-  return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
-       aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">
-    <div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
+  return `<div class="gpu-mini-h"><b>GPU ${card.idx}</b><span class="nm" title="${esc(card.name)}">${esc(card.name)}</span>${gpuStatusPill(card)}</div>
     <div class="gpu-mini-now">${stats || (card.status==='retired' && card.last_seen
         ? I18N.tf('gpu.last_seen','last reported {t}',{t:relTime(card.last_seen)})
         : I18N.t('gpu.no_live','no live reading'))}</div>
-    ${rows}${attrib}
-  </div>`;
+    ${rows}${attrib}`;
+}
+
+// The wrapper carries the click/keyboard handlers, the focus ring and the status
+// class; the body is everything that changes as the card runs. Keeping them
+// separate is what lets the live path refresh the numbers and sparklines every
+// couple of seconds without rebuilding the element under the pointer.
+function gpuMiniCard(card, d, ranges){
+  return `<div class="gpu-mini st-${card.status}" tabindex="0" role="button" data-idx="${card.idx}"
+       aria-label="${I18N.tf('gpu.card_aria','GPU {n} details',{n:card.idx})}">${gpuMiniCardBody(card, d, ranges)}</div>`;
+}
+
+// Refresh the small multiples in place off a live frame.
+//
+// The old path only ever repainted these on the 60s history fetch, because the
+// full render replaces #pergpu wholesale and re-binds every handler — doing that
+// twice a second would fight the pointer and drop focus mid-keyboard-nav. But
+// per-card temp/watts/util are the fastest-moving numbers on the page, so on the
+// small-multiples view the whole grid sat still while the detail chart behind it
+// (a Chart.js in-place update) tracked live. Same data, two different answers.
+//
+// Writing only each card's body leaves the wrapper — and therefore its handlers,
+// its focus and its tabindex — untouched. Anything structural (a card appearing,
+// retiring, changing status) still goes through the full render.
+function updateGpuCardsLive(d){
+  const box = document.getElementById('pergpu');
+  if(!box || box.hidden || GPU_VIEW !== 'card' || !d || !d.has_gpu) return false;
+  const els = box.querySelectorAll('.gpu-mini');
+  const cards = d.cards || [];
+  if(!els.length || els.length !== cards.length) return false;   // structure changed: let the full render own it
+  const ranges = {};
+  GPU_SPARK_ROWS.forEach(m=>{ ranges[m] = gpuSharedRange(cards, m) || {}; });
+  let painted = 0;
+  els.forEach(el=>{
+    const card = cards.find(c=>String(c.idx) === el.dataset.idx);
+    if(!card) return;
+    const cls = 'gpu-mini st-' + card.status;
+    if(el.className !== cls) el.className = cls;
+    el.innerHTML = gpuMiniCardBody(card, d, ranges);
+    painted++;
+  });
+  return painted > 0;
 }
 
 // Fetch + paint the whole GPU tab for whichever host is selected.
@@ -9324,7 +9362,8 @@ function paintLiveCharts(){
     // own, whatever buildCharts() does or doesn't guard.
     if(TAB==='host'){ if(CURRENT_HOST==='local') buildCharts(); return; }   // overview repaints via renderMissionControl()
     if(TAB==='gpu' && GPUC && GPUC.has_gpu){
-      if(GPU_VIEW!=='card') renderGpuMetricChart(GPUC);   // small multiples stay on the history cadence
+      if(GPU_VIEW!=='card') renderGpuMetricChart(GPUC);
+      else                  updateGpuCardsLive(GPUC);   // in place: never rebuild the grid under the pointer
       renderGpuCombined(GPUC);
       renderGpuKpis(GPUC);
     }

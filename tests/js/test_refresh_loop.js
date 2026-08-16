@@ -461,6 +461,88 @@ suite('tail  sibling series slide with the window on a bucket rollover');
     `first label=${D.labels[0]}`);
 }
 
+// ── GPU small multiples refresh in place ─────────────────────────────────────
+// The per-card grid used to repaint only on the 60s history fetch, because the
+// full render replaces #pergpu wholesale and re-binds every handler. The result
+// was a grid of temp/watt/util cards sitting still while the detail chart behind
+// them tracked live. The live path now writes each card's body and leaves the
+// wrapper — handlers, focus, tabindex — alone.
+suite('gpu   the small-multiples cards refresh in place off a live frame');
+{
+  reset();
+
+  // Minimal DOM: a #pergpu box holding one wrapper per card. Handlers live on
+  // the wrapper, so the test asserts the wrapper objects are never replaced.
+  function mkBox(idxs, opts = {}) {
+    const kids = idxs.map(i => ({
+      dataset: { idx: String(i) }, className: 'gpu-mini st-ok',
+      innerHTML: `ORIGINAL-${i}`, onclick: () => {},
+    }));
+    return {
+      hidden: opts.hidden || false, innerHTML: 'GRID', _kids: kids,
+      querySelectorAll: () => kids,
+    };
+  }
+  function ctxWith(box, opts = {}) {
+    const c = build({ tab: 'gpu' });
+    c.GPU_VIEW = opts.view || 'card';
+    c.GPU_SPARK_ROWS = ['util', 'temp'];
+    c.gpuSharedRange = () => ({ min: 0, max: 100 });
+    c.gpuMiniCardBody = (card) => `BODY-${card.idx}-${card.now.temp}`;
+    c.document.getElementById = (id) => (id === 'pergpu' ? box : null);
+    vm.runInContext(takeFunction('updateGpuCardsLive'), c);
+    return c;
+  }
+
+  const d = (t0, t1) => ({
+    has_gpu: true,
+    cards: [{ idx: 0, status: 'ok', now: { temp: t0 } }, { idx: 1, status: 'ok', now: { temp: t1 } }],
+  });
+
+  const box = mkBox([0, 1]);
+  const c = ctxWith(box);
+  const ok = c.updateGpuCardsLive(d(61, 70));
+  check('the live frame repainted the cards', ok === true);
+  check('card 0 took the new reading', box._kids[0].innerHTML === 'BODY-0-61',
+    `html=${box._kids[0].innerHTML}`);
+  check('card 1 took the new reading', box._kids[1].innerHTML === 'BODY-1-70',
+    `html=${box._kids[1].innerHTML}`);
+  check('the grid itself was NOT rebuilt', box.innerHTML === 'GRID',
+    'replacing #pergpu would drop every click handler and the focus ring');
+  check('the wrapper elements were not replaced',
+    typeof box._kids[0].onclick === 'function', 'the click handler must survive');
+
+  // A second frame keeps moving the numbers.
+  c.updateGpuCardsLive(d(72, 75));
+  check('a later frame moves them again', box._kids[0].innerHTML === 'BODY-0-72',
+    `html=${box._kids[0].innerHTML}`);
+
+  // Structural change: a card appeared. The full render owns that, not this.
+  const c2 = ctxWith(mkBox([0, 1]));
+  check('a changed card count defers to the full render',
+    c2.updateGpuCardsLive({
+      has_gpu: true,
+      cards: [{ idx: 0, status: 'ok', now: { temp: 1 } }, { idx: 1, status: 'ok', now: { temp: 2 } },
+              { idx: 2, status: 'ok', now: { temp: 3 } }],
+    }) === false);
+
+  // A status change still lands, since it rides on the wrapper's class.
+  const box3 = mkBox([0, 1]);
+  const c3 = ctxWith(box3);
+  c3.updateGpuCardsLive({
+    has_gpu: true,
+    cards: [{ idx: 0, status: 'hot', now: { temp: 90 } }, { idx: 1, status: 'ok', now: { temp: 40 } }],
+  });
+  check('a card that turned hot got the new status class',
+    box3._kids[0].className === 'gpu-mini st-hot', `class=${box3._kids[0].className}`);
+
+  // Not on the small-multiples view, or hidden: nothing to do.
+  check('the metric view is left to the chart path',
+    ctxWith(mkBox([0, 1]), { view: 'metric' }).updateGpuCardsLive(d(1, 2)) === false);
+  check('a hidden grid is not painted',
+    ctxWith(mkBox([0, 1], { hidden: true })).updateGpuCardsLive(d(1, 2)) === false);
+}
+
 // ── result ───────────────────────────────────────────────────────────────────
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) { console.error(`${failures} check(s) FAILED`); process.exit(1); }
