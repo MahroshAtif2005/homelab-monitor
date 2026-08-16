@@ -3428,11 +3428,16 @@ function renderData(){
   // /api/cost (a database range query — running it every couple of seconds is
   // exactly the cost this split avoids), and the inventory panels below read the
   // /api/health snapshot and server-side caches that only move every 60–300s.
-  if(CURRENT_HOST === 'local'){
-    renderSysInfo();
-    renderTopProcs();
-    renderCost();
-  }
+  // renderSysInfo() is local-only here because renderHostTab() owns it for a
+  // remote (it has to await that host's probe cache first). renderTopProcs()
+  // and renderCost() are called unconditionally on purpose: both are hub-only
+  // panels that hide *themselves* when the active host isn't local, and
+  // wrapping them in the same condition they test meant the guard could never
+  // run — so switching to a remote left the hub's process table and the hub's
+  // power bill on screen under the remote's name.
+  if(CURRENT_HOST === 'local') renderSysInfo();
+  renderTopProcs();
+  renderCost();
   // Network/Security read the active host block; re-render them on each data
   // refresh (and on first load) when one of them is the visible tab.
   if(TAB==='network')  renderNetwork();
@@ -5321,12 +5326,12 @@ function buildCharts(){
   // /api/gpu/* endpoints. It is deliberately absent here: /api/data is the hub's
   // own series, and charting it under a remote host's name is exactly the
   // cross-host bleed this slice set out to remove.
-  if(TAB==='host'){
+  // D is the hub's own series, so this branch is hub-only. A remote's history
+  // comes from /api/host_history via renderHostChart(); charting D.total under
+  // a remote host's name was the System tab's version of the cross-host bleed.
+  if(TAB==='host' && CURRENT_HOST==='local'){
     const ramPctArr=D.total.ram_used.map((u,i)=>D.total.ram_total[i]?Math.round(u/D.total.ram_total[i]*100):0);
-    mk('host',{type:'line',data:{labels,datasets:[
-      {label:'CPU %',data:D.total.cpu,borderColor:'#3fb950',backgroundColor:'#3fb95033',fill:true,pointRadius:0,tension:.3,yAxisID:'y'},
-      {label:'RAM %',data:ramPctArr,borderColor:'#a371f7',borderWidth:1.5,pointRadius:0,tension:.3,yAxisID:'y'},
-      {label:'Load',data:D.total.load1,borderColor:'#e3b341',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}]},
+    mk('host',{type:'line',data:hostChartDatasets(labels,D.total.cpu,ramPctArr,D.total.load1),
       options:dualOpts(labels,100),plugins:[areaBg]});
   }
 }
@@ -7955,13 +7960,21 @@ async function renderHostTab(){
     // renderData() will populate #hostkpis / #disks for us.
     if(D) renderData();
     renderRamTree();
+    renderHostChart();   // clears any remote's "no history yet" note
     return;
   }
+  // Hub-only cards on this tab, hidden the moment the host changes rather than
+  // on the next /api/data tick — 15 seconds of the hub's process table sitting
+  // under a remote's name is 15 seconds of a wrong answer. Both return
+  // immediately (no fetch) once CURRENT_HOST isn't local.
+  renderTopProcs();
+  renderCost();
   await loadHostData(CURRENT_HOST);
   const h = (HOST_DATA && HOST_DATA.host) || {};
   const hk = document.getElementById('hostkpis');
   const dk = document.getElementById('disks');
   if(!HOST_DATA || !HOST_DATA.online){
+    renderHostChart();   // still draw whatever history the host left behind
     hk.innerHTML = '';
     const err = HOST_DATA && HOST_DATA.error ? esc(HOST_DATA.error) : I18N.t('host.no_data','no data yet');
     dk.innerHTML = I18N.tf('host.probe_wait','<div class="muted" style="padding:12px 2px">⏳ <b>{host}</b> — {err}. Probes run every {i}s; new hosts take one cycle to populate.</div>',{host:esc(CURRENT_HOST),err,i:(FLEET ? (FLEET.interval||10) : 10)});
@@ -7981,11 +7994,72 @@ async function renderHostTab(){
      <div class="dbar"><div style="width:${dkk.pct}%;background:${sev(dkk.pct)}"></div></div></div>`).join('');
   renderSysInfo();
   renderRamTree();
-  // History chart is local-only for now (no history on remote yet).
-  const cb = document.querySelector('section[data-tab="host"] .chartbox');
-  if(cb && !cb.querySelector('.scope-notice')){
-    // Keep the canvas in place but stack a notice above it.
+  renderHostChart();
+}
+
+// ── System-tab history chart, for whichever host is selected ─────────────────
+// The hub draws itself from D.total (already on the page, no extra request);
+// a remote is fetched from /api/host_history, which reads the host_samples rows
+// the poller has been writing since the multi-host slice. Before this the chart
+// was hardwired to D.total, so selecting a remote left the hub's own CPU/RAM/
+// load curve on screen under that remote's name — the same cross-host bleed the
+// GPU tab was rebuilt to remove.
+let HOSTC_HOST=null, HOSTC_RANGE=null, HOSTC_AT=0, HOSTC_INFLIGHT=null;
+function hostChartDatasets(labels, cpu, ramPct, load1){
+  return {labels, datasets:[
+    {label:'CPU %',data:cpu,          borderColor:'#3fb950',backgroundColor:'#3fb95033',fill:true,pointRadius:0,tension:.3,yAxisID:'y'},
+    {label:'RAM %',data:ramPct,       borderColor:'#a371f7',borderWidth:1.5,pointRadius:0,tension:.3,yAxisID:'y'},
+    {label:'Load', data:load1,        borderColor:'#e3b341',borderWidth:1,pointRadius:0,tension:.3,yAxisID:'y1'}]};
+}
+function hostHistNote(box, text){
+  // The "no history yet" line lives next to the canvas, not inside it — a chart
+  // of nothing is indistinguishable from a chart of zeroes.
+  if(!box) return;
+  let note = box.parentElement.querySelector('.host-hist-note');
+  if(!text){ if(note) note.remove(); return; }
+  if(!note){
+    note = document.createElement('p');
+    note.className = 'cap host-hist-note';
+    box.parentElement.insertBefore(note, box);
   }
+  note.textContent = text;
+}
+async function renderHostChart(force){
+  const cv2 = document.getElementById('host');
+  if(!cv2 || TAB!=='host') return;
+  if(CURRENT_HOST === 'local'){                            // D.total path
+    hostHistNote(cv2.closest('.chartbox'), null);
+    HOSTC_HOST = null;                                     // force a refetch on the way back
+    buildCharts();
+    return;
+  }
+  // Throttle: applyFleet() re-renders this tab on every fleet push, and the
+  // series only moves at the poll interval anyway.
+  const host = CURRENT_HOST, range = R;
+  const stale = force || host!==HOSTC_HOST || range!==HOSTC_RANGE || Date.now()-HOSTC_AT > 10000;
+  if(!stale || HOSTC_INFLIGHT) return;
+  HOSTC_INFLIGHT = (async () => {
+    let j;
+    try{ j = await (await fetch('/api/host_history?host='+encodeURIComponent(host)+'&range='+encodeURIComponent(range))).json(); }
+    catch(e){ return; }
+    if(host!==CURRENT_HOST || range!==R) return;   // user moved on; don't paint
+    HOSTC_HOST=host; HOSTC_RANGE=range; HOSTC_AT=Date.now();
+    const labels=j.labels||[];
+    const box = cv2.closest('.chartbox');
+    if(!labels.length){
+      if(charts['host']){ charts['host'].destroy(); delete charts['host']; }
+      hostHistNote(box, I18N.tf('host.hist_wait','No history for {host} yet — it starts building from its first successful poll.',{host:host}));
+      return;
+    }
+    hostHistNote(box, null);
+    const ramPct=(j.ram_used||[]).map((u,i)=>{
+      const t=(j.ram_total||[])[i];
+      return (u==null||!t) ? null : Math.round(u*100/t);
+    });
+    mk('host',{type:'line',data:hostChartDatasets(fmtLabels(labels), j.cpu||[], ramPct, j.load1||[]),
+      options:dualOpts(labels,100),plugins:[areaBg]});
+  })();
+  try{ await HOSTC_INFLIGHT; } finally { HOSTC_INFLIGHT = null; }
 }
 
 // ── System / Network / Security per-host detail ───────────────────────────────
@@ -8703,7 +8777,10 @@ document.querySelectorAll('.rb').forEach(b=>b.onclick=()=>{R=b.dataset.r;localSt
   document.querySelectorAll('.rb').forEach(x=>x.classList.toggle('on',x.dataset.r===R));loadData();
   if(TAB==='experiments') renderExperiments(true);
   if(TAB==='costs') renderCosts(true);
-  if(TAB==='gpu') renderGpuTab(true);});
+  if(TAB==='gpu') renderGpuTab(true);
+  // A remote's System-tab chart has its own feed, so loadData() above doesn't
+  // re-range it — refetch here or the buttons look dead on every host but the hub.
+  if(TAB==='host' && CURRENT_HOST!=='local') renderHostChart(true);});
 // GPU cockpit view toggle. "What is card 1 doing" (small multiples) and "which
 // card is the problem" (one metric, every card) are different lookups, and the
 // choice sticks so a user who prefers one doesn't re-pick it on every visit.
