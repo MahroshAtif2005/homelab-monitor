@@ -441,8 +441,11 @@ class TestSnapshots(unittest.TestCase):
         self.assertEqual(api_heading.group(1), changelog_heading.group(1))
 
         # Sentinel out the version literal (appears in both the heading and its
-        # release-tag URL) so the snapshot no longer breaks on a version bump.
-        data["markdown_prefix"] = re.sub(r"\d+\.\d+\.\d+", VERSION_SENTINEL, data["markdown_prefix"])
+        # release-tag URL) and the release date, so the snapshot no longer
+        # breaks on a version bump or a same-day-next-year re-release.
+        prefix = re.sub(r"\d+\.\d+\.\d+", VERSION_SENTINEL, data["markdown_prefix"])
+        prefix = re.sub(r"\d{4}-\d{2}-\d{2}", "<DATE>", prefix)
+        data["markdown_prefix"] = prefix
         assert_snapshot(self, "api_changelog", data)
 
     # ─── GET /favicon.ico ────────────────────────────────────────────────────
