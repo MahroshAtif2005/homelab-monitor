@@ -7390,7 +7390,8 @@ def _public_monitors(now):
 def _public_monitors_summary(monitors):
     return {"total": len(monitors),
             "up": sum(1 for m in monitors if m["state"] == "up"),
-            "down": sum(1 for m in monitors if m["state"] == "down")}
+            "down": sum(1 for m in monitors if m["state"] == "down"),
+            "maintenance": sum(1 for m in monitors if m.get("in_maintenance"))}
 
 def _public_incident_feed(monitors, now, days=14, cap=25):
     """Recent incidents across all public components, tagged with the service
