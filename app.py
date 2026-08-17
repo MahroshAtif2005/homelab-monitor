@@ -7476,9 +7476,11 @@ def _public_status_detail(cid, now):
     with LOCK:
         rows90 = _uptime_repo.results_since_full(check["id"], now - 7776000, conn=DB)  # 90 days
     rows24 = [r for r in rows90 if r[0] >= now - 86400]
+    in_maint = _in_maintenance("uptime", check["id"]) or _in_maintenance("uptime", check.get("label", ""))
     return {
         "id": check["id"], "label": check["label"], "type": check["type"],
         "host": _public_monitor_host(check),
+        "in_maintenance": in_maint,
         "state": s["state"], "last_latency_ms": s["last_latency_ms"],
         "last_checked": s["last_checked"], "interval_sec": check["interval_sec"],
         "up_since": _uptime_up_since(rows90),
@@ -7497,13 +7499,14 @@ def _public_status_detail(cid, now):
 
 def _public_overall_status(cards, monitors):
     """ok only when every overview card is ok and no public monitor is down;
-    crit if a monitor is down; maintenance if nothing is down but something
-    is covered by an active maintenance window; warn otherwise."""
-    if any(m["state"] == "down" for m in monitors):
+    crit if a monitor is down and not covered by maintenance; maintenance if
+    nothing is down-and-uncovered but something is in an active maintenance
+    window; warn otherwise."""
+    if any(m["state"] == "down" and not m.get("in_maintenance") for m in monitors):
         return "crit"
+    if any(m.get("in_maintenance") for m in monitors):
+        return "maintenance"
     if all(c.get("status") == "ok" for c in cards):
-        if any(m.get("in_maintenance") for m in monitors):
-            return "maintenance"
         return "ok"
     return "warn"
 
