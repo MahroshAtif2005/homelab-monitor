@@ -7498,17 +7498,19 @@ def _public_status_detail(cid, now):
     }
 
 def _public_overall_status(cards, monitors):
-    """ok only when every overview card is ok and no public monitor is down;
-    crit if a monitor is down and not covered by maintenance; maintenance if
-    nothing is down-and-uncovered but something is in an active maintenance
-    window; warn otherwise."""
+    """ok when no public monitor is down and no overview card reports a real
+    problem; crit if a monitor is down and not covered by maintenance; warn if
+    a card reports warn/crit — "info" (subsystem unavailable) doesn't count as
+    a problem, and a real card-level problem is never masked by an unrelated
+    maintenance window; maintenance if nothing above applies but something is
+    in an active maintenance window."""
     if any(m["state"] == "down" and not m.get("in_maintenance") for m in monitors):
         return "crit"
+    if any(c.get("status") in ("warn", "crit") for c in cards):
+        return "warn"
     if any(m.get("in_maintenance") for m in monitors):
         return "maintenance"
-    if all(c.get("status") == "ok" for c in cards):
-        return "ok"
-    return "warn"
+    return "ok"
 
 def _public_status_enabled():
     """On if either the PUBLIC_STATUS env var or the Settings toggle is set --

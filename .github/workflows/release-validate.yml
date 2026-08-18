@@ -22,11 +22,18 @@ permissions:
 
 jobs:
   validate-and-tag:
+    # workflow_dispatch has no branch protection of its own — without this
+    # guard, dispatching against any branch that happens to have VERSION and
+    # CHANGELOG.md in sync (e.g. right after scripts/release.py runs on next,
+    # pre-PR) would pass validation and push a real tag, publishing a Docker
+    # image without ever going through the main-merge PR gate.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Python
         uses: actions/setup-python@v5

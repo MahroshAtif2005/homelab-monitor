@@ -36,7 +36,9 @@ def run(*cmd):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
-def bump_version(new_version):
+def bump_version_text(new_version):
+    """Compute app.py's new text without writing it, so a later failure (e.g.
+    in promote_changelog_text) never leaves a half-bumped tree."""
     text = APP_PY.read_text()
     m = re.search(r'^VERSION\s*=\s*"([\d.]+)"', text, re.MULTILINE)
     if not m:
@@ -45,11 +47,11 @@ def bump_version(new_version):
     if old_version == new_version:
         fail(f"app.py is already at version {new_version}")
     text = VERSION_RE.sub(lambda mm: f'{mm.group(1)}"{new_version}"', text, count=1)
-    APP_PY.write_text(text)
-    return old_version
+    return old_version, text
 
 
-def promote_changelog(new_version, title):
+def promote_changelog_text(new_version, title):
+    """Compute CHANGELOG.md's new text without writing it (see bump_version_text)."""
     text = CHANGELOG.read_text()
     um = UNRELEASED_RE.search(text)
     if not um:
@@ -59,12 +61,17 @@ def promote_changelog(new_version, title):
     next_heading = HEADING_RE.search(rest)
     body_end = body_start + (next_heading.start() if next_heading else len(rest))
     carried_body = text[body_start:body_end]
+    if not carried_body.strip():
+        fail(
+            "the '## [Unreleased] — `next`' section is already empty — nothing "
+            "to promote. Add release notes there first, or if this release "
+            "genuinely has none, edit CHANGELOG.md by hand."
+        )
 
     date = datetime.date.today().isoformat()
     new_heading = f"## [{new_version}]({REPO_URL}/releases/tag/v{new_version}) — {date} · **{title}**\n"
     replacement = f"## [Unreleased] — `next`\n\n{new_heading}{carried_body}"
-    text = text[: um.start()] + replacement + text[body_end:]
-    CHANGELOG.write_text(text)
+    return text[: um.start()] + replacement + text[body_end:]
 
 
 def main():
@@ -79,6 +86,8 @@ def main():
         fail(f"version must be X.Y.Z, got {args.version!r}")
 
     status = run("git", "status", "--porcelain")
+    if status.returncode != 0:
+        fail("`git status` failed — not a git repo? " + status.stderr)
     if status.stdout.strip():
         fail("working tree isn't clean — commit or stash first:\n" + status.stdout)
 
@@ -86,8 +95,13 @@ def main():
     if branch != "next":
         print(f"release.py: warning — running on branch {branch!r}, not next", file=sys.stderr)
 
-    old_version = bump_version(args.version)
-    promote_changelog(args.version, args.title)
+    # Compute both files' new content before writing either — a failure in
+    # promote_changelog_text must never leave app.py bumped with a stale
+    # CHANGELOG (or vice versa).
+    old_version, app_text = bump_version_text(args.version)
+    changelog_text = promote_changelog_text(args.version, args.title)
+    APP_PY.write_text(app_text)
+    CHANGELOG.write_text(changelog_text)
     print(f"Bumped VERSION {old_version} -> {args.version}, promoted CHANGELOG heading.")
 
     print("Running the full test suite ...")

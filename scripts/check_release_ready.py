@@ -20,7 +20,7 @@ CHANGELOG = ROOT / "CHANGELOG.md"
 
 HEADING_RE = re.compile(r"^##\s*\[([\d.]+)\]", re.MULTILINE)
 UNRELEASED_RE = re.compile(r"^## \[Unreleased\] — `next`\s*\n", re.MULTILINE)
-NEXT_HEADING_RE = re.compile(r"^## \[")
+NEXT_HEADING_RE = re.compile(r"^## \[", re.MULTILINE)
 
 
 def fail(msg):
