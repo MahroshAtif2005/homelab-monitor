@@ -20,6 +20,7 @@ Honesty rules applied throughout:
   than letting a chart imply a measurement.
 """
 from flask import Blueprint, request, jsonify
+import logging
 import time
 
 from backend import gpuspec
@@ -44,6 +45,7 @@ def _hot_c(host):
         from backend.notify import _gpu_temp_threshold
         return _gpu_temp_threshold(_app.get_settings(), host)
     except Exception:
+        logging.debug("gpu temp threshold lookup failed for host=%s", host, exc_info=True)
         return HOT_C
 
 

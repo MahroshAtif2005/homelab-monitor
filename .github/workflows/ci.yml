@@ -7,7 +7,8 @@ name: CI
 # Triggers:
 #   • Pull requests targeting `next` (the integration branch) or `main`.
 #   • Pushes to `next` — a belt-and-braces check after merges land.
-# Intentionally NOT on every main push (tags/main already gate releases).
+# Intentionally NOT on every main push — release-validate.yml owns that
+# trigger (it re-runs the full suite, not just this subset, before tagging).
 #
 # On a push to `next`, once `smoke` is green, `publish-next` ships a moving
 # `:next` Docker image (the preview channel) so a Watchtower-followed staging

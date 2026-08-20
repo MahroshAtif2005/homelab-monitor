@@ -1,3 +1,4 @@
+import logging
 import socket
 """
 backend/collectors — background worker functions extracted from app.py (Phase 3.2).
@@ -227,6 +228,7 @@ def sample_once():
                     except ValueError:
                         pass
             except Exception:
+                logging.debug("per-PID GPU memory aggregation failed", exc_info=True)
                 pass
         # Aggregate the 'GPU right now' chips from EVERY card, whatever the vendor:
         # NVIDIA cards were enriched just above, AMD ones arrive already enriched
