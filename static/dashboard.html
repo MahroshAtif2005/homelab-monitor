@@ -6239,7 +6239,9 @@ function renderAiServers(){
         <button type="button" class="btn-mini" data-ai-del="${i}" title="${I18N.t('btn.remove','Remove')}">${I18N.t('btn.remove','Remove')}</button>
       </span>
     </li>`).join('');
-  ul.querySelectorAll('[data-ai-del]').forEach(b=> b.onclick=()=>{ AI_SERVERS_DRAFT.splice(+b.dataset.aiDel,1); renderAiServers(); });
+  ul.querySelectorAll('[data-ai-del]').forEach(b=> b.onclick=()=>{
+    AI_SERVERS_DRAFT.splice(+b.dataset.aiDel,1); renderAiServers(); persistAiServers();
+  });
   ul.querySelectorAll('[data-ai-test]').forEach(b=> b.onclick=()=> testAiServer(+b.dataset.aiTest, b));
 }
 function showAiStatus(level, text){
@@ -6251,6 +6253,22 @@ function showAiStatus(level, text){
 }
 function collectAiServers(){
   return JSON.stringify(aiServersFromDraft());
+}
+// Persist ONLY custom_ai_servers — Add/Remove act immediately, so an entry can't
+// sit un-saved (a page refresh would drop it) and "Test" can't be mistaken for
+// "registered". A dedicated one-field POST rather than the whole form keeps the
+// blast radius to this setting.
+let _aiPersistBusy = false;
+async function persistAiServers(){
+  if(_aiPersistBusy) return;
+  _aiPersistBusy = true;
+  try{
+    let j; try{ j = await(await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({custom_ai_servers: collectAiServers()})})).json(); }
+    catch(e){ showAiStatus('warning','Not saved: '+e); return; }
+    if(j && j.ok===false){ showAiStatus('warning', j.error||'Not saved — check the values.'); return; }
+    AI_SERVERS_LOADED = true;   // the server now agrees with the draft
+  } finally{ _aiPersistBusy = false; }
 }
 async function testAiServer(i, btn){
   const s=AI_SERVERS_DRAFT[i]; if(!s) return;
@@ -6284,7 +6302,8 @@ function addAiServer(){
   AI_SERVERS_DRAFT.push({name,host,port,provider});
   renderAiServers();
   g('ai_name').value=''; g('ai_host').value=''; g('ai_port').value='';
-  showAiStatus('info', I18N.t('general.ai_added','Added — press Save to apply.'));
+  showAiStatus('info', I18N.t('general.ai_added','Added — saving…'));
+  persistAiServers().then(()=> showAiStatus('ok', I18N.t('general.ai_saved','Saved — it will appear in the AI Models tab within one sample (~10 s).')));
 }
 
 // ── Routing rules ─────────────────────────────────────────────────────────────

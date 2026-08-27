@@ -623,6 +623,12 @@ def api_settings():
         # Secrets pass through the "_set: false" sentinel from the UI as a way
         # to clear without revealing the current value.
         updates = {k: body[k] for k in body if k in _app.SETTING_DEFAULTS}
+        # custom_ai_servers is stored as a JSON string. The UI sends the string;
+        # a direct API client may POST the list itself — normalize here, or
+        # save_settings would persist str(list) (a Python repr, not JSON) and
+        # the value would be unreadable on every later parse.
+        if "custom_ai_servers" in updates and not isinstance(updates["custom_ai_servers"], str):
+            updates["custom_ai_servers"] = json.dumps(updates["custom_ai_servers"])
         err = (_app._validate_url_settings(updates) or _app._validate_email_settings(updates)
                or _app._validate_brief_settings(updates) or _app._validate_retention_settings(updates)
                or _app._validate_gpu_alert_settings(updates) or _app._validate_custom_ai_servers(updates))

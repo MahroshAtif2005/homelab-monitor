@@ -318,16 +318,32 @@ def parse_custom_servers(raw):
     (entries, error): a non-None error means the value is malformed and must be
     rejected, not silently dropped. Blank input is the empty list, not an error —
     that is how the user clears the setting."""
-    raw = (raw or "").strip()
+    if raw is None:
+        return [], None
+    if not isinstance(raw, str):
+        try:
+            raw = json.dumps(raw)
+        except (TypeError, ValueError):
+            return None, "must be a JSON array"
+    raw = raw.strip()
     if not raw:
         return [], None
     try:
         entries = json.loads(raw)
     except ValueError:
         return None, "not a JSON array"
+    return _clean_custom_server_list(entries)
+
+def _clean_custom_server_list(entries):
+    """The shared validation body: a JSON-decoded value → (clean list, error).
+    A non-list, an oversized list, or a bad entry each produces an error, so a
+    malformed value is rejected rather than silently truncated."""
     if not isinstance(entries, list):
         return None, "must be a JSON array"
+    if len(entries) > 20:
+        return None, "at most 20 entries"
     out = []
+    seen = set()
     for e in entries:
         if not isinstance(e, dict):
             return None, "each entry must be an object"
@@ -340,8 +356,35 @@ def parse_custom_servers(raw):
             return None, f"'{name or '?'}' has a bad port"
         if not name or not host or not (1 <= port <= 65535) or provider not in dict(PROBES):
             return None, f"'{name or '?'}' needs name, host, a port and a known provider"
+        if (name, host, port) in seen:
+            return None, f"'{name}' at {host}:{port} is listed twice"
+        seen.add((name, host, port))
         out.append({"name": name, "host": host, "port": port, "provider": provider})
     return out, None
+
+def validate_custom_servers(raw):
+    """Door validation for the settings POST: returns a user-facing error string
+    if the value is malformed, else None. Pure (no DB / no PROBES mutation) so it
+    is unit-testable. A non-string value (a direct API client posting the list
+    itself) is coerced the same way the route stores it, then validated — never
+    crash on .strip()."""
+    entries_err = None
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        try:
+            raw = json.dumps(raw)
+        except (TypeError, ValueError):
+            return "Custom AI servers must be a JSON array."
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return "Custom AI servers must be a JSON array, e.g. [{\"name\":\"vllm\",\"host\":\"vader\",\"port\":8010,\"provider\":\"vllm\"}]."
+    _clean, err = _clean_custom_server_list(entries)
+    return f"Custom AI servers: {err}." if err else None
 
 # ── Group 2: Host metrics probe ───────────────────────────────────────────────
 

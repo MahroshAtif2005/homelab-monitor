@@ -95,6 +95,67 @@ class TestParseCustomServers(unittest.TestCase):
         self.assertIsNone(err)
         self.assertNotIn("note", out[0])
 
+    def test_duplicate_entry_rejected(self):
+        item = {"name": "x", "host": "h", "port": 80, "provider": "vllm"}
+        out, err = probes.parse_custom_servers(json.dumps([item, dict(item)]))
+        self.assertIsNone(out)
+        self.assertIsNotNone(err)
+        self.assertIn("twice", err)
+        # Same name on a different port is fine.
+        other = dict(item, port=81)
+        out, err = probes.parse_custom_servers(json.dumps([item, other]))
+        self.assertIsNone(err)
+        self.assertEqual(len(out), 2)
+
+    def test_oversized_list_rejected(self):
+        item = {"name": "x", "host": "h", "port": 80, "provider": "vllm"}
+        out, err = probes.parse_custom_servers(json.dumps([dict(item, port=80 + i) for i in range(21)]))
+        self.assertIsNone(out)
+        self.assertIn("20", err)
+
+    def test_non_string_raw_is_coerced(self):
+        # A direct API client may hand over the list itself; it is serialized
+        # exactly the way the settings route stores it, then parsed.
+        item = {"name": "x", "host": "h", "port": 80, "provider": "vllm"}
+        out, err = probes.parse_custom_servers([item])
+        self.assertIsNone(err)
+        self.assertEqual(out, [item])
+
+
+class TestValidateCustomServers(unittest.TestCase):
+    """Door validation for the settings POST: error string or None, never an
+    exception — a bad value must be rejected, not crash the route."""
+    def _one(self, **kw):
+        e = {"name": "x", "host": "h", "port": 80, "provider": "vllm"}
+        e.update(kw)
+        return e
+
+    def test_blank_and_absent_are_fine(self):
+        for raw in (None, "", "   "):
+            self.assertIsNone(probes.validate_custom_servers(raw), f"raw={raw!r}")
+
+    def test_valid_string_and_list(self):
+        self.assertIsNone(probes.validate_custom_servers(json.dumps([self._one()])))
+        self.assertIsNone(probes.validate_custom_servers([self._one()]))  # coerced
+
+    def test_not_json(self):
+        self.assertIn("JSON array", probes.validate_custom_servers("not json"))
+
+    def test_not_a_list(self):
+        self.assertIn("JSON array", probes.validate_custom_servers('{"name": "x"}'))
+
+    def test_bad_entry_reports_the_reason(self):
+        self.assertIn("port", probes.validate_custom_servers(
+            json.dumps([self._one(port=99999)])))
+        self.assertIn("provider", probes.validate_custom_servers(
+            json.dumps([self._one(provider="nope")])))
+
+    def test_duplicate_and_oversized_rejected(self):
+        self.assertIn("twice", probes.validate_custom_servers(
+            json.dumps([self._one(), self._one()])))
+        self.assertIn("20", probes.validate_custom_servers(
+            json.dumps([self._one(port=80 + i) for i in range(21)])))
+
 
 class TestProbeCustomServer(unittest.TestCase):
     OPENAI = {"data": [{"id": "qwen3.8-27b"}, {"id": "glm-air"}]}

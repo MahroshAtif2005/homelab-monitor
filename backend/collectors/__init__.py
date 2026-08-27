@@ -269,8 +269,9 @@ def sample_once():
     # malformed setting degrades to "no custom servers", never to a broken sample.
     custom_raw = _app.get_settings().get("custom_ai_servers") or ""
     custom, _c_err = parse_custom_servers(custom_raw)
-    if _c_err:
-        print(f"custom_ai_servers ignored ({_c_err}): {custom_raw[:120]!r}", flush=True)
+    if _c_err or custom is None:
+        print(f"custom_ai_servers ignored ({_c_err or 'unparseable'}): {str(custom_raw)[:120]!r}", flush=True)
+        custom = []
     for s in custom:
         if any(c["name"] == s["name"] for c in ai):
             continue                                    # container discovery already covers it

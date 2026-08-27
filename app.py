@@ -687,6 +687,7 @@ from backend.probes import (
     probe_ollama, probe_tgi, probe_koboldcpp, probe_invokeai, probe_a1111,
     probe_whisper_asr, probe_triton, probe_wyoming, probe_comfy,
     PROBES, _match_probe, _match_probe_key, CATALOG_MAX, probe_models,
+    validate_custom_servers,
 )
 
 # ── Model intelligence: per-model metadata + live serving telemetry ───────────
@@ -4607,42 +4608,11 @@ def _validate_custom_ai_servers(updates):
     Same door-vs-read discipline as the GPU temperature overrides: a silently
     dropped entry would read as "the server is just down" for the rest of the
     user's life with this dashboard. Empty value is allowed (it clears the
-    list)."""
+    list). The heavy lifting is pure (validate_custom_servers in
+    backend/probes) so it is unit-testable without importing this module."""
     if "custom_ai_servers" not in updates:
         return None
-    raw = (updates["custom_ai_servers"] or "").strip()
-    if not raw:
-        return None
-    try:
-        entries = json.loads(raw)
-    except ValueError:
-        return "Custom AI servers must be a JSON array, e.g. [{\"name\":\"vllm\",\"host\":\"vader\",\"port\":8010,\"provider\":\"vllm\"}]."
-    if not isinstance(entries, list) or len(entries) > 20:
-        return "Custom AI servers must be a JSON array of at most 20 entries."
-    known = {key for key, _fn in PROBES}
-    seen = set()
-    for i, e in enumerate(entries):
-        if not isinstance(e, dict):
-            return f"Custom AI server #{i + 1} must be an object with name/host/port/provider."
-        name = str(e.get("name") or "").strip()
-        host = str(e.get("host") or "").strip()
-        provider = str(e.get("provider") or "").strip()
-        if not name or len(name) > 60:
-            return f"Custom AI server #{i + 1} needs a name (1-60 characters)."
-        if not host:
-            return f"Custom AI server '{name}' needs a host (hostname or IP)."
-        try:
-            port = int(e.get("port"))
-        except (TypeError, ValueError):
-            return f"Custom AI server '{name}' needs a whole-number port."
-        if not (1 <= port <= 65535):
-            return f"Custom AI server '{name}' port must be between 1 and 65535."
-        if provider not in known:
-            return f"Custom AI server '{name}' has an unknown provider '{provider}'."
-        if (name, host, port) in seen:
-            return f"Custom AI server '{name}' at {host}:{port} is listed twice."
-        seen.add((name, host, port))
-    return None
+    return validate_custom_servers(updates["custom_ai_servers"])
 
 # ── Uptime checks: HTTP/TCP endpoint monitors ──────────────────────────────
 # User-defined HTTP/TCP endpoint monitors, probed from inside the container on a
