@@ -180,6 +180,17 @@ class TestProbeCustomServer(unittest.TestCase):
         self.assertEqual(rows[0][0], "qwen3:8b")
         self.assertIsNotNone(rows[0][1])     # ollama reports live VRAM → Loaded
 
+    def test_sampler_descriptor_shape_uses_ip_not_host(self):
+        # The sampler builds {"name","ip","port","provider"} (container-descriptor
+        # shape), not "host". A probe that only read "host" silently returned []
+        # on every sample: Test (which sends "host") passed, the AI tab never
+        # showed the server.
+        with mock.patch.object(probes.http.client, "HTTPConnection",
+                               _fake_http({(8010, "/v1/models"): self.OPENAI})):
+            rows = probes.probe_custom_server({"name": "v", "ip": "10.0.0.5",
+                                               "port": 8010, "provider": "vllm"})
+        self.assertEqual([r[0] for r in rows], ["qwen3.8-27b", "glm-air"])
+
     def test_bad_descriptor_returns_empty(self):
         for desc in ({"name": "x", "host": "", "port": 80, "provider": "vllm"},
                      {"name": "x", "host": "h", "port": 0, "provider": "vllm"},

@@ -297,7 +297,11 @@ def probe_custom_server(desc):
     on another box at a non-standard port needs this to show up. Provider is a
     PROBES key; the port is always the user's explicit one. Normalizes rows the
     same way probe_models does, so the sampler's catalog merge is shape-agnostic."""
-    ip = (desc.get("host") or "").strip()
+    # Two descriptor shapes reach here: the settings door / Test endpoint send
+    # "host", the sampler reuses the container-descriptor shape and sends "ip".
+    # Accept both, or the sampler silently probes an empty host and the user's
+    # registered server never shows up while its Test button still passes.
+    ip = (desc.get("host") or desc.get("ip") or "").strip()
     provider = (desc.get("provider") or "").strip()
     try:
         port = int(desc.get("port"))
