@@ -101,6 +101,17 @@ def uptime_worker():
 # next failure re-fires exactly once.
 
 
+def _resolve_fleet_host(stored, known_hosts):
+    """A custom server's fleet_host setting → the fleet name its models are
+    stamped with. ""/None/"local" → "local" (the hub). A name that is currently
+    a registered fleet host → itself (so the per-host AI Models tab picks it up).
+    Anything else — a host that was removed after the server was registered —
+    degrades to the hub, where it was always visible, rather than vanishing into
+    a name no tab has. Pure → unit-testable."""
+    if not stored or stored == "local":
+        return "local"
+    return stored if stored in known_hosts else "local"
+
 def sample_once():
     import app as _app
     conts = _app.containers()
@@ -272,12 +283,22 @@ def sample_once():
     if _c_err or custom is None:
         print(f"custom_ai_servers ignored ({_c_err or 'unparseable'}): {str(custom_raw)[:120]!r}", flush=True)
         custom = []
+    # Fleet names the per-host AI Models tab filters on: "local" (the hub) plus
+    # the registered hosts. Read once per sample, not per row.
+    try:
+        _known_hosts = {"local"} | {h["name"] for h in _app.list_hosts()}
+    except Exception:
+        _known_hosts = {"local"}
     for s in custom:
         if any(c["name"] == s["name"] for c in ai):
             continue                                    # container discovery already covers it
+        fleet = _resolve_fleet_host(s.get("fleet_host"), _known_hosts)
+        if fleet != (s.get("fleet_host") or "local"):
+            print(f"custom_ai_servers '{s['name']}': host '{s.get('fleet_host')}' "
+                  f"not registered — shown under the hub instead", flush=True)
         ai.append({"name": s["name"], "ip": s["host"], "port": s["port"],
                    "provider": s["provider"], "image": s["provider"],
-                   "ports": [s["port"]]})
+                   "ports": [s["port"]], "fleet_host": fleet})
     models = []
     model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
     ai_servers = []      # {name, ip, port, provider} — for the /api/ai/now throttled live re-probe
@@ -294,6 +315,10 @@ def sample_once():
         for ct, found in zip(ai, found_lists):
             svc = ct["name"]
             provider = provider_of.get(svc)
+            # The per-host AI Models tab groups /api/models by fleet name; the
+            # hub's rows must say "local" (its raw hostname matches no pill), and
+            # a custom server rides the fleet name it was registered for.
+            host_label = ct.get("fleet_host") if "fleet_host" in ct else "local"
             smem = procs.get(svc)                         # MB this server holds on the GPU now
             api_vram = any(v is not None for _, v, _, _ in found)
             for mdl, vram, ram, ctx in found:
@@ -309,7 +334,7 @@ def sample_once():
                 models.append((svc, mdl, vram_val, ram_val,
                                ctx if vram_val is not None else None))
                 model_catalog.append({
-                    "host": socket.gethostname(),
+                    "host": host_label,
                     "service": svc,
                     "provider": provider,
                     "model": mdl,

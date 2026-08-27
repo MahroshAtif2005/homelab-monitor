@@ -318,10 +318,11 @@ def probe_custom_server(desc):
 
 def parse_custom_servers(raw):
     """Parse + clean the custom_ai_servers setting value (a JSON array string) into
-    [{"name","host","port","provider"}]. Pure — unit-testable. Returns
-    (entries, error): a non-None error means the value is malformed and must be
-    rejected, not silently dropped. Blank input is the empty list, not an error —
-    that is how the user clears the setting."""
+    [{"name","host","port","provider","fleet_host"}]. Pure — unit-testable.
+    Returns (entries, error): a non-None error means the value is malformed and
+    must be rejected, not silently dropped. Blank input is the empty list, not an
+    error — that is how the user clears the setting. Pre-fleet_host stored values
+    parse fine: a missing key becomes "" (= the hub)."""
     if raw is None:
         return [], None
     if not isinstance(raw, str):
@@ -341,7 +342,10 @@ def parse_custom_servers(raw):
 def _clean_custom_server_list(entries):
     """The shared validation body: a JSON-decoded value → (clean list, error).
     A non-list, an oversized list, or a bad entry each produces an error, so a
-    malformed value is rejected rather than silently truncated."""
+    malformed value is rejected rather than silently truncated. Entries are
+    {name, host, port, provider, fleet_host}: fleet_host is the fleet name the
+    server runs on ("" or "local" = the hub) — where its models show up on the
+    AI Models tab. The hub still probes it; only the stamping follows the name."""
     if not isinstance(entries, list):
         return None, "must be a JSON array"
     if len(entries) > 20:
@@ -360,10 +364,19 @@ def _clean_custom_server_list(entries):
             return None, f"'{name or '?'}' has a bad port"
         if not name or not host or not (1 <= port <= 65535) or provider not in dict(PROBES):
             return None, f"'{name or '?'}' needs name, host, a port and a known provider"
+        fleet_host = e.get("fleet_host")
+        if fleet_host is None:
+            fleet_host = ""
+        elif not isinstance(fleet_host, str):
+            return None, f"'{name or '?'}' fleet_host must be a host name"
+        fleet_host = fleet_host.strip()
+        if len(fleet_host) > 40:
+            return None, f"'{name or '?'}' fleet_host is longer than 40 characters"
         if (name, host, port) in seen:
             return None, f"'{name}' at {host}:{port} is listed twice"
         seen.add((name, host, port))
-        out.append({"name": name, "host": host, "port": port, "provider": provider})
+        out.append({"name": name, "host": host, "port": port, "provider": provider,
+                    "fleet_host": fleet_host})
     return out, None
 
 def validate_custom_servers(raw):

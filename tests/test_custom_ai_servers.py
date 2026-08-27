@@ -49,9 +49,43 @@ class TestParseCustomServers(unittest.TestCase):
         out, err = probes.parse_custom_servers(raw)
         self.assertIsNone(err)
         self.assertEqual(len(out), 2)
+        # Pre-fleet_host entries parse with fleet_host="" (= the hub).
         self.assertEqual(out[0], {"name": "vllm", "host": "vader", "port": 8010,
-                                  "provider": "vllm"})
+                                  "provider": "vllm", "fleet_host": ""})
         self.assertIsInstance(out[0]["port"], int)
+
+    def test_fleet_host_is_kept(self):
+        raw = json.dumps([{"name": "v", "host": "100.76.27.18", "port": 8010,
+                           "provider": "vllm", "fleet_host": "vader"}])
+        out, err = probes.parse_custom_servers(raw)
+        self.assertIsNone(err)
+        self.assertEqual(out[0]["fleet_host"], "vader")
+
+    def test_fleet_host_missing_is_hub(self):
+        out, err = probes.parse_custom_servers(json.dumps(
+            [{"name": "v", "host": "h", "port": 80, "provider": "vllm"}]))
+        self.assertIsNone(err)
+        self.assertEqual(out[0]["fleet_host"], "")
+
+    def test_fleet_host_stripped_and_capped(self):
+        out, err = probes.parse_custom_servers(json.dumps(
+            [{"name": "v", "host": "h", "port": 80, "provider": "vllm",
+              "fleet_host": "  vader  "}]))
+        self.assertIsNone(err)
+        self.assertEqual(out[0]["fleet_host"], "vader")
+        out, err = probes.parse_custom_servers(json.dumps(
+            [{"name": "v", "host": "h", "port": 80, "provider": "vllm",
+              "fleet_host": "x" * 41}]))
+        self.assertIsNone(out)
+        self.assertIn("40", err)
+
+    def test_fleet_host_non_string_rejected(self):
+        out, err = probes.parse_custom_servers(json.dumps(
+            [{"name": "v", "host": "h", "port": 80, "provider": "vllm",
+              "fleet_host": 42}]))
+        # A number is not a fleet name — reject rather than silently coerce.
+        self.assertIsNone(out)
+        self.assertIsNotNone(err)
 
     def test_not_json(self):
         out, err = probes.parse_custom_servers("not json")
@@ -119,7 +153,8 @@ class TestParseCustomServers(unittest.TestCase):
         item = {"name": "x", "host": "h", "port": 80, "provider": "vllm"}
         out, err = probes.parse_custom_servers([item])
         self.assertIsNone(err)
-        self.assertEqual(out, [item])
+        self.assertEqual(out, [{"name": "x", "host": "h", "port": 80,
+                                "provider": "vllm", "fleet_host": ""}])
 
 
 class TestValidateCustomServers(unittest.TestCase):

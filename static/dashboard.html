@@ -2447,15 +2447,18 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
         </div>
         <div>
           <div class="card-sub" style="font-weight:600;margin-bottom:2px" data-i18n="general.ai_servers_title" data-i18n-def="🧠 Custom AI servers">🧠 Custom AI servers</div>
-          <p class="cap" style="margin:0 0 8px" data-i18n-html="general.ai_servers_cap" data-i18n-def="Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab and the installed-models registry. Read-only: the monitor never pulls, loads or removes models.">Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab and the installed-models registry. Read-only: the monitor never pulls, loads or removes models.</p>
+          <p class="cap" style="margin:0 0 8px" data-i18n-html="general.ai_servers_cap" data-i18n-def="Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab under the host it runs on and in the installed-models registry. The hub probes it — <b>Runs on</b> only picks where its models show. Read-only: the monitor never pulls, loads or removes models.">Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab under the host it runs on and in the installed-models registry. The hub probes it — <b>Runs on</b> only picks where its models show. Read-only: the monitor never pulls, loads or removes models.</p>
           <div id="ai_servers_status" class="ins info" style="display:none;margin:6px 0"></div>
           <ul id="ai_servers_list" style="list-style:none;margin:0 0 8px;padding:0;display:grid;gap:6px"></ul>
-          <div style="display:grid;grid-template-columns:1.3fr 1.3fr .7fr 1fr auto;gap:8px;align-items:end">
+          <div style="display:grid;grid-template-columns:1.2fr 1.2fr .6fr .9fr .9fr auto;gap:8px;align-items:end">
             <div><div class="flabel" data-i18n="general.ai_name" data-i18n-def="Label">Label</div><input type="text" id="ai_name" class="field" style="width:100%" maxlength="60" placeholder="vllm-vader" data-i18n-attr="placeholder:general.ai_name_ph"></div>
             <div><div class="flabel" data-i18n="general.ai_host" data-i18n-def="Host">Host</div><input type="text" id="ai_host" class="field" style="width:100%" placeholder="vader or 192.168.1.102" data-i18n-attr="placeholder:general.ai_host_ph"></div>
             <div><div class="flabel" data-i18n="general.ai_port" data-i18n-def="Port">Port</div><input type="number" id="ai_port" class="field" style="width:100%" min="1" max="65535" step="1" placeholder="8010" data-i18n-attr="placeholder:general.ai_port_ph"></div>
             <div><div class="flabel" data-i18n="general.ai_provider" data-i18n-def="Type">Type</div>
               <select id="ai_provider" class="field" style="width:100%"></select>
+            </div>
+            <div><div class="flabel" data-i18n="general.ai_fleet_host" data-i18n-def="Runs on">Runs on</div>
+              <select id="ai_fleet_host" class="field" style="width:100%"></select>
             </div>
             <button class="rb" id="ai_add" type="button" data-i18n="general.ai_add" data-i18n-def="Add">Add</button>
           </div>
@@ -6216,10 +6219,32 @@ async function loadAiProviders(){
   // probe to dispatch to.
   sel.innerHTML=[...pref,...rest].map(k=>`<option value="${esc(k)}">${esc(k)}</option>`).join('');
   AI_PROVIDERS_LOADED = true;
+  loadAiFleetHosts();   // the Runs-on picker fills from the fleet list
+}
+// "Runs on" options: the hub ("local") first, then the registered hosts — the
+// same rows the host pill bar renders, so the picker can never offer a host the
+// AI Models tab doesn't have a pill for. A saved server pointing at a host that
+// was removed later keeps its value but is flagged, like the brief channel.
+// Rebuilt on every fleet update (it reads FLEET, fetches nothing), preserving
+// the current selection.
+function loadAiFleetHosts(){
+  const sel=document.getElementById('ai_fleet_host'); if(!sel) return;
+  const cur=sel.value;
+  const rows=(FLEET && Array.isArray(FLEET.hosts)) ? FLEET.hosts : [{name:'local'}];
+  const saved=new Set(AI_SERVERS_DRAFT.map(s=>(s.fleet_host||'')).filter(h=>h&&h!=='local'));
+  const opts=[['local', I18N.t('general.ai_fleet_host_local','This hub')]];
+  rows.forEach(h=>{ if(h.name!=='local') opts.push([h.name, h.name]); });
+  saved.forEach(h=>{ if(!opts.some(o=>o[0]===h)) opts.push([h, h+' ('+I18N.t('general.ai_fleet_host_removed','removed')+')']); });
+  sel.innerHTML=opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('');
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
 }
 function aiServerProviderVal(){
   const sel=document.getElementById('ai_provider'); if(!sel) return '';
   return sel.value;
+}
+function aiServerFleetHostVal(){
+  const sel=document.getElementById('ai_fleet_host'); if(!sel) return 'local';
+  return sel.value||'local';
 }
 function aiServersFromDraft(){
   return AI_SERVERS_DRAFT.map(s=>({...s}));
@@ -6230,15 +6255,22 @@ function renderAiServers(){
     ul.innerHTML=`<li class="muted" style="padding:4px 2px">${I18N.t('general.ai_servers_empty','No custom servers yet — add one below (e.g. a vLLM on another box at a non-standard port).')}</li>`;
     return;
   }
-  ul.innerHTML = AI_SERVERS_DRAFT.map((s,i)=>`
+  ul.innerHTML = AI_SERVERS_DRAFT.map((s,i)=>{
+    // Where its models show: a chip only when it's not the hub (the default).
+    const fh=s.fleet_host||'';
+    const onHost=fh&&fh!=='local'
+      ? `<span class="muted" style="font-size:11px;padding:1px 6px;border:1px solid var(--bd);border-radius:10px">${I18N.t('general.ai_on_host','on')} ${esc(fh)}</span>`
+      : '';
+    return `
     <li style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 9px;border:1px solid var(--bd);border-radius:8px">
       <b style="font-size:12px">${esc(s.name)}</b>
+      ${onHost}
       <span class="muted" style="font-size:12px;font-family:var(--mono)">${esc(s.host)}:${esc(s.port)} · ${esc(s.provider)}</span>
       <span style="margin-left:auto;display:flex;gap:6px">
         <button type="button" class="btn-mini" data-ai-test="${i}">${I18N.t('general.ai_test','Test')}</button>
         <button type="button" class="btn-mini" data-ai-del="${i}" title="${I18N.t('btn.remove','Remove')}">${I18N.t('btn.remove','Remove')}</button>
       </span>
-    </li>`).join('');
+    </li>`;}).join('');
   ul.querySelectorAll('[data-ai-del]').forEach(b=> b.onclick=()=>{
     AI_SERVERS_DRAFT.splice(+b.dataset.aiDel,1); renderAiServers(); persistAiServers();
   });
@@ -6293,17 +6325,33 @@ function addAiServer(){
   const host=(g('ai_host')?.value||'').trim();
   const port=parseInt(g('ai_port')?.value,10);
   const provider=aiServerProviderVal();
+  const fleet_host=aiServerFleetHostVal();
   if(!name || !host || isNaN(port) || !provider){
     showAiStatus('warn', I18N.t('general.ai_add_needs','Add needs a label, host, port and type.')); return;
   }
   if(AI_SERVERS_DRAFT.some(s=>s.name===name && s.host===host && s.port===port)){
     showAiStatus('warn', I18N.t('general.ai_dup','That server is already in the list.')); return;
   }
-  AI_SERVERS_DRAFT.push({name,host,port,provider});
+  AI_SERVERS_DRAFT.push({name,host,port,provider,fleet_host});
   renderAiServers();
   g('ai_name').value=''; g('ai_host').value=''; g('ai_port').value='';
   showAiStatus('info', I18N.t('general.ai_added','Added — saving…'));
-  persistAiServers().then(()=> showAiStatus('ok', I18N.t('general.ai_saved','Saved — it will appear in the AI Models tab within one sample (~10 s).')));
+  persistAiServers().then(()=> showAiStatus('ok',
+    fleet_host==='local'
+      ? I18N.t('general.ai_saved','Saved — it will appear in the AI Models tab within one sample (~10 s).')
+      : I18N.tf('general.ai_saved_host','Saved — it will appear under {h} in the AI Models tab within one sample (~10 s).',{h:fleet_host})));
+}
+// Deep link from a host's AI Models tab ("register a custom server for this
+// host"): open Settings → General with Runs-on already pointing at that host.
+function openAiServerForHost(host){
+  showTab('alerts');
+  setSettingsPane('general');
+  loadAiFleetHosts();
+  const sel=document.getElementById('ai_fleet_host');
+  if(sel){
+    if([...sel.options].some(o=>o.value===host)) sel.value=host;
+    sel.focus();
+  }
 }
 
 // ── Routing rules ─────────────────────────────────────────────────────────────
@@ -6913,6 +6961,7 @@ function applyFleet(j){
   if(!j || !j.hosts) return;
   FLEET = j;
   renderHostBar();
+  loadAiFleetHosts();   // the "Runs on" picker mirrors the pill bar
   if(TAB==='overview'){ renderFleet(); renderMissionControl(); }
   // The Host tab renders a remote entirely from FLEET, so a push refreshes a
   // remote box's KPIs as soon as its poll lands. renderGpuTab is deliberately
@@ -8859,7 +8908,9 @@ function describeMissingCapability(tabId){
       if(tabId === 'models'){
         return {ic:'🤖',
           title:`No AI models reported on ${CURRENT_HOST} yet`,
-          detail:`The probe reads the host's own AI servers each poll — ollama on 127.0.0.1:11434, plus vLLM, llama.cpp, LM Studio and friends on their standard ports. Start one there and its models appear within seconds.`};
+          detail:`The probe reads the host's own AI servers each poll — ollama on 127.0.0.1:11434, plus vLLM, llama.cpp, LM Studio and friends on their standard ports. Start one there and its models appear within seconds.`,
+          link:{text:I18N.t('models.add_custom_link','Register a custom AI server for this host →'),
+                action:()=>openAiServerForHost(CURRENT_HOST)}};
       }
       return {ic:'🛠️',
         title:`Waiting for ${CURRENT_HOST}'s per-GPU data`,
@@ -9135,11 +9186,16 @@ function paintRemoteModels(sec, host, mine){
       <td style="width:42%"><span class="mini" style="width:${Math.max(2,pct)}%;background:${tint(pct)}"></span></td></tr>`;
   }).join('') || `<tr><td class="muted" colspan="3">${I18N.t('rmod.none','Nothing loaded right now — the installed models below are idle.')}</td></tr>`;
   box.innerHTML =
-    `<div class="card"><h2>🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
-      <div class="grid" style="grid-template-columns:1fr 1fr">${kpis}</div>
+    `<div class="card"><div style="display:flex;align-items:center;gap:10px">
+        <h2 style="margin:0">🧠 ${I18N.tf('rmod.title','AI models on {host}',{host:esc(host)})}</h2>
+        <button type="button" class="btn-mini rmod-add" style="margin-left:auto"
+          title="${I18N.t('rmod.add_server_title','Register a server this probe doesn\'t see — e.g. a vLLM on a non-standard port. The hub probes it; its models show here.')}">+ ${I18N.t('rmod.add_server','Add custom server')}</button>
+      </div>
+      <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:12px">${kpis}</div>
       <table style="margin-top:12px"><tbody>${rows}</tbody></table>
-      <p class="cap">${I18N.t('rmod.cap','Read on the host itself: ollama\'s resident set with live VRAM, plus any other recognised AI server answering on its standard port. The per-model VRAM timeline stays hub-only for now.')}</p>
+      <p class="cap">${I18N.t('rmod.cap','Read on the host itself: ollama\'s resident set with live VRAM, plus any other recognised AI server answering on its standard port and any custom server registered for this host. The per-model VRAM timeline stays hub-only for now.')}</p>
     </div>`;
+  box.querySelector('.rmod-add').onclick=()=>openAiServerForHost(host);
   applyIcons(box);
 }
 
@@ -9154,8 +9210,13 @@ function showScopeNotice(sec, tabId){
     sec.insertBefore(notice, sec.firstChild);
   }
   const m = describeMissingCapability(tabId);
+  // m.link is an optional {text, action} CTA — the models empty state offers
+  // "register a custom AI server for this host" so it isn't a dead end.
+  const link = m.link ? `<br><a href="#" data-scope-link="1">${esc(m.link.text)}</a>` : '';
   notice.innerHTML = `<div class="ic">${m.ic}</div>
-    <div><b>${esc(m.title)}</b><br><span class="muted">${m.detail}</span></div>`;
+    <div><b>${esc(m.title)}</b><br><span class="muted">${m.detail}</span>${link}</div>`;
+  const a = notice.querySelector('[data-scope-link]');
+  if(a && m.link) a.onclick = (e)=>{ e.preventDefault(); m.link.action(); };
 }
 function clearLocalOnlyNotice(tabId){
   const sec = document.querySelector(`section[data-tab="${tabId}"]`);
