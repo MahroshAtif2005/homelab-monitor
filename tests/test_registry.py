@@ -356,7 +356,9 @@ class TestResolveFleetHost(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from backend import collectors
-        cls.resolve = collectors._resolve_fleet_host
+        # A plain module function — call it unbound, `self.resolve(...)` would
+        # hand `self` in as `stored`.
+        cls.resolve = staticmethod(collectors._resolve_fleet_host)
 
     def test_blank_and_local_are_the_hub(self):
         for stored in (None, "", "local"):
