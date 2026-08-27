@@ -54,7 +54,7 @@ try:
 except ImportError:
     _PROM_OK = False
 
-VERSION      = "0.32.0"
+VERSION      = "0.33.0"
 DB_PATH      = os.environ.get("DB_PATH", "/data/gpu.db")
 MCP_IDLE_SEC = 45   # seconds without MCP activity before the pill shows idle
 INTERVAL     = int(os.environ.get("SAMPLE_INTERVAL", "10"))
@@ -903,7 +903,9 @@ def ai_models_now():
         if srv.get("provider") != "ollama":
             continue
         try:
-            rows = probe_ollama(srv.get("ip") or "127.0.0.1")
+            # srv's port is None for container-discovered ollama (probe_ollama
+            # defaults to 11434); custom ollama servers carry their user port.
+            rows = probe_ollama(srv.get("ip") or "127.0.0.1", srv.get("port") or 11434)
         except Exception:
             continue                                # keep the sampler's view for this svc
         if not rows:                                # unreachable/empty → don't blank the tab
@@ -1556,17 +1558,31 @@ def _local_hw():
         hw["machine"] = machine
     # GPU name isn't kept on LATEST (only util/mem), so ask nvidia-smi once (cached).
     try:
-        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+        # Per-card list (index,name,memory.total) so the System tab's Hardware
+        # card can name EVERY card, not just the first — a 2- or 3-card box used
+        # to report only its GPU 0. The legacy single-card gpu_name/gpu_mem_total
+        # are kept (first card) so any older client still renders a GPU line.
+        r = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
                             "--format=csv,noheader,nounits"], capture_output=True, timeout=3)
         if r.returncode == 0:
-            line = r.stdout.decode("utf-8", "replace").splitlines()[0]
-            nm, _, mt = line.partition(",")
-            if nm.strip():
-                hw["gpu_name"] = nm.strip()
-            try:
-                hw["gpu_mem_total"] = int(mt.strip())
-            except ValueError:
-                pass
+            cards = []
+            for line in r.stdout.decode("utf-8", "replace").splitlines():
+                if not line.strip():
+                    continue
+                idx, _, rest = line.partition(",")
+                nm, _, mt = rest.partition(",")
+                try:
+                    mem = int(mt.strip())
+                except ValueError:
+                    mem = None
+                if nm.strip():
+                    cards.append({"idx": int(idx) if idx.strip().isdigit() else len(cards),
+                                  "name": nm.strip(), "mem_total": mem})
+            if cards:
+                hw["gpus"] = cards
+                hw["gpu_name"] = cards[0]["name"]
+                if cards[0]["mem_total"] is not None:
+                    hw["gpu_mem_total"] = cards[0]["mem_total"]
     except Exception:
         pass
     return hw
@@ -4413,6 +4429,12 @@ SETTING_DEFAULTS = {
     # ── Public status page (#217 follow-up) — Settings-driven toggle so it
     # doesn't require an env-var restart to turn on/off ─────────────────────
     "public_status_enabled": "0",     # "0" / "1"
+    # ── Custom AI servers ──────────────────────────────────────────────────
+    # User-registered model servers at an arbitrary host:port (JSON array of
+    # {"name","host","port","provider"}). Auto-discovery only covers the hub's
+    # containers on standard ports and remotes' localhost ollama, so a vLLM
+    # living on another box at a non-standard port needs this to show up.
+    "custom_ai_servers":   "",
     # ── Display preferences ────────────────────────────────────────────────
     "reduced_motion":       "0",      # "0" (default, matches prior behaviour) / "1" — disables gauge animations
 }
@@ -4577,6 +4599,49 @@ def _validate_gpu_alert_settings(updates):
             return f"{what} must be a whole number."
         if not (lo <= n <= hi):
             return f"{what} must be between {lo} and {hi}."
+    return None
+
+def _validate_custom_ai_servers(updates):
+    """Return an error string if custom_ai_servers is malformed, else None.
+
+    Same door-vs-read discipline as the GPU temperature overrides: a silently
+    dropped entry would read as "the server is just down" for the rest of the
+    user's life with this dashboard. Empty value is allowed (it clears the
+    list)."""
+    if "custom_ai_servers" not in updates:
+        return None
+    raw = (updates["custom_ai_servers"] or "").strip()
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return "Custom AI servers must be a JSON array, e.g. [{\"name\":\"vllm\",\"host\":\"vader\",\"port\":8010,\"provider\":\"vllm\"}]."
+    if not isinstance(entries, list) or len(entries) > 20:
+        return "Custom AI servers must be a JSON array of at most 20 entries."
+    known = {key for key, _fn in PROBES}
+    seen = set()
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            return f"Custom AI server #{i + 1} must be an object with name/host/port/provider."
+        name = str(e.get("name") or "").strip()
+        host = str(e.get("host") or "").strip()
+        provider = str(e.get("provider") or "").strip()
+        if not name or len(name) > 60:
+            return f"Custom AI server #{i + 1} needs a name (1-60 characters)."
+        if not host:
+            return f"Custom AI server '{name}' needs a host (hostname or IP)."
+        try:
+            port = int(e.get("port"))
+        except (TypeError, ValueError):
+            return f"Custom AI server '{name}' needs a whole-number port."
+        if not (1 <= port <= 65535):
+            return f"Custom AI server '{name}' port must be between 1 and 65535."
+        if provider not in known:
+            return f"Custom AI server '{name}' has an unknown provider '{provider}'."
+        if (name, host, port) in seen:
+            return f"Custom AI server '{name}' at {host}:{port} is listed twice."
+        seen.add((name, host, port))
     return None
 
 # ── Uptime checks: HTTP/TCP endpoint monitors ──────────────────────────────

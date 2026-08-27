@@ -26,7 +26,8 @@ from concurrent.futures import ThreadPoolExecutor
 from backend.db.repos.samples import rollup_now as _rollup_now
 from backend.db.repos.samples import rollup_net_now as _rollup_net_now
 from backend._heartbeat import heartbeat as _heartbeat, get_heartbeats as _get_heartbeats
-from backend.probes import _match_probe, _match_probe_key, probe_models
+from backend.probes import (_match_probe, _match_probe_key, probe_models,
+                            probe_custom_server, parse_custom_servers)
 
 # Re-export so callers can do `from backend.collectors import _HEARTBEATS, _HEARTBEAT_LOCK`
 # (used by tests that import the heartbeat module directly for isolation assertions).
@@ -262,15 +263,33 @@ def sample_once():
     # expired) or sits between requests still shows up as Idle instead of vanishing.
     # Probes are independent 2 s-timeout HTTP calls, so run them in parallel.
     ai = [c for c in conts if _match_probe(c)]
+    # Plus the user-registered custom servers: auto-discovery only reaches
+    # the hub's containers on standard ports and remotes' localhost ollama, so a
+    # vLLM on another box at a non-standard port needs an explicit entry. A
+    # malformed setting degrades to "no custom servers", never to a broken sample.
+    custom_raw = _app.get_settings().get("custom_ai_servers") or ""
+    custom, _c_err = parse_custom_servers(custom_raw)
+    if _c_err:
+        print(f"custom_ai_servers ignored ({_c_err}): {custom_raw[:120]!r}", flush=True)
+    for s in custom:
+        if any(c["name"] == s["name"] for c in ai):
+            continue                                    # container discovery already covers it
+        ai.append({"name": s["name"], "ip": s["host"], "port": s["port"],
+                   "provider": s["provider"], "image": s["provider"],
+                   "ports": [s["port"]]})
     models = []
     model_catalog = []   # {host, service, provider, model, loaded, vram_mb} — the Installed-models registry (#219)
-    ai_servers = []      # {name, ip, provider} — for the /api/ai/now throttled live re-probe
+    ai_servers = []      # {name, ip, port, provider} — for the /api/ai/now throttled live re-probe
     if ai:
+        def _probe_one(ct):
+            # Containers ride the port-guessing PROBES table; custom descriptors
+            # carry the user's explicit port, so probe_custom_server owns them.
+            return probe_custom_server(ct) if "port" in ct else probe_models(ct)
         with ThreadPoolExecutor(max_workers=min(8, len(ai))) as ex:
-            found_lists = list(ex.map(probe_models, ai))
-        provider_of = {c["name"]: _match_probe_key(c) for c in ai}
+            found_lists = list(ex.map(_probe_one, ai))
+        provider_of = {c["name"]: (c.get("provider") or _match_probe_key(c)) for c in ai}
         ai_servers = [{"name": c["name"], "ip": c.get("ip") or "127.0.0.1",
-                       "provider": provider_of.get(c["name"])} for c in ai]
+                       "port": c.get("port"), "provider": provider_of.get(c["name"])} for c in ai]
         for ct, found in zip(ai, found_lists):
             svc = ct["name"]
             provider = provider_of.get(svc)

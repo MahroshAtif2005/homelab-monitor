@@ -2445,6 +2445,22 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
             <span data-i18n-html="general.reduced_motion_label"><b>Reduced motion</b> — turn off gauge animations, gauges just show the current value.</span>
           </label>
         </div>
+        <div>
+          <div class="card-sub" style="font-weight:600;margin-bottom:2px" data-i18n="general.ai_servers_title" data-i18n-def="🧠 Custom AI servers">🧠 Custom AI servers</div>
+          <p class="cap" style="margin:0 0 8px" data-i18n-html="general.ai_servers_cap" data-i18n-def="Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab and the installed-models registry. Read-only: the monitor never pulls, loads or removes models.">Servers that aren't auto-discovered — a vLLM, llama.cpp, LM Studio or Ollama on another box, or on a non-standard port. Add one and its models appear in the <b>AI Models</b> tab and the installed-models registry. Read-only: the monitor never pulls, loads or removes models.</p>
+          <div id="ai_servers_status" class="ins info" style="display:none;margin:6px 0"></div>
+          <ul id="ai_servers_list" style="list-style:none;margin:0 0 8px;padding:0;display:grid;gap:6px"></ul>
+          <div style="display:grid;grid-template-columns:1.3fr 1.3fr .7fr 1fr auto;gap:8px;align-items:end">
+            <div><div class="flabel" data-i18n="general.ai_name" data-i18n-def="Label">Label</div><input type="text" id="ai_name" class="field" style="width:100%" maxlength="60" placeholder="vllm-vader" data-i18n-attr="placeholder:general.ai_name_ph"></div>
+            <div><div class="flabel" data-i18n="general.ai_host" data-i18n-def="Host">Host</div><input type="text" id="ai_host" class="field" style="width:100%" placeholder="vader or 192.168.1.102" data-i18n-attr="placeholder:general.ai_host_ph"></div>
+            <div><div class="flabel" data-i18n="general.ai_port" data-i18n-def="Port">Port</div><input type="number" id="ai_port" class="field" style="width:100%" min="1" max="65535" step="1" placeholder="8010" data-i18n-attr="placeholder:general.ai_port_ph"></div>
+            <div><div class="flabel" data-i18n="general.ai_provider" data-i18n-def="Type">Type</div>
+              <select id="ai_provider" class="field" style="width:100%"></select>
+              <input type="text" id="ai_provider_other" class="field" style="width:100%;margin-top:6px;display:none" placeholder="provider key" data-i18n-attr="placeholder:general.ai_provider_other_ph">
+            </div>
+            <button class="rb" id="ai_add" type="button" data-i18n="general.ai_add" data-i18n-def="Add">Add</button>
+          </div>
+        </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
           <button class="rb on" id="al_save_general" data-i18n="btn.save">Save</button>
         </div>
@@ -5896,6 +5912,18 @@ async function loadAlerts(){
   document.getElementById('al_retention_days').value = s.retention_days||'180';
   document.getElementById('al_reduced_motion').checked = s.reduced_motion==='1';
   applyReducedMotion(s.reduced_motion==='1');
+  // Custom AI servers — the server is authoritative; only seed the draft once
+  // (first load) so a user mid-typing isn't clobbered by a save-triggered reload.
+  loadAiProviders();
+  if(!Array.isArray(AI_SERVERS_DRAFT)) AI_SERVERS_DRAFT = [];
+  if(!AI_SERVERS_LOADED){
+    let custom=null;
+    try{ custom = s.custom_ai_servers ? JSON.parse(s.custom_ai_servers) : null; }
+    catch(e){ custom=null; }
+    AI_SERVERS_DRAFT = Array.isArray(custom) ? custom : [];
+    AI_SERVERS_LOADED = true;
+    renderAiServers();
+  }
   document.getElementById('al_kwh').value         = s.kwh_price||'';
   document.getElementById('al_currency').value    = s.currency||'$';
   document.getElementById('al_kwh_night').value   = s.kwh_price_night||'';
@@ -6053,6 +6081,10 @@ function collectSettingsBody(){
     gpu_missing_alerts:     document.getElementById('al_gpu_missing').checked ? '1' : '0',
     retention_days:   (v=>{const n=parseInt(v,10);return v.trim()===''?'180':String(isNaN(n)?180:Math.max(1,n));})(document.getElementById('al_retention_days').value),
     reduced_motion:   document.getElementById('al_reduced_motion').checked ? '1' : '0',
+    // Omitted (not sent) until the draft is seeded from the server — an
+    // autosave racing the first load would otherwise POST an empty list and
+    // wipe a server the user hasn't even seen yet.
+    ...(AI_SERVERS_LOADED ? {custom_ai_servers: collectAiServers()} : {}),
     kwh_price:        document.getElementById('al_kwh').value.trim(),
     currency:         document.getElementById('al_currency').value.trim()||'$',
     tariff_mode:      TARIFF_DUAL ? 'dual' : 'single',
@@ -6157,6 +6189,108 @@ async function testAlerts(){
     const fails=(j.results||[]).filter(r=>!r.ok).map(r=>r.channel+': '+r.error).join(' · ');
     showAlertStatus('critical', fails || j.reason || 'Test failed — check your alert channel settings.');
   }
+}
+
+// ── Custom AI servers ─────────────────────────────────────────────────
+// A small, self-contained editor for the custom_ai_servers setting. It keeps the
+// working set in a JS array and persists it as a single JSON field through the
+// same POST /api/settings path as every other setting, so the autosave + Save
+// button + validation all work without any special-casing. The Test button
+// probes from the hub (the browser can't be assumed to reach a private host:port).
+let AI_SERVERS_DRAFT = [];   // working set
+let AI_SERVERS_LOADED = false;   // draft seeded from the server exactly once
+let AI_PROVIDERS_LOADED = false;
+// Curated, human-friendly order for the common servers; the full PROBES key set
+// is fetched server-side and the rest is appended alphabetically under "Other".
+const AI_PROVIDERS_PREFERRED = ['vllm','ollama','lmstudio','lm-studio','llama.cpp','llama-server',
+  'sglang','localai','local-ai','xinference','koboldcpp','mistral-rs','text-generation-inference'];
+async function loadAiProviders(){
+  if(AI_PROVIDERS_LOADED) return;
+  const sel=document.getElementById('ai_provider'); if(!sel) return;
+  let all=[];
+  try{ all = await(await fetch('/api/settings/ai_servers/providers')).json(); }catch(e){ all=[]; }
+  const keys=(all.providers||[]).filter(k=>k!=='other');
+  const pref=AI_PROVIDERS_PREFERRED.filter(k=>keys.includes(k));
+  const rest=keys.filter(k=>!pref.includes(k)).sort();
+  sel.innerHTML = [...pref,...rest,'other'].map(k=>
+    `<option value="${esc(k)}">${k==='other'?I18N.t('general.ai_provider_other_opt','Other…'):k}</option>`).join('');
+  const other=document.getElementById('ai_provider_other');
+  sel.onchange=()=>{ if(other) other.style.display = sel.value==='other' ? '' : 'none'; };
+  AI_PROVIDERS_LOADED = true;
+}
+function aiServerProviderVal(){
+  const sel=document.getElementById('ai_provider'); if(!sel) return '';
+  if(sel.value==='other') return (document.getElementById('ai_provider_other')||{}).value||'';
+  return sel.value;
+}
+function aiServersFromDraft(){
+  return AI_SERVERS_DRAFT.map(s=>({...s}));
+}
+function renderAiServers(){
+  const ul=document.getElementById('ai_servers_list'); if(!ul) return;
+  if(!AI_SERVERS_DRAFT.length){
+    ul.innerHTML=`<li class="muted" style="padding:4px 2px">${I18N.t('general.ai_servers_empty','No custom servers yet — add one below (e.g. a vLLM on another box at a non-standard port).')}</li>`;
+    return;
+  }
+  ul.innerHTML = AI_SERVERS_DRAFT.map((s,i)=>`
+    <li style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 9px;border:1px solid var(--bd);border-radius:8px">
+      <b style="font-size:12px">${esc(s.name)}</b>
+      <span class="muted" style="font-size:12px;font-family:var(--mono)">${esc(s.host)}:${esc(s.port)} · ${esc(s.provider)}</span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button type="button" class="btn-mini" data-ai-test="${i}">${I18N.t('general.ai_test','Test')}</button>
+        <button type="button" class="btn-mini" data-ai-del="${i}" title="${I18N.t('btn.remove','Remove')}">${I18N.t('btn.remove','Remove')}</button>
+      </span>
+    </li>`).join('');
+  ul.querySelectorAll('[data-ai-del]').forEach(b=> b.onclick=()=>{ AI_SERVERS_DRAFT.splice(+b.dataset.aiDel,1); renderAiServers(); });
+  ul.querySelectorAll('[data-ai-test]').forEach(b=> b.onclick=()=> testAiServer(+b.dataset.aiTest, b));
+}
+function showAiStatus(level, text){
+  const el=document.getElementById('ai_servers_status'); if(!el) return;
+  // .ins variants are critical/warning/ok/info (see .ins CSS) — 'warn' maps to warning.
+  el.className = 'ins ' + (level==='info'?'info':level==='ok'?'ok':'warning');
+  el.style.display = text ? '' : 'none';
+  el.textContent = text||'';
+}
+function collectAiServers(){
+  return JSON.stringify(aiServersFromDraft());
+}
+async function testAiServer(i, btn){
+  const s=AI_SERVERS_DRAFT[i]; if(!s) return;
+  showAiStatus('info', I18N.tf('general.ai_testing','Testing {n} at {h}:{p}…',{n:s.name,h:s.host,p:s.port}));
+  if(btn){ btn.disabled=true; }
+  let j;
+  try{ j=await(await fetch('/api/settings/ai_servers/test',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(s)})).json(); }
+  catch(e){ showAiStatus('warn','Test failed: '+e); if(btn) btn.disabled=false; return; }
+  if(btn) btn.disabled=false;
+  if(j.ok){
+    const shown=(j.models||[]).slice(0,5).map(esc).join(', ');
+    showAiStatus('ok', I18N.tf('general.ai_test_ok','{n} reachable — {c} model(s){tr}: {list}',
+      {n:s.name,c:(j.models||[]).length,tr:j.truncated?'…':'',list:shown}));
+  }else{
+    showAiStatus('warn', j.error||'Test failed.');
+  }
+}
+function addAiServer(){
+  const g=id=>document.getElementById(id);
+  const name=(g('ai_name')?.value||'').trim();
+  const host=(g('ai_host')?.value||'').trim();
+  const port=parseInt(g('ai_port')?.value,10);
+  const provider=aiServerProviderVal();
+  if(!name || !host || isNaN(port) || !provider){
+    showAiStatus('warn', I18N.t('general.ai_add_needs','Add needs a label, host, port and type.')); return;
+  }
+  if(!provider.match(/^[a-z0-9._-]+$/i)){
+    showAiStatus('warn', I18N.t('general.ai_bad_provider','Unknown type — pick one from the list.')); return;
+  }
+  if(AI_SERVERS_DRAFT.some(s=>s.name===name && s.host===host && s.port===port)){
+    showAiStatus('warn', I18N.t('general.ai_dup','That server is already in the list.')); return;
+  }
+  AI_SERVERS_DRAFT.push({name,host,port,provider});
+  renderAiServers();
+  g('ai_name').value=''; g('ai_host').value=''; g('ai_port').value='';
+  if(g('ai_provider_other')) g('ai_provider_other').value='';
+  showAiStatus('info', I18N.t('general.ai_added','Added — press Save to apply.'));
 }
 
 // ── Routing rules ─────────────────────────────────────────────────────────────
@@ -8449,13 +8583,26 @@ function renderSysInfo(){
                 hw.threads&&hw.threads+' threads', hw.cpu_mhz_max&&'max '+(hw.cpu_mhz_max/1000).toFixed(2)+' GHz']
                .filter(Boolean).join(' · ');
   const mem = hw.ram_total ? fmtMB(hw.ram_total)+(hw.swap_total?'  (swap '+fmtMB(hw.swap_total)+')':'') : null;
-  const gpu = hw.gpu_name ? esc(hw.gpu_name)+(hw.gpu_mem_total?'  ('+fmtMB(hw.gpu_mem_total)+')':'') : null;
+  // One row per card when the host ships a per-card list (a multi-GPU box used
+  // to report only GPU 0). The list lives in hw.gpus on the hub and Linux
+  // remotes and in the top-level h.gpus on Windows remotes; try both. Fall back
+  // to the legacy single gpu_name / gpu.name field when neither is present.
+  const rawGpus = (Array.isArray(hw.gpus) && hw.gpus.length) ? hw.gpus
+               : (Array.isArray(h.gpus) && h.gpus.length) ? h.gpus : [];
+  const gpus = rawGpus.filter(g=>g && g.name);
+  const singleName = hw.gpu_name || (h.gpu && h.gpu.name);
+  const singleMem  = hw.gpu_mem_total || (h.gpu && h.gpu.mem_total);
+  const gpuRows = gpus.length ? gpus.map((g,i)=>
+    infoRow(gpus.length>1 ? I18N.tf('sys.gpu_n','GPU {n}',{n:g.idx!=null?g.idx:i}) : I18N.t('sys.gpu','GPU'),
+      esc(g.name)+(g.mem_total?'  ('+fmtMB(g.mem_total)+')':''))
+  ) : [infoRow(I18N.t('sys.gpu','GPU'),
+      singleName ? esc(singleName)+(singleMem?'  ('+fmtMB(singleMem)+')':'') : null)];
   const hwh = [
     infoRow(I18N.t('sys.cpu','CPU'),      hw.cpu_model ? esc(hw.cpu_model)+(hw.cpu_vendor?'  ('+esc(hw.cpu_vendor)+')':'') : null),
     infoRow(I18N.t('sys.topology','CPU topology'), topo || null),
     infoRow(I18N.t('sys.memory','Memory'),   mem),
     infoRow(I18N.t('sys.machine','Machine / product'),  hw.machine ? esc(hw.machine) : null),
-    infoRow(I18N.t('sys.gpu','GPU'),      gpu),
+    ...gpuRows,
   ].join('');
   el.innerHTML = `<div class="infogrid">
     ${infoCard(I18N.t('sys.card_system','System'), sys, I18N.t('sys.no_system','No system info reported.'))}
@@ -9388,6 +9535,8 @@ const al_save_costs = document.getElementById('al_save_costs');
 if(al_save_costs) al_save_costs.onclick = saveAlerts;   // both panes persist all settings
 const al_save_general = document.getElementById('al_save_general');
 if(al_save_general) al_save_general.onclick = saveAlerts;
+const ai_add = document.getElementById('ai_add');
+if(ai_add) ai_add.onclick = addAiServer;
 wireAutoSave();   // settings also persist on field focus-out (no Save-button hunt)
 document.getElementById('al_mode_single').onclick = () => setTariffMode(false);
 document.getElementById('al_mode_dual').onclick   = () => setTariffMode(true);
