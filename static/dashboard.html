@@ -2456,7 +2456,6 @@ with homelab.run("my-finetune", params={"lr":2e-4}) as r:
             <div><div class="flabel" data-i18n="general.ai_port" data-i18n-def="Port">Port</div><input type="number" id="ai_port" class="field" style="width:100%" min="1" max="65535" step="1" placeholder="8010" data-i18n-attr="placeholder:general.ai_port_ph"></div>
             <div><div class="flabel" data-i18n="general.ai_provider" data-i18n-def="Type">Type</div>
               <select id="ai_provider" class="field" style="width:100%"></select>
-              <input type="text" id="ai_provider_other" class="field" style="width:100%;margin-top:6px;display:none" placeholder="provider key" data-i18n-attr="placeholder:general.ai_provider_other_ph">
             </div>
             <button class="rb" id="ai_add" type="button" data-i18n="general.ai_add" data-i18n-def="Add">Add</button>
           </div>
@@ -6209,18 +6208,17 @@ async function loadAiProviders(){
   const sel=document.getElementById('ai_provider'); if(!sel) return;
   let all=[];
   try{ all = await(await fetch('/api/settings/ai_servers/providers')).json(); }catch(e){ all=[]; }
-  const keys=(all.providers||[]).filter(k=>k!=='other');
+  const keys=all.providers||[];
   const pref=AI_PROVIDERS_PREFERRED.filter(k=>keys.includes(k));
   const rest=keys.filter(k=>!pref.includes(k)).sort();
-  sel.innerHTML = [...pref,...rest,'other'].map(k=>
-    `<option value="${esc(k)}">${k==='other'?I18N.t('general.ai_provider_other_opt','Other…'):k}</option>`).join('');
-  const other=document.getElementById('ai_provider_other');
-  sel.onchange=()=>{ if(other) other.style.display = sel.value==='other' ? '' : 'none'; };
+  // The list IS the whole recognised set (built server-side from the PROBES
+  // table) — there is no "other", because a provider outside that table has no
+  // probe to dispatch to.
+  sel.innerHTML=[...pref,...rest].map(k=>`<option value="${esc(k)}">${esc(k)}</option>`).join('');
   AI_PROVIDERS_LOADED = true;
 }
 function aiServerProviderVal(){
   const sel=document.getElementById('ai_provider'); if(!sel) return '';
-  if(sel.value==='other') return (document.getElementById('ai_provider_other')||{}).value||'';
   return sel.value;
 }
 function aiServersFromDraft(){
@@ -6280,16 +6278,12 @@ function addAiServer(){
   if(!name || !host || isNaN(port) || !provider){
     showAiStatus('warn', I18N.t('general.ai_add_needs','Add needs a label, host, port and type.')); return;
   }
-  if(!provider.match(/^[a-z0-9._-]+$/i)){
-    showAiStatus('warn', I18N.t('general.ai_bad_provider','Unknown type — pick one from the list.')); return;
-  }
   if(AI_SERVERS_DRAFT.some(s=>s.name===name && s.host===host && s.port===port)){
     showAiStatus('warn', I18N.t('general.ai_dup','That server is already in the list.')); return;
   }
   AI_SERVERS_DRAFT.push({name,host,port,provider});
   renderAiServers();
   g('ai_name').value=''; g('ai_host').value=''; g('ai_port').value='';
-  if(g('ai_provider_other')) g('ai_provider_other').value='';
   showAiStatus('info', I18N.t('general.ai_added','Added — press Save to apply.'));
 }
 
