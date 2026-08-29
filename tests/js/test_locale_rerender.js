@@ -167,17 +167,34 @@ section('disks — cached row signatures are invalidated before repaint');
 
 section('failure isolation — one stale view cannot block the rest');
 {
-  const run = build('services', { fail: ['buildNav', 'renderData'] });
-  let escaped = null;
-  try { run.fire(); } catch (error) { escaped = error; }
-  const actual = names(run);
-  check('renderer failures do not escape the locale event', escaped === null, escaped && escaped.message);
-  check('shell work after a failed navigation rebuild still runs',
-    actual.includes('applyTheme') && actual.includes('buildLangSwitch'), JSON.stringify(actual));
-  check('health rendering continues after dashboard data fails',
-    actual.includes('renderHealth'), JSON.stringify(actual));
-  check('the visible tab still renders after earlier failures',
-    actual.includes('renderServicesTab'), JSON.stringify(actual));
+  const cases = [
+    ['buildNav', 'services', 'applyTheme'],
+    ['applyTheme', 'services', 'buildLangSwitch'],
+    ['buildLangSwitch', 'services', 'renderFleet'],
+    ['renderFleet', 'services', 'renderData'],
+    ['renderData', 'services', 'renderHealth'],
+    ['renderHealth', 'services', 'renderServicesTab'],
+    ['renderServicesTab', 'services', null],
+    ['renderExperiments', 'experiments', null],
+    ['renderCosts', 'costs', null],
+    ['renderNetwork', 'network', null],
+    ['renderSecurity', 'security', null],
+    ['loadHosts', 'hosts', null],
+    ['renderDisksTab', 'disks', null],
+  ];
+
+  for (const [failing, tab, nextCall] of cases) {
+    const run = build(tab, { fail: [failing] });
+    let escaped = null;
+    try { run.fire(); } catch (error) { escaped = error; }
+    const actual = names(run);
+    check(`${failing} failure does not escape the locale event`,
+      escaped === null, escaped && escaped.message);
+    if (nextCall) {
+      check(`${nextCall} still runs after ${failing} fails`,
+        actual.includes(nextCall), JSON.stringify(actual));
+    }
+  }
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);
